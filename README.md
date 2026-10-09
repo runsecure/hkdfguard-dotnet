@@ -329,8 +329,9 @@ it requires all of the following:
   user.
 - No component is writable by anyone but its owner. The one exception is root-owned directories
   writable by the `wheel` or `admin` group, as `/Library/Application Support` is.
-- The file's code signature is valid and issued through Apple's CA to the HkdfGuard team
-  (`BQ4343E7W2`).
+- The file's code signature is valid, carries the identifier `libhkdfguard_v1`, and was made with
+  a Developer ID Application certificate issued through Apple's CA to the HkdfGuard team
+  (`MFW3T8R8J3`). A development-signed build, or any other binary the team signs, is refused.
 
 The library's own dependencies are absolute system paths, so `DYLD_LIBRARY_PATH` can't redirect
 them.

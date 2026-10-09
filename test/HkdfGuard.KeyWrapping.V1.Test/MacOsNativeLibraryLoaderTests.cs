@@ -224,8 +224,13 @@ public class MacOsNativeLibraryLoaderTests
     [Fact]
     public void TheCodeRequirement_PinsTheHkdfGuardTeam()
     {
-        Assert.Equal("BQ4343E7W2", MacOsNativeLibraryLoader.TeamId);
-        Assert.Equal("anchor apple generic and certificate leaf[subject.OU] = \"BQ4343E7W2\"", MacOsNativeLibraryLoader.CodeRequirement);
+        Assert.Equal("MFW3T8R8J3", MacOsNativeLibraryLoader.TeamId);
+        Assert.Equal(
+            "identifier \"libhkdfguard_v1\" and anchor apple generic"
+            + " and certificate 1[field.1.2.840.113635.100.6.2.6] exists"
+            + " and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
+            + " and certificate leaf[subject.OU] = \"MFW3T8R8J3\"",
+            MacOsNativeLibraryLoader.CodeRequirement);
     }
 
     [Fact]
@@ -249,7 +254,7 @@ public class MacOsNativeLibraryLoaderTests
     {
         var ex = Assert.Throws<SecurityException>(() => MacOsNativeLibraryLoader.VerifySignature("/x.dylib", (_, _) => osStatus));
 
-        Assert.Contains("BQ4343E7W2", ex.Message);
+        Assert.Contains("MFW3T8R8J3", ex.Message);
         Assert.Contains(osStatus.ToString(), ex.Message);
     }
 
