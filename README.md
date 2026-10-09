@@ -302,7 +302,7 @@ Where each platform's library comes from:
 | Platform | Library | How it is found |
 |---|---|---|
 | Windows | `HkdfGuardV1.dll` | Installed to `%ProgramFiles%\HkdfGuard\v1` and loaded only from there. Not shipped in the package. |
-| macOS | `libhkdfguard_v1.dylib` | Installed system-wide to `/Library/Application Support/HkdfGuard/v1`, or per user to `~/.hkdfguard/v1`, and loaded only from there. Not shipped in the package. |
+| macOS | `libhkdfguard_v1.dylib` | Installed system-wide to `/Library/Application Support/HkdfGuard/v1`, or per user to `~/.hkdfguard/v1`, and loaded only from there. Not shipped in the package. Requires Apple silicon and macOS 13 or later, with an arm64 .NET runtime (not an x64 one under Rosetta). |
 | Linux | `HkdfGuardKeyProtectionLinux` | The runtime's default search. |
 
 The NuGet package contains no native library. Each one is distributed and installed separately,
@@ -322,8 +322,9 @@ a DLL planted on `PATH` or beside the application is never loaded.
 On **macOS**, `MacOsNativeLibraryLoader` uses the system install whenever it exists, and the
 per-user install only when there is no system install. Anything running as the user can write to
 the user's home, so a per-user file must never be able to override a root-owned system one. If the
-system install exists but fails a check, loading fails instead of falling back. Before loading,
-it requires all of the following:
+system install exists but fails a check, loading fails instead of falling back - and so does a
+system install that merely can't be examined (say, a directory this process may not read): only
+"nothing is there" counts as "not installed". Before loading, it requires all of the following:
 - No component of the path, up to `/`, is a symbolic link.
 - Every component of a system install is owned by root; of a user install, by root or the current
   user.
@@ -333,8 +334,12 @@ it requires all of the following:
   a Developer ID Application certificate issued through Apple's CA to the HkdfGuard team
   (`MFW3T8R8J3`). A development-signed build, or any other binary the team signs, is refused.
 
-The library's own dependencies are absolute system paths, so `DYLD_LIBRARY_PATH` can't redirect
-them.
+`dlopen` of an absolute path does not load exactly that path: dyld first looks for the file's
+name in every `DYLD_LIBRARY_PATH` directory, and the `dotnet` host honours `DYLD_*` variables
+despite its hardened runtime. So the loader refuses, before loading, if a `DYLD_LIBRARY_PATH`
+directory contains a `libhkdfguard_v1.dylib`; and after loading it asks dyld which file it really
+mapped, unloading and refusing anything but the verified path. The library's own dependencies are
+absolute system paths and need no such check.
 
 ### 2. Build a `KeyRing`
 

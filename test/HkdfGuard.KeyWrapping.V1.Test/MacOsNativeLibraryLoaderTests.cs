@@ -57,6 +57,48 @@ public class MacOsNativeLibraryLoaderTests
     private static void Verify(Dictionary<string, UnixFileStatus> filesystem, string path, uint[] owners)
         => MacOsNativeLibraryLoader.VerifyLocation(path, p => filesystem[p], owners);
 
+    // --- Platform -------------------------------------------------------------------------------
+
+    [Theory]
+    [InlineData(13, 0)]
+    [InlineData(15, 4)]
+    [InlineData(26, 0)]
+    public void RequireSupportedPlatform_AcceptsArm64_OnMacOs13OrLater(int major, int minor)
+    {
+        MacOsNativeLibraryLoader.RequireSupportedPlatform(Architecture.Arm64, new Version(major, minor));
+    }
+
+    [Fact]
+    public void RequireSupportedPlatform_RefusesX64_NamingRosetta()
+    {
+        var ex = Assert.Throws<PlatformNotSupportedException>(() =>
+            MacOsNativeLibraryLoader.RequireSupportedPlatform(Architecture.X64, new Version(15, 0)));
+
+        Assert.Contains("Apple silicon", ex.Message);
+        Assert.Contains("Rosetta", ex.Message);
+    }
+
+    [Theory]
+    [InlineData(Architecture.X86)]
+    [InlineData(Architecture.Arm)]
+    public void RequireSupportedPlatform_RefusesEveryOtherArchitecture(Architecture architecture)
+    {
+        var ex = Assert.Throws<PlatformNotSupportedException>(() =>
+            MacOsNativeLibraryLoader.RequireSupportedPlatform(architecture, new Version(15, 0)));
+
+        Assert.Contains(architecture.ToString(), ex.Message);
+    }
+
+    [Fact]
+    public void RequireSupportedPlatform_RefusesMacOsOlderThan13()
+    {
+        var ex = Assert.Throws<PlatformNotSupportedException>(() =>
+            MacOsNativeLibraryLoader.RequireSupportedPlatform(Architecture.Arm64, new Version(12, 7, 6)));
+
+        Assert.Contains("macOS 13", ex.Message);
+        Assert.Contains("12.7.6", ex.Message);
+    }
+
     // --- Locations ------------------------------------------------------------------------------
 
     [Fact]
@@ -67,24 +109,57 @@ public class MacOsNativeLibraryLoaderTests
         Assert.Equal("/Users/dev/.hkdfguard/v1/libhkdfguard_v1.dylib", MacOsNativeLibraryLoader.UserPath("/Users/dev/"));
     }
 
+    // lstat results for ChoosePath's probe.
+    private const int Present = 0;
+    private const int ENOENT = 2;
+    private const int EACCES = 13;
+    private const int ENOTDIR = 20;
+
     [Fact]
     public void ChoosePath_PrefersTheSystemInstall_EvenWhenAUserInstallExists()
     {
-        var (path, isSystem) = MacOsNativeLibraryLoader.ChoosePath(_ => true, Home);
+        var (path, isSystem) = MacOsNativeLibraryLoader.ChoosePath(_ => Present, Home);
 
         Assert.Equal(MacOsNativeLibraryLoader.SystemPath, path);
         Assert.True(isSystem);
     }
 
-    [Fact]
-    public void ChoosePath_UsesTheUserInstall_OnlyWhenThereIsNoSystemInstall()
+    [Theory]
+    [InlineData(ENOENT)]
+    [InlineData(ENOTDIR)] // a parent of the system path is a file: still just "not there"
+    public void ChoosePath_UsesTheUserInstall_OnlyWhenThereIsNoSystemInstall(int systemErrno)
     {
         var user = MacOsNativeLibraryLoader.UserPath(Home);
 
-        var (path, isSystem) = MacOsNativeLibraryLoader.ChoosePath(p => p == user, Home);
+        var (path, isSystem) = MacOsNativeLibraryLoader.ChoosePath(p => p == user ? Present : systemErrno, Home);
 
         Assert.Equal(user, path);
         Assert.False(isSystem);
+    }
+
+    [Theory]
+    [InlineData(EACCES)] // e.g. root installed HkdfGuard/ as 0700: the install exists but can't be seen
+    [InlineData(62)]     // ELOOP
+    [InlineData(5)]      // EIO
+    public void ChoosePath_WhenTheSystemInstallCannotBeExamined_RefusesInsteadOfFallingBack(int errno)
+    {
+        var probed = new List<string>();
+
+        var ex = Assert.Throws<SecurityException>(() =>
+            MacOsNativeLibraryLoader.ChoosePath(p => { probed.Add(p); return errno; }, Home));
+
+        Assert.Contains(MacOsNativeLibraryLoader.SystemPath, ex.Message);
+        Assert.Contains($"errno {errno}", ex.Message);
+        Assert.Equal([MacOsNativeLibraryLoader.SystemPath], probed); // the user install was never even considered
+    }
+
+    [Fact]
+    public void ChoosePath_WhenTheUserInstallCannotBeExamined_Refuses()
+    {
+        var ex = Assert.Throws<SecurityException>(() =>
+            MacOsNativeLibraryLoader.ChoosePath(p => p == MacOsNativeLibraryLoader.SystemPath ? ENOENT : EACCES, Home));
+
+        Assert.Contains(MacOsNativeLibraryLoader.UserPath(Home), ex.Message);
     }
 
     [Theory]
@@ -94,7 +169,7 @@ public class MacOsNativeLibraryLoaderTests
     public void ChoosePath_WithNeitherInstallUsable_ThrowsNamingBothLocations(string home)
     {
         var ex = Assert.Throws<DllNotFoundException>(() =>
-            MacOsNativeLibraryLoader.ChoosePath(p => !p.StartsWith('/') && p.EndsWith(".dylib"), home));
+            MacOsNativeLibraryLoader.ChoosePath(p => !p.StartsWith('/') && p.EndsWith(".dylib") ? Present : ENOENT, home));
 
         Assert.Contains(MacOsNativeLibraryLoader.SystemPath, ex.Message);
         Assert.Contains(".hkdfguard/v1/libhkdfguard_v1.dylib", ex.Message);
@@ -256,6 +331,72 @@ public class MacOsNativeLibraryLoaderTests
 
         Assert.Contains("MFW3T8R8J3", ex.Message);
         Assert.Contains(osStatus.ToString(), ex.Message);
+    }
+
+    // --- What dyld loads ------------------------------------------------------------------------
+    // dlopen("/abs/path/libX.dylib") first looks for libX.dylib in each DYLD_LIBRARY_PATH directory.
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("/opt/lib:/usr/local/lib")] // set, but no libhkdfguard_v1.dylib in either
+    public void RefuseShadowing_AllowsLoading_WhenNothingOnDyldLibraryPathHasTheLibrarysName(string? searchPath)
+    {
+        MacOsNativeLibraryLoader.RefuseShadowing(_ => searchPath, _ => false);
+    }
+
+    [Theory]
+    [InlineData("/tmp/decoy", "/tmp/decoy/libhkdfguard_v1.dylib")]
+    [InlineData("/opt/lib:/tmp/decoy/:/usr/local/lib", "/tmp/decoy/libhkdfguard_v1.dylib")] // any entry; a trailing slash is fine
+    public void RefuseShadowing_Refuses_WhenADyldLibraryPathDirectoryHoldsALibraryOfTheSameName(string searchPath, string decoy)
+    {
+        var ex = Assert.Throws<SecurityException>(() =>
+            MacOsNativeLibraryLoader.RefuseShadowing(_ => searchPath, p => p == decoy));
+
+        Assert.Contains(decoy, ex.Message);
+        Assert.Contains("DYLD_LIBRARY_PATH", ex.Message);
+    }
+
+    [Fact]
+    public void RefuseShadowing_OnlyConsultsDyldLibraryPath()
+    {
+        var asked = new List<string>();
+
+        MacOsNativeLibraryLoader.RefuseShadowing(name => { asked.Add(name); return null; }, _ => true);
+
+        Assert.Equal(["DYLD_LIBRARY_PATH"], asked);
+    }
+
+    [Fact]
+    public void VerifyLoadedImage_Accepts_TheVerifiedPath()
+    {
+        MacOsNativeLibraryLoader.VerifyLoadedImage(MacOsNativeLibraryLoader.SystemPath, MacOsNativeLibraryLoader.SystemPath);
+    }
+
+    [Fact]
+    public void VerifyLoadedImage_Refuses_WhenDyldLoadedAnotherFile()
+    {
+        var ex = Assert.Throws<SecurityException>(() =>
+            MacOsNativeLibraryLoader.VerifyLoadedImage(MacOsNativeLibraryLoader.SystemPath, "/tmp/decoy/libhkdfguard_v1.dylib"));
+
+        Assert.Contains("/tmp/decoy/libhkdfguard_v1.dylib", ex.Message);
+        Assert.Contains(MacOsNativeLibraryLoader.SystemPath, ex.Message);
+        Assert.Contains("unloaded", ex.Message);
+    }
+
+    [Fact]
+    public void VerifyLoadedImage_Refuses_WhenTheLoadedFileHasNoProbeExport()
+    {
+        var ex = Assert.Throws<SecurityException>(() =>
+            MacOsNativeLibraryLoader.VerifyLoadedImage(MacOsNativeLibraryLoader.SystemPath, null));
+
+        Assert.Contains(MacOsNativeLibraryLoader.ProbeExport, ex.Message);
+    }
+
+    [Fact]
+    public void TheProbeExport_IsOneTheBindingCalls()
+    {
+        Assert.Equal("hkdfguard_wrap_dek", MacOsNativeLibraryLoader.ProbeExport);
     }
 
     [Theory]
