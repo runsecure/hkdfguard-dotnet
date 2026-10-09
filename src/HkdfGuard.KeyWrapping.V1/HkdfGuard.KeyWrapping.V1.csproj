@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="HkdfGuard.KeyWrapping.V1.Test" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HkdfGuard.Abstractions\HkdfGuard.Abstractions.csproj" />
+    <ProjectReference Include="..\HkdfGuard.Diagnostics\HkdfGuard.Diagnostics.csproj" />
+  </ItemGroup>
+
+  <!--
+    No native library is packed into this package. Each platform's native KMS library is installed
+    separately, to a fixed location, and loaded only from there after verification:
+      Windows: %ProgramFiles%\HkdfGuard\v1\HkdfGuardV1.dll        (WindowsNativeLibraryLoader)
+      macOS:   /Library/Application Support/HkdfGuard/v1/libhkdfguard_v1.dylib, or
+               ~/.hkdfguard/v1/libhkdfguard_v1.dylib               (MacOsNativeLibraryLoader)
+    The runtimes/ folder holds the macOS release artifacts and their SHA256SUMS for reference;
+    NativeRuntimesTests keeps them byte-exact, but nothing here ships or loads them.
+  -->
+
+</Project>

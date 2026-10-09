@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- WindowsKekProbe calls the native library's hkdfguard_kek_exists through a function pointer. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\HkdfGuard.KeyWrapping.V1\HkdfGuard.KeyWrapping.V1.csproj" />
+    <!-- End-to-end tests only: the full deployment and runtime paths over the real native KEK. -->
+    <ProjectReference Include="..\..\src\HkdfGuard.DataEncryptionKey\HkdfGuard.DataEncryptionKey.csproj" />
+    <ProjectReference Include="..\..\src\HkdfGuard.CryptoProvider.AesGcm256\HkdfGuard.CryptoProvider.AesGcm256.csproj" />
+    <ProjectReference Include="..\..\src\HkdfGuard.EncryptedConfiguration\HkdfGuard.EncryptedConfiguration.csproj" />
+    <ProjectReference Include="..\..\src\HkdfGuard.Cache\HkdfGuard.Cache.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="HkdfGuard.CryptoProvider.AesGcm256.Test" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HkdfGuard.Abstractions\HkdfGuard.Abstractions.csproj" />
+    <ProjectReference Include="..\HkdfGuard.Diagnostics\HkdfGuard.Diagnostics.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,24 @@
+<Project>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!-- Every package is licensed under the Mozilla Public License 2.0 (see LICENSE). -->
+  <PropertyGroup>
+    <PackageLicenseExpression>MPL-2.0</PackageLicenseExpression>
+  </PropertyGroup>
+
+  <!-- Every *.Test project shares these: not packable, and xUnit's own API available without a
+       per-file using directive. -->
+  <PropertyGroup Condition="$(MSBuildProjectName.EndsWith('.Test'))">
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup Condition="$(MSBuildProjectName.EndsWith('.Test'))">
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+</Project>

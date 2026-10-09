@@ -1,0 +1,7 @@
+# Native KMS artifacts are byte-exact: each runtimes/<rid>/SHA256SUMS publishes their hashes, and
+# a line-ending conversion on checkout (core.autocrlf) would silently invalidate them. Never
+# convert anything under a runtimes folder.
+**/runtimes/** -text
+*.dll binary
+*.dylib binary
+*.so binary
