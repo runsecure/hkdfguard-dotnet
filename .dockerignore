@@ -1,0 +1,3 @@
+# Native KMS libraries are never deployed with these packages or this image: each is installed
+# separately on the target host and resolved there. Keep any local copies out of the build context.
+**/runtimes/

@@ -55,3 +55,14 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+#idea IntelliJ files
+.idea/
+
+#dotnet user files
+*.user
+**/.DS_Store
+
+# Native release artifacts (e.g. src/HkdfGuard.KeyWrapping.V1/runtimes/) are distributed and
+# installed separately, never committed. Matches a runtimes folder at any depth.
+runtimes/

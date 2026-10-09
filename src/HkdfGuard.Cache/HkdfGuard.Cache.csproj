@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\HkdfGuard.Abstractions\HkdfGuard.Abstractions.csproj" />
+    <ProjectReference Include="..\HkdfGuard.Diagnostics\HkdfGuard.Diagnostics.csproj" />
+  </ItemGroup>
+
+</Project>
