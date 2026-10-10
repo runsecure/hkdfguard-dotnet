@@ -328,6 +328,9 @@ On **Windows**, before mapping it, `WindowsNativeLibraryLoader` requires all of 
 - No folder on its path is a symlink or junction.
 - The file and every parent folder below the drive root are owned and writable only by SYSTEM,
   Administrators or TrustedInstaller.
+- The drive root has a trusted owner and lets no one else rename or delete a folder directly
+  beneath it (delete-child, or the right to change its ACL or owner). Creating new folders there,
+  which a default `C:\` allows every user, is permitted.
 - The file has a valid, trusted Authenticode signature from the expected publisher. The chain
   WinVerifyTrust validated must end at the pinned Azure Artifact Signing root (Microsoft Identity
   Verification Root Certificate Authority 2020, matched by SHA-256, not by name). The signing
@@ -336,6 +339,9 @@ On **Windows**, before mapping it, `WindowsNativeLibraryLoader` requires all of 
   a user added to their own certificate store. The leaf and intermediate certificates are not
   pinned, because Artifact Signing reissues them often. No revocation check or certificate download
   is made, so loading never touches the network.
+- The signed PE header marks the file as a DLL for the process's architecture. The publisher's
+  other signed binaries, such as `hkdfguard-v1-initialize.exe`, pass the signature checks, so
+  this check is what refuses one renamed into place.
 
 Its dependencies are then loaded from System32 only. Any failed check throws, with no fallback, so
 a DLL planted on `PATH` or beside the application is never loaded.
@@ -493,7 +499,9 @@ its secret identifier, so the value only decrypts under the key it was written f
 string into a less-privileged setting.
 
 The purpose is `HkdfGuard.EncryptedConfiguration:` plus the key with ASCII letters `a-z`
-upper-cased and every other character left as it is; its UTF-8 bytes are the AAD. Every language
+upper-cased and every other character left as it is; its UTF-8 bytes are the AAD. A key that isn't
+valid UTF-16 (one holding an unpaired surrogate) is refused, as protector and cache names are,
+because encoding it would substitute U+FFFD and give different keys the same AAD. Every language
 port implements this same rule, so a value encrypted by one decrypts in another. Keys differing only
 in ASCII case share a purpose, as they do in configuration. Keys differing in non-ASCII case, such
 as `café` and `CAFÉ`, never do: reading such a value under the other spelling fails authentication

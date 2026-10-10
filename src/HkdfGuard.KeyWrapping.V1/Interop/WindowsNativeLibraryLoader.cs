@@ -1,3 +1,4 @@
+using System.Reflection.PortableExecutable;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Security;
@@ -13,7 +14,7 @@ namespace HkdfGuard.KeyWrapping.V1.Interop;
 /// library receives every plaintext DEK on unwrap and chooses every "random" DEK on
 /// generate-and-wrap, so loading an impostor would hand over every key. The default P/Invoke
 /// probe would search the application directory and then PATH; this loader replaces that with
-/// four checks, all of which must pass before the file is mapped:
+/// five checks, all of which must pass before the file is mapped:
 /// <list type="number">
 /// <item>The file exists at <c>%ProgramFiles%\HkdfGuard\v1\HkdfGuardV1.dll</c>. The Program Files
 /// location comes from the Windows known-folder registry setting, which only an administrator can
@@ -23,11 +24,16 @@ namespace HkdfGuard.KeyWrapping.V1.Interop;
 /// writable.</item>
 /// <item>Every one of those components is owned by, and writable only by, SYSTEM, Administrators,
 /// or TrustedInstaller - so nobody without administrative rights could have replaced the file,
-/// renamed a parent folder, or rewritten an ACL to allow either.</item>
+/// renamed a parent folder, or rewritten an ACL to allow either. The drive root is held only to
+/// what could rename the folder beneath it: a trusted owner, and delete-child or ACL rights for
+/// trusted principals alone.</item>
 /// <item>The file carries a valid Authenticode signature issued to <see cref="ExpectedPublisher"/>
 /// for code signing under HkdfGuard's Artifact Signing profile (<see cref="ExpectedProfileEku"/>),
 /// whose chain - as WinVerifyTrust validated it - ends at the pinned root
 /// <see cref="ExpectedRootSha256"/>.</item>
+/// <item>Its PE header - covered by that signature - marks it a DLL for this process's
+/// architecture. Everything the HkdfGuard profile signs passes the signer checks, so this refuses
+/// its other binaries, such as hkdfguard-v1-initialize.exe renamed into place.</item>
 /// </list>
 /// The library's own dependencies are then resolved from System32 only. Any failed check throws;
 /// there is deliberately no fallback to the default search and no override of the path.
@@ -94,6 +100,16 @@ internal static class WindowsNativeLibraryLoader
                                                  | FileSystemRights.ChangePermissions
                                                  | FileSystemRights.TakeOwnership;
 
+    private const int GuardedRights = (int)WriteRights | GenericAll | GenericWrite;
+
+    // On the drive root, only what lets a principal rename or delete an entry directly beneath it -
+    // delete-child, or taking over the ACL to grant it. Creating new entries there (Authenticated
+    // Users may, on a default C:\) can't affect this path, and GENERIC_WRITE doesn't include any of these.
+    private const int GuardedRootRights = (int)(FileSystemRights.DeleteSubdirectoriesAndFiles
+                                                | FileSystemRights.ChangePermissions
+                                                | FileSystemRights.TakeOwnership)
+                                          | GenericAll;
+
     private static readonly Lock Gate = new();
     private static IntPtr _handle;
 
@@ -126,6 +142,7 @@ internal static class WindowsNativeLibraryLoader
 
         VerifyLocation(path);
         VerifySignature(path, expectedPublisher);
+        VerifyImageKind(path);
 
         // Absolute path, so no probing for the library itself; its own imports (kernel32,
         // advapi32, ncrypt) come from System32 only, never the application directory or PATH.
@@ -134,7 +151,9 @@ internal static class WindowsNativeLibraryLoader
 
     /// <summary>
     /// Checks the file and each parent folder below the drive root: not a reparse point, and
-    /// owned and writable only by trusted principals.
+    /// owned and writable only by trusted principals. The drive root itself must be owned by a
+    /// trusted principal and let no one else rename or delete what's directly beneath it - delete-
+    /// child on a folder renames any child, whatever the child's own ACL says.
     /// </summary>
     /// <exception cref="SecurityException">A path component failed a check.</exception>
     internal static void VerifyLocation(string path)
@@ -144,7 +163,11 @@ internal static class WindowsNativeLibraryLoader
         {
             var parent = item is FileInfo file ? file.Directory : ((DirectoryInfo)item).Parent;
             if (parent is null)
-                break; // the drive root itself: renaming beneath it needs rights on the child, checked below
+            {
+                var rootSecurity = ((DirectoryInfo)item).GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access);
+                VerifyDriveRoot(rootSecurity, item.FullName);
+                break;
+            }
 
             VerifyNotReparsePoint(item);
             var security = item is FileInfo f
@@ -170,6 +193,16 @@ internal static class WindowsNativeLibraryLoader
     /// </summary>
     /// <exception cref="SecurityException">The owner is untrusted, or an untrusted principal can write.</exception>
     internal static void VerifyTrustedOnly(FileSystemSecurity security, string displayPath)
+        => VerifyTrustedOnly(security, displayPath, GuardedRights);
+
+    /// <summary>
+    /// The drive root's form of <see cref="VerifyTrustedOnly(FileSystemSecurity, string)"/>: only
+    /// the rights that could rename or delete an entry beneath it are refused.
+    /// </summary>
+    internal static void VerifyDriveRoot(FileSystemSecurity security, string displayPath)
+        => VerifyTrustedOnly(security, displayPath, GuardedRootRights);
+
+    private static void VerifyTrustedOnly(FileSystemSecurity security, string displayPath, int guardedRights)
     {
         var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
         if (owner is null || !IsTrusted(owner))
@@ -183,7 +216,7 @@ internal static class WindowsNativeLibraryLoader
                 continue;
 
             var rights = (int)rule.FileSystemRights;
-            var grantsWrite = (rights & ((int)WriteRights | GenericAll | GenericWrite)) != 0;
+            var grantsWrite = (rights & guardedRights) != 0;
             if (grantsWrite && !IsTrusted((SecurityIdentifier)rule.IdentityReference))
                 throw new SecurityException(
                     $"'{displayPath}' grants {rule.FileSystemRights} to {Describe(rule.IdentityReference)}; the HkdfGuard native library is only loaded from a location that only SYSTEM, Administrators, or TrustedInstaller can modify.");
@@ -284,6 +317,50 @@ internal static class WindowsNativeLibraryLoader
                     element.Certificate.Dispose();
             }
         }
+    }
+
+    /// <summary>
+    /// Requires the file's PE header to mark it a DLL built for this process's architecture. Run
+    /// after <see cref="VerifySignature(string, string)"/>, whose hash covers the header.
+    /// </summary>
+    /// <exception cref="SecurityException">It isn't, or the header can't be read.</exception>
+    internal static void VerifyImageKind(string path)
+    {
+        Characteristics characteristics;
+        Machine machine;
+        try
+        {
+            using var stream = File.OpenRead(path);
+            using var reader = new PEReader(stream);
+            var header = reader.PEHeaders.CoffHeader;
+            (characteristics, machine) = (header.Characteristics, header.Machine);
+        }
+        catch (Exception e) when (e is not SecurityException)
+        {
+            throw new SecurityException($"Could not read the PE header of '{path}'; refusing to load it.", e);
+        }
+
+        VerifyImageKind(path, characteristics, machine, RuntimeInformation.ProcessArchitecture);
+    }
+
+    /// <summary>The policy half of <see cref="VerifyImageKind(string)"/>.</summary>
+    /// <exception cref="SecurityException">Not a DLL, or not for <paramref name="processArchitecture"/>.</exception>
+    internal static void VerifyImageKind(string path, Characteristics characteristics, Machine machine, Architecture processArchitecture)
+    {
+        if (!characteristics.HasFlag(Characteristics.Dll))
+            throw new SecurityException(
+                $"'{path}' is signed by the HkdfGuard publisher but is not a DLL (an executable renamed into place?); refusing to load it.");
+
+        Machine? expected = processArchitecture switch
+        {
+            Architecture.X64 => Machine.Amd64,
+            Architecture.Arm64 => Machine.Arm64,
+            Architecture.X86 => Machine.I386,
+            _ => null,
+        };
+        if (machine != expected)
+            throw new SecurityException(
+                $"'{path}' is built for {machine}, but this is a {processArchitecture} process; refusing to load it.");
     }
 
     private static bool IsTrusted(SecurityIdentifier sid) => Array.IndexOf(TrustedPrincipals, sid) >= 0;

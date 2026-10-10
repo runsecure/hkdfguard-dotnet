@@ -334,7 +334,8 @@ public sealed class KeyRing(IEncryptedFormatProvider formatProvider) : IKeyRing,
     /// <exception cref="ArgumentException">name is null or empty - an empty purpose binds nothing,
     /// and would match anything else encrypted without AAD - or starts with
     /// ProtectedCacheBase.AadPrefix, whose AADs are ProtectedCache's alone: a protector named that
-    /// way could decrypt cache entries, and produce values a cache would accept</exception>
+    /// way could decrypt cache entries, and produce values a cache would accept - or isn't valid
+    /// UTF-16 (an unpaired surrogate), which has no unambiguous AAD</exception>
     public IDataProtector CreateProtector(string name)
     {
         ArgumentException.ThrowIfNullOrEmpty(name);

@@ -59,6 +59,18 @@ public class AesGcmPipelineDataProtectorTests
         Assert.Throws<ArgumentException>(() => protector.Decrypt(formatted, "", new char[16]));
     }
 
+    [Fact]
+    public void EncryptAndDecrypt_WithASecretIdentifierThatIsNotValidUtf16_Throw()
+    {
+        // The reading side, ProtectedConfigurationRoot, refuses such a key too, so nothing written
+        // here could ever be read back.
+        using var protector = Create();
+        var formatted = protector.Encrypt("hello", Id);
+
+        Assert.ThrowsAny<ArgumentException>(() => protector.Encrypt("hello", "Key\uD800"));
+        Assert.ThrowsAny<ArgumentException>(() => protector.Decrypt(formatted, "Key\uD800", new char[16]));
+    }
+
     [Theory]
     [InlineData("pipeline:secret")]
     [InlineData("PIPELINE:SECRET")]

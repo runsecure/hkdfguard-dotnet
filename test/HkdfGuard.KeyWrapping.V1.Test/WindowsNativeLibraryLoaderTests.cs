@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Reflection.PortableExecutable;
+using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Security;
 using System.Security.AccessControl;
@@ -142,6 +144,118 @@ public class WindowsNativeLibraryLoaderTests
         security.SetSecurityDescriptorSddlForm("O:SYD:(D;;FW;;;BU)(A;;FA;;;SY)(A;OICIIO;FA;;;BU)(A;;FR;;;BU)");
 
         WindowsNativeLibraryLoader.VerifyTrustedOnly(security, "test");
+    }
+
+    [WindowsFact]
+    public void VerifyDriveRoot_ADefaultSystemDriveAcl_Passes()
+    {
+        // As a default C:\: Authenticated Users may create folders in the root (0x4, AD) and get
+        // Modify on what they create (inherit-only) - neither lets them rename an existing folder.
+        var security = new DirectorySecurity();
+        security.SetSecurityDescriptorSddlForm("O:SYD:(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)(A;OICIIO;SDGXGWGR;;;AU)(A;;0x4;;;AU)");
+
+        WindowsNativeLibraryLoader.VerifyDriveRoot(security, "C:\\");
+    }
+
+    [WindowsTheory]
+    [InlineData("0x40")] // FILE_DELETE_CHILD: rename or delete any folder beneath, e.g. Program Files
+    [InlineData("WD")]   // WRITE_DAC: grant itself delete-child
+    [InlineData("WO")]   // WRITE_OWNER: take ownership, then the same
+    [InlineData("GA")]   // GENERIC_ALL
+    [InlineData("FA")]   // FILE_ALL_ACCESS
+    public void VerifyDriveRoot_ARightThatCouldRenameAFolderBeneath_IsRefused(string right)
+    {
+        var security = new DirectorySecurity();
+        security.SetSecurityDescriptorSddlForm($"O:SYD:(A;OICI;FA;;;SY)(A;;{right};;;BU)");
+
+        var ex = Assert.Throws<SecurityException>(() => WindowsNativeLibraryLoader.VerifyDriveRoot(security, "C:\\"));
+
+        Assert.Contains(Users.Value, ex.Message);
+    }
+
+    [WindowsTheory]
+    [InlineData("0x1")] // FILE_ADD_FILE
+    [InlineData("0x4")] // FILE_ADD_SUBDIRECTORY
+    [InlineData("GW")]  // GENERIC_WRITE maps to neither delete-child nor ACL rights
+    public void VerifyDriveRoot_RightsThatOnlyCreateNewEntries_AreAllowed(string right)
+    {
+        var security = new DirectorySecurity();
+        security.SetSecurityDescriptorSddlForm($"O:SYD:(A;OICI;FA;;;SY)(A;;{right};;;BU)");
+
+        WindowsNativeLibraryLoader.VerifyDriveRoot(security, "C:\\");
+    }
+
+    [WindowsFact]
+    public void VerifyDriveRoot_AnUntrustedOwner_IsRefused()
+    {
+        var security = new DirectorySecurity();
+        security.SetSecurityDescriptorSddlForm("O:BUD:(A;OICI;FA;;;SY)");
+
+        Assert.Throws<SecurityException>(() => WindowsNativeLibraryLoader.VerifyDriveRoot(security, "C:\\"));
+    }
+
+    [WindowsTheory]
+    [InlineData(Architecture.X64, Machine.Amd64)]
+    [InlineData(Architecture.Arm64, Machine.Arm64)]
+    [InlineData(Architecture.X86, Machine.I386)]
+    public void VerifyImageKind_ADllForThisProcessArchitecture_Passes(Architecture process, Machine machine)
+    {
+        WindowsNativeLibraryLoader.VerifyImageKind("test", Characteristics.Dll | Characteristics.ExecutableImage, machine, process);
+    }
+
+    [WindowsFact]
+    public void VerifyImageKind_AnExecutable_IsRefused()
+    {
+        // e.g. hkdfguard-v1-initialize.exe renamed into place: signed by the same profile.
+        var ex = Assert.Throws<SecurityException>(() =>
+            WindowsNativeLibraryLoader.VerifyImageKind("test", Characteristics.ExecutableImage, Machine.Amd64, Architecture.X64));
+
+        Assert.Contains("not a DLL", ex.Message);
+    }
+
+    [WindowsTheory]
+    [InlineData(Architecture.X64, Machine.Arm64)]
+    [InlineData(Architecture.Arm64, Machine.Amd64)]
+    [InlineData(Architecture.X64, Machine.I386)]
+    [InlineData(Architecture.Wasm, Machine.Unknown)] // no Windows PE machine for it at all
+    public void VerifyImageKind_ADllForAnotherArchitecture_IsRefused(Architecture process, Machine machine)
+    {
+        Assert.Throws<SecurityException>(() =>
+            WindowsNativeLibraryLoader.VerifyImageKind("test", Characteristics.Dll | Characteristics.ExecutableImage, machine, process));
+    }
+
+    [WindowsFact]
+    public void VerifyImageKind_AFileThatIsNotAPeImage_FailsClosedWithSecurityException()
+    {
+        var path = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllBytes(path, [0x4D, 0x5A, 0x90, 0x00]);
+
+            Assert.Throws<SecurityException>(() => WindowsNativeLibraryLoader.VerifyImageKind(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [InstalledWindowsLibraryFact]
+    public void VerifyImageKind_TheInstalledLibrary_Passes()
+    {
+        WindowsNativeLibraryLoader.VerifyImageKind(WindowsNativeLibraryLoader.InstalledPath);
+    }
+
+    [InstalledWindowsLibraryFact]
+    public void TheInstalledProvisioningTool_PassesTheSignerChecks_ButIsRefusedAsNotADll()
+    {
+        // Installed beside the library and signed under the same profile: only the image check
+        // tells them apart.
+        var tool = Path.Combine(Path.GetDirectoryName(WindowsNativeLibraryLoader.InstalledPath)!, "hkdfguard-v1-initialize.exe");
+        Assert.True(File.Exists(tool), $"{tool} is installed with the library.");
+
+        WindowsNativeLibraryLoader.VerifySignature(tool, WindowsNativeLibraryLoader.ExpectedPublisher);
+        Assert.Throws<SecurityException>(() => WindowsNativeLibraryLoader.VerifyImageKind(tool));
     }
 
     [WindowsFact]

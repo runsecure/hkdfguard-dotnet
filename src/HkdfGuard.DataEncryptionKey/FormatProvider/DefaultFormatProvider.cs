@@ -156,6 +156,11 @@ public class DefaultFormatProvider : IEncryptedFormatProvider
             || !int.TryParse(digits, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out version))
             return false;
 
+        // Only the canonical form Format writes: no whitespace. Base64 validation skips it, but the
+        // decoded length is computed from the raw text, so it would leave trailing zero bytes.
+        if (base64Segment.ContainsAny(" \t\r\n"))
+            return false;
+
         base64 = base64Segment;
         return true;
     }
