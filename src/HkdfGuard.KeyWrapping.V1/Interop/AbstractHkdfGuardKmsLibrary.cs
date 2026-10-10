@@ -64,4 +64,14 @@ internal abstract class AbstractHkdfGuardKmsLibrary
     /// </param>
     /// <returns><see cref="Ok"/> on success, or a negative, implementation-specific error code.</returns>
     public abstract int GenerateAndWrapDek(string service, Span<byte> destination, out int bytesWritten);
+
+    /// <summary>
+    /// Makes this process's memory harder to recover: no core dumps, and no ptrace or
+    /// /proc/&lt;pid&gt;/mem access by other unprivileged processes of the same user. Only some
+    /// platforms' libraries offer it.
+    /// </summary>
+    /// <returns><see cref="Ok"/> on success, or a negative, implementation-specific error code.</returns>
+    /// <exception cref="PlatformNotSupportedException">This platform's library has no such call.</exception>
+    public virtual int HardenProcess()
+        => throw new PlatformNotSupportedException("The HkdfGuard native KMS library on this platform has no process hardening call; it is available on Linux only.");
 }

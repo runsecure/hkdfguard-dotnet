@@ -7,9 +7,9 @@ namespace HkdfGuard.KeyWrapping.V1.Interop;
 /// <summary>
 /// This assembly's DllImport resolver. It sends the native KMS library to the platform's loader -
 /// <see cref="WindowsNativeLibraryLoader"/> on Windows, <see cref="MacOsNativeLibraryLoader"/> on
-/// macOS - which load it only from its verified install location; a failed verification throws
-/// rather than falling back to the default search. Every other import, including the Linux KMS
-/// library for now, gets the runtime's default resolution.
+/// macOS, <see cref="LinuxNativeLibraryLoader"/> on Linux - which load it only from its verified
+/// install location; a failed verification throws rather than falling back to the default search.
+/// Every other import gets the runtime's default resolution.
 /// <para>
 /// Every concrete KMS binding registers this in its constructor, so it is always in place before
 /// the first native call. A resolver can be set only once per assembly; registration is idempotent,
@@ -58,20 +58,23 @@ internal static class NativeLibraryResolver
     }
 
     internal static IntPtr Resolve(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)
-        => Route(libraryName, RuntimeInformation.IsOSPlatform, LoadWindows, LoadMacOs);
+        => Route(libraryName, RuntimeInformation.IsOSPlatform, LoadWindows, LoadMacOs, LoadLinux);
 
     /// <summary>
     /// The routing decision, with the platform check and the loaders passed in so every branch can
     /// be tested on any platform: the platform's own KMS library goes to that platform's loader;
     /// everything else, and a KMS library name on the wrong platform, gets the default (zero).
     /// </summary>
-    internal static IntPtr Route(string libraryName, Func<OSPlatform, bool> isPlatform, Func<IntPtr> loadWindows, Func<IntPtr> loadMacOs)
+    internal static IntPtr Route(string libraryName, Func<OSPlatform, bool> isPlatform, Func<IntPtr> loadWindows, Func<IntPtr> loadMacOs, Func<IntPtr> loadLinux)
     {
         if (libraryName == WindowsHkdfGuardKmsLibrary.LibraryName && isPlatform(OSPlatform.Windows))
             return loadWindows();
 
         if (libraryName == MacOsHkdfGuardKmsLibrary.LibraryName && isPlatform(OSPlatform.OSX))
             return loadMacOs();
+
+        if (libraryName == LinuxHkdfGuardKmsLibrary.LibraryName && isPlatform(OSPlatform.Linux))
+            return loadLinux();
 
         return IntPtr.Zero;
     }
@@ -82,5 +85,8 @@ internal static class NativeLibraryResolver
 
     [ExcludeFromCodeCoverage(Justification = "Runs only on macOS; Route's macOS branch is covered with a stand-in loader.")]
     private static IntPtr LoadMacOs() => MacOsNativeLibraryLoader.Load();
+
+    [ExcludeFromCodeCoverage(Justification = "Runs only on Linux; Route's Linux branch is covered with a stand-in loader.")]
+    private static IntPtr LoadLinux() => LinuxNativeLibraryLoader.Load();
 #pragma warning restore CA1416
 }

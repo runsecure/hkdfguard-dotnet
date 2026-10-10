@@ -87,7 +87,7 @@ public static class NativeTestEnvironment
             return (explicitName, string.Empty);
 
         if (!OperatingSystem.IsWindows())
-            return (null, $"Set {ServiceVariable} to a service provisioned with hkdfguard-v1-initialize to run native integration tests.");
+            return (null, $"Set {ServiceVariable} to a service provisioned with hkdfguard-v1-initialize to run native integration tests. On a Linux TPM host, sudo scripts/provision-linux-test-key.sh provisions com.hkdfguard.native.linux.test.");
 
         if (!File.Exists(Interop.WindowsNativeLibraryLoader.InstalledPath))
             return (null, $"The native KMS library is not installed at {Interop.WindowsNativeLibraryLoader.InstalledPath}.");
@@ -129,4 +129,110 @@ public static class NativeTestEnvironment
 
     private static string? Read(string variable)
         => Environment.GetEnvironmentVariable(variable) is { Length: > 0 } value ? value : null;
+}
+
+/// <summary>
+/// A test that needs the real Linux native KMS library installed by its package (any of
+/// LinuxNativeLibraryLoader's candidate locations); reported as skipped when it isn't.
+/// </summary>
+public sealed class InstalledLinuxLibraryFactAttribute : FactAttribute
+{
+    public InstalledLinuxLibraryFactAttribute()
+    {
+        if (!OperatingSystem.IsLinux())
+            Skip = "Linux only.";
+        else if (InstalledPath is null)
+            Skip = "The libhkdfguard1 package is not installed.";
+    }
+
+    /// <summary>Where the package installed the library, or null if it isn't installed.</summary>
+    public static string? InstalledPath
+    {
+        get
+        {
+            try
+            {
+                return LinuxNativeLibraryLoader.CandidatePaths(System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture).FirstOrDefault(File.Exists);
+            }
+            catch (PlatformNotSupportedException)
+            {
+                return null; // no package for this architecture
+            }
+        }
+    }
+}
+
+/// <summary>A test that only means anything on Linux; reported as skipped elsewhere.</summary>
+public sealed class LinuxFactAttribute : FactAttribute
+{
+    public LinuxFactAttribute()
+    {
+        if (!OperatingSystem.IsLinux())
+            Skip = "Linux only.";
+    }
+}
+
+/// <summary>
+/// A real call into the Linux native library against the provisioned test service (see
+/// <see cref="NativeTestEnvironment"/>). Skipped off Linux, without the package, or without a
+/// provisioned service; the named properties add requirements some tests need.
+/// </summary>
+public sealed class LinuxNativeIntegrationFactAttribute : FactAttribute
+{
+    public const string PolicyPath = "/etc/hkdfguard/policy.toml";
+    public const string Cli = "/usr/bin/hkdfguard-v1-initialize";
+
+    /// <summary>Needs <see cref="NativeTestEnvironment.OtherServiceVariable"/>: a second provisioned service, with its own KEK.</summary>
+    public bool NeedsOtherService { get; set; }
+
+    /// <summary>Needs the policy's provisioning allowlist (tpm.require_pinned_names), so an unlisted service has no KEK.</summary>
+    public bool NeedsPinnedNamesAllowlist { get; set; }
+
+    /// <summary>Needs the hkdfguard package's hkdfguard-v1-initialize.</summary>
+    public bool NeedsCli { get; set; }
+
+    public override string? Skip
+    {
+        get => base.Skip ?? Reason(NeedsOtherService, NeedsPinnedNamesAllowlist, NeedsCli);
+        set => base.Skip = value;
+    }
+
+    internal static string? Reason(bool needsOtherService = false, bool needsPinnedNamesAllowlist = false, bool needsCli = false)
+    {
+        if (!OperatingSystem.IsLinux())
+            return "Linux only.";
+        if (InstalledLinuxLibraryFactAttribute.InstalledPath is null)
+            return "The libhkdfguard1 package is not installed.";
+        if (NativeTestEnvironment.ServiceName is null)
+            return NativeTestEnvironment.SkipReason;
+        if (needsOtherService && Environment.GetEnvironmentVariable(NativeTestEnvironment.OtherServiceVariable) is not { Length: > 0 })
+            return $"Set {NativeTestEnvironment.OtherServiceVariable} to a second provisioned service.";
+        if (needsPinnedNamesAllowlist && !PolicyRequiresPinnedNames())
+            return $"{PolicyPath} does not set tpm.require_pinned_names = true (scripts/provision-linux-test-key.sh does).";
+        if (needsCli && !File.Exists(Cli))
+            return $"{Cli} is not installed (the hkdfguard package).";
+        return null;
+    }
+
+    private static bool PolicyRequiresPinnedNames()
+    {
+        try
+        {
+            return File.ReadLines(PolicyPath).Any(l => l.Replace(" ", string.Empty, StringComparison.Ordinal) == "require_pinned_names=true");
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+}
+
+/// <summary>The theory form of <see cref="LinuxNativeIntegrationFactAttribute"/>, with no extra requirements.</summary>
+public sealed class LinuxNativeIntegrationTheoryAttribute : TheoryAttribute
+{
+    public override string? Skip
+    {
+        get => base.Skip ?? LinuxNativeIntegrationFactAttribute.Reason();
+        set => base.Skip = value;
+    }
 }

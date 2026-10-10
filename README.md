@@ -317,12 +317,12 @@ Where each platform's library comes from:
 |---|---|---|
 | Windows | `HkdfGuardV1.dll` | Installed to `%ProgramFiles%\HkdfGuard\v1` and loaded only from there. Not shipped in the package. |
 | macOS | `libhkdfguard_v1.dylib` | Installed system-wide to `/Library/Application Support/HkdfGuard/v1`, or per user to `~/.hkdfguard/v1`, and loaded only from there. Not shipped in the package. Requires Apple silicon and macOS 13 or later, with an arm64 .NET runtime (not an x64 one under Rosetta). |
-| Linux | `HkdfGuardKeyProtectionLinux` | The runtime's default search. |
+| Linux | `libhkdfguard.so.1` | Installed by the `libhkdfguard1` package (`hkdfguard-libs` on RPM distributions) to `/usr/lib/<multiarch>` or `/usr/lib64`, and loaded only from there. Not shipped in the package. x64 and arm64. |
 
 The NuGet package contains no native library. Each one is distributed and installed separately,
 together with its `hkdfguard-v1-initialize` provisioning tool.
 
-The library sees every DEK, so on Windows and macOS it is never located by a search path.
+The library sees every DEK, so it is never located by a search path.
 
 On **Windows**, before mapping it, `WindowsNativeLibraryLoader` requires all of the following:
 - No folder on its path is a symlink or junction.
@@ -369,6 +369,39 @@ despite its hardened runtime. So the loader refuses, before loading, if a `DYLD_
 directory contains a `libhkdfguard_v1.dylib`; and after loading it asks dyld which file it really
 mapped, unloading and refusing anything but the verified path. The library's own dependencies are
 absolute system paths and need no such check.
+
+On **Linux**, `LinuxNativeLibraryLoader` uses the package's file in the Debian multiarch directory
+(`/usr/lib/x86_64-linux-gnu` or `/usr/lib/aarch64-linux-gnu`) if it is there, otherwise the one in
+`/usr/lib64`. Only "nothing is there" moves on; a location that can't be examined is refused.
+Before loading, it requires all of the following:
+- Every directory on the path, every symbolic link followed, and the file itself are owned by root,
+  and no directory or file is writable by its group or by others. Links are followed one component
+  at a time and each target is checked where it lies, so `/lib -> usr/lib` passes and a link into a
+  user's directory does not.
+- The file's SHA-256 is a release this version of `HkdfGuard.KeyWrapping.V1` lists. Linux has no
+  platform code signature, so this pin is the content check. Each distribution and architecture
+  has its own build, and a release that isn't listed is refused until the package lists it.
+- The dynamic linker's environment can't substitute anything. `dlopen` of an absolute path is
+  never searched for, but the library's dependencies are found by name - and `libtss2-esys`
+  receives every ECDH shared secret. So every `LD_LIBRARY_PATH` directory, and every path-named
+  `LD_PRELOAD` or `LD_AUDIT` object, must pass the same path checks, and none may be relative,
+  empty (the working directory) or use `$ORIGIN`-style tokens. Both the environment the process
+  started with (`/proc/self/environ`) and the current one are checked.
+
+After loading, `dladdr` must place the library's export in the verified file, and every object in
+its dependency closure, read from each file's `DT_NEEDED` entries, must be bound to a file that
+passes the path checks. That catches a dependency the process had already loaded from somewhere
+else under the same name; the library is then unloaded and the load refused. Two things are outside
+the loader's reach: the TPM transport module tpm2-tss loads at the first TPM call, which only the
+environment check covers, and the .NET runtime's own injection points (startup hooks, CLR
+profilers), which need a protected service environment on every platform.
+
+On Linux, `NativeProcessHardening.Apply()` also exposes the library's opt-in process hardening:
+core dumps off (hard limit included) and the process marked non-dumpable, so other unprivileged
+processes of the same user can't attach a debugger or read its memory. It is process-wide, so
+debuggers and `dotnet-dump` stop working; call it once, early, after any privilege drop. It does not
+stop root or `CAP_SYS_PTRACE`, nor keep memory out of swap. Other platforms throw
+`PlatformNotSupportedException`.
 
 ### 2. Build a `KeyRing`
 
@@ -595,11 +628,13 @@ dotnet test test/HkdfGuard.DataEncryptionKey.Test --collect:"XPlat Code Coverage
 Every library is at 100% line and branch coverage, with two documented exceptions:
 
 - **Native bindings** (`LinuxHkdfGuardKmsLibrary`/`MacOsHkdfGuardKmsLibrary`/
-  `WindowsHkdfGuardKmsLibrary`, the `WinTrust` signature check, and the macOS system calls in
-  `MacOsNative`) are marked `[ExcludeFromCodeCoverage]`. They are thin P/Invoke bindings that can
-  only run on their own operating system. The loaders' decisions are covered everywhere: the
-  Windows checks run against the real installed DLL on Windows, and the macOS checks run against
-  simulated filesystems on every platform.
+  `WindowsHkdfGuardKmsLibrary`, the `WinTrust` signature check, and the system calls in
+  `MacOsNative` and `LinuxNative`) are marked `[ExcludeFromCodeCoverage]`. They are thin P/Invoke
+  bindings that can only run on their own operating system. The loaders' decisions are covered
+  everywhere: the Windows checks run against the real installed DLL on Windows, the macOS and
+  Linux checks run against simulated filesystems on every platform, and the Linux checks also run
+  against the real filesystem and the installed package on Linux. `NativeProcessHardening.Apply()`
+  hardens the whole test host, so its test runs only with `HKDFGUARD_TEST_PROCESS_HARDENING=1`.
 - **`AesGcmCryptoProvider`'s refresh loop and `KeyRing`'s ephemeral rotation loop** each have one
   unreachable branch: the loop's exit when its `PeriodicTimer` reports it has been disposed. Each
   timer is local to its loop and disposed only after it, so this never happens; the check stays as
@@ -613,6 +648,24 @@ against a different KEK:
 ```bash
 hkdfguard-v1-initialize provision --service-name hkdfguard.integrationtest   # elevated on Windows
 HKDFGUARD_TEST_SERVICE=hkdfguard.integrationtest dotnet test test/HkdfGuard.KeyWrapping.V1.Test
+```
+
+On a Linux host with a TPM, the package installs no policy or TPM derivation secret, so nothing
+can be provisioned until root adds them. `scripts/provision-linux-test-key.sh` does that for a test
+host: run it once with `sudo` from the account that runs the tests (which must be in the `tss`
+group). It creates the derivation secret if there is none, writes a policy that requires the TPM
+and pins the two test services' TPM Names, and confirms both as that account. It never replaces a
+policy it didn't write or an existing secret; `--remove` removes its policy again. With it in place,
+`LinuxNativeIntegrationTests` also run: they check the exact Linux status codes, the native
+library's own service-name and length checks, that a failed unwrap zeroes the caller's buffer,
+that tampering anywhere in a payload is refused, and that a key file written by
+`hkdfguard-v1-initialize wrap` unwraps through `NativeHkdfKeyWrapperV1`.
+
+```bash
+sudo scripts/provision-linux-test-key.sh
+HKDFGUARD_TEST_SERVICE=com.hkdfguard.native.linux.test \
+HKDFGUARD_TEST_SERVICE_OTHER=com.hkdfguard.native.linux.test.other \
+dotnet test test/HkdfGuard.KeyWrapping.V1.Test
 ```
 
 Native release artifacts are never committed: `.gitignore` excludes every `runtimes/` folder.
