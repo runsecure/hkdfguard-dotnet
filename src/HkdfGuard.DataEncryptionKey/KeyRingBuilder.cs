@@ -12,7 +12,7 @@ namespace HkdfGuard.DataEncryptionKey;
 /// ICryptoProviderFactory to Create an ICryptoProvider bound to that file's wrapped bytes; for each
 /// ephemeral version, it asks the factory to CreateEphemeral one around a fresh DEK generated (and
 /// wrapped) at Build time. Every provider is wrapped in a DataEncryptionKey owned by the ring, and
-/// CachedKeyExpiry is passed to the factory as each provider's session lifetime.
+/// KeyRefreshInterval is passed to the factory as each provider's refresh interval.
 /// ServiceName describes this ring's key identity - it's carried on the builder for callers to
 /// read back, but is not consumed by Build itself, since the IKeyWrapper already knows what KEK
 /// it's bound to. Key files are rotated by deployment, not here: each release brings its own
@@ -54,13 +54,13 @@ public sealed class KeyRingBuilder
 
     /// <summary>
     /// The refresh-failure policy every built provider gets unless configured otherwise: fail
-    /// closed after this many consecutive failed refreshes. With CachedKeyExpiry = 60 that is about
+    /// closed after this many consecutive failed refreshes. With KeyRefreshInterval = 60 that is about
     /// three minutes of KEK outage before the key is zeroed.
     /// </summary>
-    public const int DefaultMaxRefreshFailures = 3;
+    public const int DefaultMaxRefreshFailures = RefreshFailurePolicy.DefaultMaxRefreshFailures;
 
     public string? ServiceName { get; private set; }
-    public int? CachedKeyExpiry { get; private set; }
+    public int? KeyRefreshInterval { get; private set; }
 
     /// <summary>
     /// Consecutive failed refreshes tolerated before a provider fails closed. Defaults to
@@ -174,15 +174,15 @@ public sealed class KeyRingBuilder
     /// not at Build. A revocation check, not a limit on how long the DEK stays in memory: the same
     /// DEK is revealed each time, and it stays in memory until the ring is disposed. Together with
     /// <see cref="MaxRefreshFailures"/> it sets how quickly a revoked KEK stops a running process -
-    /// about MaxRefreshFailures × CachedKeyExpiry.
+    /// about MaxRefreshFailures × KeyRefreshInterval.
     /// </summary>
-    /// <exception cref="ArgumentOutOfRangeException">cachedKeyExpiry is not between 1 and 300</exception>
-    public KeyRingBuilder WithCachedKeyExpiry(int cachedKeyExpiry)
+    /// <exception cref="ArgumentOutOfRangeException">keyRefreshInterval is not between 1 and 300</exception>
+    public KeyRingBuilder WithKeyRefreshInterval(int keyRefreshInterval)
     {
-        if (cachedKeyExpiry is < 1 or > 300)
-            throw new ArgumentOutOfRangeException(nameof(cachedKeyExpiry), cachedKeyExpiry, "CachedKeyExpiry must be between 1 and 300 seconds.");
+        if (keyRefreshInterval is < 1 or > 300)
+            throw new ArgumentOutOfRangeException(nameof(keyRefreshInterval), keyRefreshInterval, "KeyRefreshInterval must be between 1 and 300 seconds.");
 
-        CachedKeyExpiry = cachedKeyExpiry;
+        KeyRefreshInterval = keyRefreshInterval;
         return this;
     }
 
@@ -277,7 +277,7 @@ public sealed class KeyRingBuilder
     /// </summary>
     /// <param name="cancellationToken">Cancels reading key files and revealing keys; anything
     /// already created is disposed.</param>
-    /// <exception cref="InvalidOperationException">No key wrapper, no crypto provider factory, no cached key expiry, or no key files/ephemeral keys were configured</exception>
+    /// <exception cref="InvalidOperationException">No key wrapper, no crypto provider factory, no key refresh interval, or no key files/ephemeral keys were configured</exception>
     public async Task<KeyRing> BuildAsync(CancellationToken cancellationToken = default)
     {
         if (_keyWrapper is null)
@@ -289,8 +289,8 @@ public sealed class KeyRingBuilder
         if (_keyFiles.Count == 0 && _ephemeralVersions.Count == 0)
             throw new InvalidOperationException("At least one key file or ephemeral key is required - call WithKeyFile or WithEphemeralKey first.");
 
-        if (CachedKeyExpiry is null)
-            throw new InvalidOperationException("A cached key expiry is required - call WithCachedKeyExpiry first.");
+        if (KeyRefreshInterval is null)
+            throw new InvalidOperationException("A key refresh interval is required - call WithKeyRefreshInterval first.");
 
         // If anything fails partway (unreadable file, unwrap failure, duplicate version), dispose
         // every provider created so far - each runs a background refresh holding a revealed key.
@@ -301,7 +301,7 @@ public sealed class KeyRingBuilder
             {
                 var wrapped = await ReadKeyFileAsync(path, cancellationToken).ConfigureAwait(false);
                 var provider = await _cryptoProviderFactory
-                    .CreateAsync(_keyWrapper, wrapped, CachedKeyExpiry.Value, MaxRefreshFailures, cancellationToken)
+                    .CreateAsync(_keyWrapper, wrapped, KeyRefreshInterval.Value, MaxRefreshFailures, cancellationToken)
                     .ConfigureAwait(false);
                 await AddOwnedAsync(ring, version, provider).ConfigureAwait(false);
             }
@@ -309,7 +309,7 @@ public sealed class KeyRingBuilder
             foreach (var version in _ephemeralVersions)
             {
                 var provider = await _cryptoProviderFactory
-                    .CreateEphemeralAsync(_keyWrapper, CachedKeyExpiry.Value, MaxRefreshFailures, cancellationToken)
+                    .CreateEphemeralAsync(_keyWrapper, KeyRefreshInterval.Value, MaxRefreshFailures, cancellationToken)
                     .ConfigureAwait(false);
                 await AddOwnedAsync(ring, version, provider).ConfigureAwait(false);
             }
@@ -319,11 +319,11 @@ public sealed class KeyRingBuilder
                 // Each rotation creates its key exactly as an ephemeral version above was created.
                 var factory = _cryptoProviderFactory;
                 var wrapper = _keyWrapper;
-                var expiry = CachedKeyExpiry.Value;
+                var refreshInterval = KeyRefreshInterval.Value;
                 var maxRefreshFailures = MaxRefreshFailures;
                 ring.ConfigureEphemeralKeyRetention(EphemeralKeyRetention, _ephemeralVersions);
                 ring.StartEphemeralKeyRotation(interval, async ct =>
-                    new DataEncryptionKey(await factory.CreateEphemeralAsync(wrapper, expiry, maxRefreshFailures, ct).ConfigureAwait(false)),
+                    new DataEncryptionKey(await factory.CreateEphemeralAsync(wrapper, refreshInterval, maxRefreshFailures, ct).ConfigureAwait(false)),
                     _logger);
             }
 

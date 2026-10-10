@@ -19,8 +19,9 @@
       Windows: %ProgramFiles%\HkdfGuard\v1\HkdfGuardV1.dll        (WindowsNativeLibraryLoader)
       macOS:   /Library/Application Support/HkdfGuard/v1/libhkdfguard_v1.dylib, or
                ~/.hkdfguard/v1/libhkdfguard_v1.dylib               (MacOsNativeLibraryLoader)
-    The runtimes/ folder holds the macOS release artifacts and their SHA256SUMS for reference;
-    NativeRuntimesTests keeps them byte-exact, but nothing here ships or loads them.
+    A local, git-ignored runtimes/ folder may hold native release artifacts and their SHA256SUMS
+    for reference; when present, NativeRuntimesTests keeps them byte-exact, but nothing here ships
+    or loads them.
   -->
 
 </Project>

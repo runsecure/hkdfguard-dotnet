@@ -31,7 +31,7 @@ public sealed class NativeEndToEndTests : IDisposable
         .WithServiceName(service)
         .WithKeyWrapper(new NativeHkdfKeyWrapperV1(service))
         .WithCryptoProviderFactory(new AesGcmCryptoProviderFactory())
-        .WithCachedKeyExpiry(60);
+        .WithKeyRefreshInterval(60);
 
     // What the release pipeline does: protect configuration under a fresh in-memory key, then
     // hand that key to the native KEK and write the wrapped result as the release's key file.
@@ -162,7 +162,7 @@ public sealed class NativeEndToEndTests : IDisposable
     [NativeIntegrationFact]
     public async Task BackgroundRefresh_AgainstTheRealKek_KeepsTheKeyInService()
     {
-        await using var ring = await RingBuilder(Service).WithCachedKeyExpiry(1).WithEphemeralKey(1).BuildAsync();
+        await using var ring = await RingBuilder(Service).WithKeyRefreshInterval(1).WithEphemeralKey(1).BuildAsync();
         var protector = ring.CreateProtector("refresh");
         var before = protector.Encrypt("written before the refreshes");
 

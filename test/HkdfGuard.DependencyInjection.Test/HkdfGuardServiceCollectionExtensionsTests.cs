@@ -14,7 +14,7 @@ public class HkdfGuardServiceCollectionExtensionsTests
         => builder
             .WithKeyWrapper(new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)))
             .WithCryptoProviderFactory(new AesGcmCryptoProviderFactory())
-            .WithCachedKeyExpiry(60)
+            .WithKeyRefreshInterval(60)
             .WithEphemeralKey(version);
 
     [Fact]
@@ -116,7 +116,7 @@ public class HkdfGuardServiceCollectionExtensionsTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => services.AddKeyRingAsync(builder => builder
             .WithKeyWrapper(new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)))
             .WithCryptoProviderFactory(new AesGcmCryptoProviderFactory())
-            .WithCachedKeyExpiry(60)));
+            .WithKeyRefreshInterval(60)));
 
         Assert.Empty(services);
     }

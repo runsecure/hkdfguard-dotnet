@@ -20,20 +20,20 @@ public class KeyRingBuilderTests
     [Theory]
     [InlineData(1)]
     [InlineData(300)]
-    public void WithCachedKeyExpiry_WithinRange_SetsCachedKeyExpiry(int cachedKeyExpiry)
+    public void WithKeyRefreshInterval_WithinRange_SetsKeyRefreshInterval(int keyRefreshInterval)
     {
-        var builder = new KeyRingBuilder().WithCachedKeyExpiry(cachedKeyExpiry);
+        var builder = new KeyRingBuilder().WithKeyRefreshInterval(keyRefreshInterval);
 
-        Assert.Equal(cachedKeyExpiry, builder.CachedKeyExpiry);
+        Assert.Equal(keyRefreshInterval, builder.KeyRefreshInterval);
     }
 
     [Theory]
     [InlineData(-1)]
     [InlineData(0)]
     [InlineData(301)]
-    public void WithCachedKeyExpiry_OutOfRange_Throws(int cachedKeyExpiry)
+    public void WithKeyRefreshInterval_OutOfRange_Throws(int keyRefreshInterval)
     {
-        Assert.Throws<ArgumentOutOfRangeException>(() => new KeyRingBuilder().WithCachedKeyExpiry(cachedKeyExpiry));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new KeyRingBuilder().WithKeyRefreshInterval(keyRefreshInterval));
     }
 
     [Fact]
@@ -41,7 +41,7 @@ public class KeyRingBuilderTests
     {
         var builder = new KeyRingBuilder()
             .WithCryptoProviderFactory(CryptoProviderFactory)
-            .WithCachedKeyExpiry(60)
+            .WithKeyRefreshInterval(60)
             .WithEphemeralKey(1);
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => builder.BuildAsync());
@@ -53,7 +53,7 @@ public class KeyRingBuilderTests
     {
         var builder = new KeyRingBuilder()
             .WithKeyWrapper(new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)))
-            .WithCachedKeyExpiry(60)
+            .WithKeyRefreshInterval(60)
             .WithEphemeralKey(1);
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => builder.BuildAsync());
@@ -66,13 +66,13 @@ public class KeyRingBuilderTests
         var builder = new KeyRingBuilder()
             .WithKeyWrapper(new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)))
             .WithCryptoProviderFactory(CryptoProviderFactory)
-            .WithCachedKeyExpiry(60);
+            .WithKeyRefreshInterval(60);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => builder.BuildAsync());
     }
 
     [Fact]
-    public async Task Build_WithoutCachedKeyExpiry_Throws()
+    public async Task Build_WithoutKeyRefreshInterval_Throws()
     {
         var builder = new KeyRingBuilder()
             .WithKeyWrapper(new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)))
@@ -93,7 +93,7 @@ public class KeyRingBuilderTests
             var ring = await new KeyRingBuilder()
                 .WithKeyWrapper(new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)))
                 .WithCryptoProviderFactory(CryptoProviderFactory)
-                .WithCachedKeyExpiry(60)
+                .WithKeyRefreshInterval(60)
                 .WithKeyFile(1, path)
                 .BuildAsync();
 
@@ -118,7 +118,7 @@ public class KeyRingBuilderTests
             var ring = await new KeyRingBuilder()
                 .WithKeyWrapper(new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)))
                 .WithCryptoProviderFactory(CryptoProviderFactory)
-                .WithCachedKeyExpiry(60)
+                .WithKeyRefreshInterval(60)
                 .WithKeyFile(1, path1)
                 .WithKeyFile(2, path2)
                 .BuildAsync();
@@ -138,7 +138,7 @@ public class KeyRingBuilderTests
         var ring = await new KeyRingBuilder()
             .WithKeyWrapper(new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)))
             .WithCryptoProviderFactory(CryptoProviderFactory)
-            .WithCachedKeyExpiry(60)
+            .WithKeyRefreshInterval(60)
             .WithEphemeralKey(1)
             .BuildAsync();
 
@@ -151,7 +151,7 @@ public class KeyRingBuilderTests
         var ring = await new KeyRingBuilder()
             .WithKeyWrapper(new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)))
             .WithCryptoProviderFactory(CryptoProviderFactory)
-            .WithCachedKeyExpiry(60)
+            .WithKeyRefreshInterval(60)
             .WithEphemeralKey(1)
             .BuildAsync();
 
@@ -178,7 +178,7 @@ public class KeyRingBuilderTests
             var ring = await new KeyRingBuilder()
                 .WithKeyWrapper(new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)))
                 .WithCryptoProviderFactory(CryptoProviderFactory)
-                .WithCachedKeyExpiry(60)
+                .WithKeyRefreshInterval(60)
                 .WithKeyFile(1, path)
                 .WithEphemeralKey(2)
                 .BuildAsync();
@@ -199,7 +199,7 @@ public class KeyRingBuilderTests
         var ring = await new KeyRingBuilder()
             .WithKeyWrapper(new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)))
             .WithCryptoProviderFactory(CryptoProviderFactory)
-            .WithCachedKeyExpiry(60)
+            .WithKeyRefreshInterval(60)
             .WithEphemeralKey(1)
             .WithFormatProvider(recordingFormatProvider)
             .BuildAsync();
@@ -210,7 +210,7 @@ public class KeyRingBuilderTests
     }
 
     [Fact]
-    public async Task Build_WithKeyFile_PassesCachedKeyExpiryToTheCryptoProviderFactory()
+    public async Task Build_WithKeyFile_PassesKeyRefreshIntervalToTheCryptoProviderFactory()
     {
         var path = Path.GetTempFileName();
         try
@@ -221,7 +221,7 @@ public class KeyRingBuilderTests
             _ = await new KeyRingBuilder()
                 .WithKeyWrapper(new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)))
                 .WithCryptoProviderFactory(recordingFactory)
-                .WithCachedKeyExpiry(123)
+                .WithKeyRefreshInterval(123)
                 .WithKeyFile(1, path)
                 .BuildAsync();
 
@@ -234,16 +234,16 @@ public class KeyRingBuilderTests
     }
 
     [Fact]
-    public async Task Build_WithEphemeralKey_PassesCachedKeyExpiryRatherThanVersionToTheCryptoProviderFactory()
+    public async Task Build_WithEphemeralKey_PassesKeyRefreshIntervalRatherThanVersionToTheCryptoProviderFactory()
     {
         // Regression test: CreateEphemeral used to be called with the KeyRing version instead of
-        // CachedKeyExpiry - a version of 1 would silently become a 1-second session lifetime.
+        // KeyRefreshInterval - a version of 1 would silently become a 1-second session lifetime.
         var recordingFactory = new RecordingCryptoProviderFactory();
 
         _ = await new KeyRingBuilder()
             .WithKeyWrapper(new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)))
             .WithCryptoProviderFactory(recordingFactory)
-            .WithCachedKeyExpiry(123)
+            .WithKeyRefreshInterval(123)
             .WithEphemeralKey(42)
             .BuildAsync();
 
@@ -261,7 +261,7 @@ public class KeyRingBuilderTests
             var builder = new KeyRingBuilder()
                 .WithKeyWrapper(new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)))
                 .WithCryptoProviderFactory(factory)
-                .WithCachedKeyExpiry(60)
+                .WithKeyRefreshInterval(60)
                 .WithKeyFile(1, path)
                 .WithEphemeralKey(1);
 
@@ -287,7 +287,7 @@ public class KeyRingBuilderTests
             var builder = new KeyRingBuilder()
                 .WithKeyWrapper(new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)))
                 .WithCryptoProviderFactory(factory)
-                .WithCachedKeyExpiry(60)
+                .WithKeyRefreshInterval(60)
                 .WithKeyFile(1, path)
                 .WithKeyFile(2, Path.Combine(Path.GetTempPath(), $"missing-{Guid.NewGuid():N}.bin"));
 
@@ -309,7 +309,7 @@ public class KeyRingBuilderTests
         var ring = await new KeyRingBuilder()
             .WithKeyWrapper(new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)))
             .WithCryptoProviderFactory(factory)
-            .WithCachedKeyExpiry(60)
+            .WithKeyRefreshInterval(60)
             .WithEphemeralKey(1)
             .BuildAsync();
 
@@ -371,7 +371,7 @@ public class KeyRingBuilderTests
             using var _ = await new KeyRingBuilder()
                 .WithKeyWrapper(new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)))
                 .WithCryptoProviderFactory(withPolicy)
-                .WithCachedKeyExpiry(60)
+                .WithKeyRefreshInterval(60)
                 .WithMaxRefreshFailures(5)
                 .WithKeyFile(1, path)
                 .WithEphemeralKey(2)
@@ -379,7 +379,7 @@ public class KeyRingBuilderTests
             using var __ = await new KeyRingBuilder()
                 .WithKeyWrapper(new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)))
                 .WithCryptoProviderFactory(withoutPolicy)
-                .WithCachedKeyExpiry(60)
+                .WithKeyRefreshInterval(60)
                 .WithKeyFile(1, path)
                 .WithEphemeralKey(2)
                 .BuildAsync();
@@ -387,7 +387,7 @@ public class KeyRingBuilderTests
             using var ___ = await new KeyRingBuilder()
                 .WithKeyWrapper(new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)))
                 .WithCryptoProviderFactory(failOpen)
-                .WithCachedKeyExpiry(60)
+                .WithKeyRefreshInterval(60)
                 .WithFailOpenOnRefreshFailure()
                 .WithKeyFile(1, path)
                 .WithEphemeralKey(2)
@@ -406,7 +406,7 @@ public class KeyRingBuilderTests
     private static KeyRingBuilder ConfiguredBuilder(ICryptoProviderFactory factory) => new KeyRingBuilder()
         .WithKeyWrapper(new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)))
         .WithCryptoProviderFactory(factory)
-        .WithCachedKeyExpiry(60);
+        .WithKeyRefreshInterval(60);
 
     [Fact]
     public async Task BuildAsync_ProducesAWorkingRingFromKeyFilesAndEphemeralKeys()
@@ -437,7 +437,7 @@ public class KeyRingBuilderTests
     public async Task BuildAsync_WithMissingConfiguration_ThrowsTheSameErrorsAsBuild()
     {
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            new KeyRingBuilder().WithCryptoProviderFactory(CryptoProviderFactory).WithCachedKeyExpiry(60).WithEphemeralKey(1).BuildAsync());
+            new KeyRingBuilder().WithCryptoProviderFactory(CryptoProviderFactory).WithKeyRefreshInterval(60).WithEphemeralKey(1).BuildAsync());
 
         Assert.Equal("A key wrapper is required - call WithKeyWrapper first.", exception.Message);
     }

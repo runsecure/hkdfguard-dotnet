@@ -4,7 +4,7 @@ using System.Runtime.InteropServices;
 namespace HkdfGuard.KeyWrapping.V1.Interop;
 
 /// <summary>
-/// Binds libhkdfguard_v1.dylib (see runtimes/osx-*/hkdfguard.h), which holds the per-service KEK
+/// Binds libhkdfguard_v1.dylib (see the hkdfguard.h installed beside it), which holds the per-service KEK
 /// as a Secure Enclave key. Each distinct service string gets its own, independent Secure Enclave
 /// key - wrapping under one service's identifier and unwrapping under a different one fails by
 /// design (<see cref="ErrFingerprintMismatch"/>). The library is installed separately - system-wide

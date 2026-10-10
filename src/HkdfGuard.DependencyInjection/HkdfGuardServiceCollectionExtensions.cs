@@ -18,7 +18,7 @@ public static class HkdfGuardServiceCollectionExtensions
     /// await builder.Services.AddKeyRingAsync(ring => ring
     ///     .WithKeyWrapper(new NativeHkdfKeyWrapperV1("myservice"))
     ///     .WithCryptoProviderFactory(new AesGcmCryptoProviderFactory())
-    ///     .WithCachedKeyExpiry(60)
+    ///     .WithKeyRefreshInterval(60)
     ///     .WithKeyFile(1, "/path/to/wrapped-dek-v1.bin"));
     /// </code>
     /// The container owns the ring and disposes it - asynchronously, with DisposeAsync - at

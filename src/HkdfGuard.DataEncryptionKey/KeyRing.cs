@@ -327,12 +327,21 @@ public sealed class KeyRing(IEncryptedFormatProvider formatProvider) : IKeyRing,
     /// fresh via GetCurrent on every call (not a version captured once here), and formats/parses
     /// via the IEncryptedFormatProvider this ring was constructed with.
     /// </summary>
-    /// <param name="name">Used as this protector's Additional Auth Data on every Encrypt/Decrypt</param>
+    /// <param name="name">Used as this protector's Additional Auth Data on every Encrypt/Decrypt.
+    /// ProtectedConfigurationPurpose.For(key) names the protector ProtectedConfigurationRoot reads
+    /// that configuration key with, which is how pipeline-protected values decrypt; that sharing is
+    /// intended.</param>
     /// <exception cref="ArgumentException">name is null or empty - an empty purpose binds nothing,
-    /// and would match anything else encrypted without AAD (e.g. ProtectedCache's entries)</exception>
+    /// and would match anything else encrypted without AAD - or starts with
+    /// ProtectedCacheBase.AadPrefix, whose AADs are ProtectedCache's alone: a protector named that
+    /// way could decrypt cache entries, and produce values a cache would accept</exception>
     public IDataProtector CreateProtector(string name)
     {
         ArgumentException.ThrowIfNullOrEmpty(name);
+        if (name.StartsWith(ProtectedCacheBase.AadPrefix, StringComparison.Ordinal))
+            throw new ArgumentException(
+                $"Protector names starting with '{ProtectedCacheBase.AadPrefix}' are reserved for ProtectedCache's entries.", nameof(name));
+
         return new DataProtector(name, this, formatProvider);
     }
 

@@ -19,19 +19,19 @@ public class HkdfGuardOptionsExtensionsTests
     }
 
     [Fact]
-    public void ApplyTo_SetsServiceNameCachedKeyExpiryAndMaxRefreshFailures()
+    public void ApplyTo_SetsServiceNameKeyRefreshIntervalAndMaxRefreshFailures()
     {
         var options = new HkdfGuardOptions
         {
             ServiceName = "my.service",
-            CachedKeyExpiry = 60,
+            KeyRefreshInterval = 60,
             MaxRefreshFailures = 3,
         };
 
         var builder = options.ApplyTo(new KeyRingBuilder());
 
         Assert.Equal("my.service", builder.ServiceName);
-        Assert.Equal(60, builder.CachedKeyExpiry);
+        Assert.Equal(60, builder.KeyRefreshInterval);
         Assert.Equal(3, builder.MaxRefreshFailures);
     }
 
@@ -41,7 +41,7 @@ public class HkdfGuardOptionsExtensionsTests
         var builder = new HkdfGuardOptions().ApplyTo(new KeyRingBuilder());
 
         Assert.Null(builder.ServiceName);
-        Assert.Null(builder.CachedKeyExpiry);
+        Assert.Null(builder.KeyRefreshInterval);
         Assert.Equal(KeyRingBuilder.DefaultMaxRefreshFailures, builder.MaxRefreshFailures);
     }
 
@@ -101,7 +101,7 @@ public class HkdfGuardOptionsExtensionsTests
         var ring = await options.ApplyTo(new KeyRingBuilder())
             .WithKeyWrapper(new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)))
             .WithCryptoProviderFactory(new AesGcmCryptoProviderFactory())
-            .WithCachedKeyExpiry(60)
+            .WithKeyRefreshInterval(60)
             .BuildAsync();
 
         Assert.Equal(2, ring.CurrentVersion);
@@ -122,7 +122,7 @@ public class HkdfGuardOptionsExtensionsTests
             var ring = await options.ApplyTo(new KeyRingBuilder())
                 .WithKeyWrapper(new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)))
                 .WithCryptoProviderFactory(new AesGcmCryptoProviderFactory())
-                .WithCachedKeyExpiry(60)
+                .WithKeyRefreshInterval(60)
                 .BuildAsync();
 
             Assert.Equal(1, ring.CurrentVersion);
@@ -149,7 +149,7 @@ public class HkdfGuardOptionsExtensionsTests
             var ring = await options.ApplyTo(new KeyRingBuilder())
                 .WithKeyWrapper(new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)))
                 .WithCryptoProviderFactory(new AesGcmCryptoProviderFactory())
-                .WithCachedKeyExpiry(60)
+                .WithKeyRefreshInterval(60)
                 .BuildAsync();
 
             Assert.Equal(2, ring.CurrentVersion);

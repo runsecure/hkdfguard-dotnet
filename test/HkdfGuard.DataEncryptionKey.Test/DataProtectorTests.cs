@@ -19,6 +19,42 @@ public class DataProtectorTests
         return ring;
     }
 
+    [Theory]
+    [InlineData("HkdfGuard.Cache:")]
+    [InlineData("HkdfGuard.Cache:SECRET")]
+    public void CreateProtector_RefusesTheCachesReservedPrefix(string name)
+    {
+        using var ring = new KeyRing(new DefaultFormatProvider());
+
+        var ex = Assert.Throws<ArgumentException>(() => ring.CreateProtector(name));
+
+        Assert.Contains("reserved", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("hkdfguard.cache:secret")] // a different AAD from any cache entry's (the prefix is never case-folded)
+    [InlineData("MyApp.Cache:secret")]
+    [InlineData("HkdfGuard.EncryptedConfiguration:ConnectionStrings:Admin")] // shared with ProtectedConfigurationRoot by design
+    public void CreateProtector_AcceptsEveryOtherName(string name)
+    {
+        using var ring = new KeyRing(new DefaultFormatProvider());
+
+        Assert.NotNull(ring.CreateProtector(name));
+    }
+
+    [Fact]
+    public async Task AProtector_CannotDecryptACacheEntry_BecauseItCanNeverShareItsAad()
+    {
+        await using var ring = await CreateRingWithOneKeyAsync();
+        var cacheAad = HkdfGuard.Abstractions.ProtectedCacheBase.AadFor("secret");
+        var entry = ring.Get(1).Encrypt("cached value"u8.ToArray(), cacheAad);
+
+        // The only protector name whose AAD equals the cache entry's is the reserved one.
+        Assert.Equal(System.Text.Encoding.UTF8.GetBytes("HkdfGuard.Cache:SECRET"), cacheAad);
+        Assert.Throws<ArgumentException>(() => ring.CreateProtector("HkdfGuard.Cache:SECRET"));
+        Assert.NotEmpty(entry);
+    }
+
     [Fact]
     public void Encrypt_OnEmptyRing_ThrowsInvalidOperationException()
     {

@@ -4,7 +4,7 @@ namespace HkdfGuard.Options;
 
 /// <summary>
 /// Copies a validated HkdfGuardOptions instance onto a KeyRingBuilder - ServiceName,
-/// CachedKeyExpiry, MaxRefreshFailures/FailOpenOnRefreshFailure, the ephemeral key rotation schedule, every registered KeyFile, and every registered
+/// KeyRefreshInterval, MaxRefreshFailures/FailOpenOnRefreshFailure, the ephemeral key rotation schedule, every registered KeyFile, and every registered
 /// EphemeralKey. The caller still supplies WithKeyWrapper/WithCryptoProviderFactory/
 /// WithFormatProvider and calls Build() themselves - those are behavior, not something
 /// HkdfGuardOptions can carry as data.
@@ -16,8 +16,8 @@ public static class HkdfGuardOptionsExtensions
         if (options.ServiceName is not null)
             builder.WithServiceName(options.ServiceName);
 
-        if (options.CachedKeyExpiry is { } cachedKeyExpiry)
-            builder.WithCachedKeyExpiry(cachedKeyExpiry);
+        if (options.KeyRefreshInterval is { } keyRefreshInterval)
+            builder.WithKeyRefreshInterval(keyRefreshInterval);
 
         if (options.MaxRefreshFailures is { } maxRefreshFailures)
             builder.WithMaxRefreshFailures(maxRefreshFailures);

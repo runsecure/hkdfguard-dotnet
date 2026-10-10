@@ -11,6 +11,26 @@
     <PackageLicenseExpression>MPL-2.0</PackageLicenseExpression>
   </PropertyGroup>
 
+  <!-- Supply chain. Every project records its full resolved dependency graph, content hashes
+       included, in packages.lock.json; on a CI build restore must match it exactly, so a changed
+       or substituted package fails the build instead of being picked up. nuget.config restricts
+       every package to nuget.org. Update the lock files deliberately, by running dotnet restore
+       with its force-evaluate option after changing a version. -->
+  <PropertyGroup>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(CI)' == 'true' Or '$(TF_BUILD)' == 'true' Or '$(GITHUB_ACTIONS)' == 'true'">
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+    <RestoreLockedMode>true</RestoreLockedMode>
+  </PropertyGroup>
+
+  <!-- The shipped libraries build warning-free and stay that way. -->
+  <PropertyGroup Condition="!$(MSBuildProjectName.EndsWith('.Test')) And '$(MSBuildProjectName)' != 'HkdfGuard.Benchmarks'">
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
   <!-- Every *.Test project shares these: not packable, and xUnit's own API available without a
        per-file using directive. -->
   <PropertyGroup Condition="$(MSBuildProjectName.EndsWith('.Test'))">

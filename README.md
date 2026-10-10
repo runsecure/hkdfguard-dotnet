@@ -26,7 +26,7 @@ tracking and purpose-scoped Additional Authenticated Data (AAD).
   wrapper completes synchronously.
 - **Cached, proactively-refreshed cipher sessions via `ICryptoProvider`.** A revealed DEK is
   bound into an internal cipher session once, not re-revealed on every Encrypt/Decrypt - the
-  configured interval (`CachedKeyExpiry`, 1-300 seconds) sets how often that session is rebuilt
+  configured interval (`KeyRefreshInterval`, 1-300 seconds) sets how often that session is rebuilt
   from a fresh reveal.
   `ICryptoProvider` owns that refresh itself, and does it ahead of time: a background timer,
   ticking every `expirySeconds`, reveals and builds the next session, then swaps it in and
@@ -40,16 +40,17 @@ tracking and purpose-scoped Additional Authenticated Data (AAD).
   disposes its sessions - zeroing every revealed copy of the DEK - raises an
   `hkdfguard.key_access_suspended` event, and every Encrypt/Decrypt throws
   `CryptographicException` until a later refresh succeeds, at which point service resumes with no
-  restart. So revoking the KEK stops a running process within about `3 × CachedKeyExpiry`.
+  restart. So revoking the KEK stops a running process within about `3 × KeyRefreshInterval`.
   `WithMaxRefreshFailures(n)` (or `HkdfGuardOptions.MaxRefreshFailures`) changes `n`; pick it so
-  that `n × CachedKeyExpiry` is longer than any KEK outage you'd rather ride out.
+  that `n × KeyRefreshInterval` is longer than any KEK outage you'd rather ride out.
   `WithFailOpenOnRefreshFailure()` (or `HkdfGuardOptions.FailOpenOnRefreshFailure`) opts out: the
   last good session then stays in use indefinitely, and revoking the KEK never stops the process.
   Either way, give the factory a logger - `new AesGcmCryptoProviderFactory(logger)` - and every
   failed refresh is logged as an error, a suspension as critical, and a resumption as
   information; under fail-open that error is the only sign the KEK is gone. (Providers created
-  directly through `ICryptoProviderFactory` or `AesGcmCryptoProvider.CreateAsync` still treat a
-  null `maxRefreshFailures` as fail-open; the secure default lives in `KeyRingBuilder`.) The concrete
+  directly through `ICryptoProviderFactory` or `AesGcmCryptoProvider.CreateAsync` fail closed by
+  default too, after `RefreshFailurePolicy.DefaultMaxRefreshFailures`; passing a null
+  `maxRefreshFailures` explicitly opts them into fail-open.) The concrete
   session type itself (e.g. `AesGcmCryptoSession`) is an internal implementation detail - callers
   only ever see it through the public `ICryptoProvider` they were given (e.g.
   `AesGcmCryptoProvider`), which exposes Encrypt/Decrypt directly. `ICryptoProviderFactory` is the
@@ -190,7 +191,7 @@ What this means in practice:
 - **Expect the cache to be empty after a restart.** Everything encrypted under an ephemeral key
   becomes unreadable once the process restarts, so treat cached values as rebuildable. Never
   persist them. Rotating the cache key on every restart is intended.
-- **A background refresh is not a rotation.** Every `CachedKeyExpiry` seconds a provider re-reveals
+- **A background refresh is not a rotation.** Every `KeyRefreshInterval` seconds a provider re-reveals
   the same key, to confirm the KEK is still reachable. It never changes which key encrypts; only a
   release, a restart, or a scheduled ephemeral rotation does that.
 - **Size the retention to the cache's life.** A cached value is readable only while the key that
@@ -272,7 +273,7 @@ Node/Python mirror this layering, adding their own consumer branches as they cat
 | `HkdfGuard.Cache` | `ProtectedCache` (an `IProtectedCache` backed by an `IKeyRing` - encrypts under the ring's current key on Add/AddOrUpdate and records its version, reveals under that version on Decrypt, so it follows key rotation; nothing held as plaintext beyond a single call; each value is bound to its name as AAD, so a ciphertext under any other name fails authentication, and names match ignoring ASCII case only) and `ProtectedCacheCollection` (aggregates multiple `IProtectedReadOnlyCache` sources behind one read-only surface, checked in registration order). |
 | `HkdfGuard.EncryptedConfiguration` | `ProtectedConfigurationRoot` (an `IProtectedConfigurationRoot`) - wraps an `IConfigurationRoot`, revealing values formatted as protected secrets via a `KeyRing`; configuration itself only ever holds ciphertext, and `Decrypt` reads fresh from the underlying root every time so `Reload` takes effect immediately. Each value is bound to its own configuration key (`ProtectedConfigurationPurpose`), so a value copied to another key fails to decrypt. |
 | `HkdfGuard.DependencyInjection` | `AddKeyRingAsync` - builds a `KeyRing` asynchronously at registration and registers it as a singleton in an `IServiceCollection`. |
-| `HkdfGuard.Options` | `HkdfGuardOptions`/`HkdfGuardOptionsValidator`/`HkdfGuardOptionsExtensions.ApplyTo` - a plain-data mirror of `KeyRingBuilder`'s configuration surface (`ServiceName`, `CachedKeyExpiry`, `MaxRefreshFailures`/`FailOpenOnRefreshFailure`, key files, ephemeral keys), for binding a `KeyRing`'s identity/policy/key files from configuration. |
+| `HkdfGuard.Options` | `HkdfGuardOptions`/`HkdfGuardOptionsValidator`/`HkdfGuardOptionsExtensions.ApplyTo` - a plain-data mirror of `KeyRingBuilder`'s configuration surface (`ServiceName`, `KeyRefreshInterval`, `MaxRefreshFailures`/`FailOpenOnRefreshFailure`, key files, ephemeral keys), for binding a `KeyRing`'s identity/policy/key files from configuration. |
 | `HkdfGuard.Diagnostics.Test`, `HkdfGuard.Abstractions.Test`, `HkdfGuard.CryptoProvider.AesGcm256.Test`, `HkdfGuard.KeyWrapping.V1.Test`, `HkdfGuard.DataEncryptionKey.Test`, `HkdfGuard.Cache.Test`, `HkdfGuard.EncryptedConfiguration.Test`, `HkdfGuard.DependencyInjection.Test`, `HkdfGuard.Options.Test` | xUnit test suites, maintained at full line/branch coverage for their respective projects. |
 
 Requires **.NET 10** (`net10.0`).
@@ -363,8 +364,8 @@ files - one per version - then reads each file, mints its own `ICryptoProvider` 
 `WithEphemeralKey` registers a version whose key is instead generated fresh at build time (via
 `ICryptoProviderFactory.CreateEphemeralAsync`) and never written to disk - it shares the same
 `IKeyWrapper`/`ICryptoProviderFactory`, so no extra configuration is needed for it. Range checks
-happen in the setters (`WithServiceName`, `WithCachedKeyExpiry`, `WithMaxRefreshFailures`); `BuildAsync` checks that a key
-wrapper, a crypto provider factory, a cached key expiry (there's no default), and at least one key
+happen in the setters (`WithServiceName`, `WithKeyRefreshInterval`, `WithMaxRefreshFailures`); `BuildAsync` checks that a key
+wrapper, a crypto provider factory, a key refresh interval (there's no default), and at least one key
 were configured. Each key file must hold 1 to `WrappedKeyLimits.MaxBytes` (512) bytes; `BuildAsync`
 never reads more than one byte past that, so pointing it at the wrong file can't make startup
 allocate an unbounded buffer. The limit leaves room for larger keys and extra fingerprinting
@@ -379,7 +380,7 @@ cloud KMS). There is no synchronous `Build()` - await it at startup.
 ```csharp
 var ring = await new KeyRingBuilder()
     .WithServiceName("my.service")
-    .WithCachedKeyExpiry(60)   // seconds, 1-300 - required before building
+    .WithKeyRefreshInterval(60)   // seconds, 1-300 - required before building
     .WithMaxRefreshFailures(5) // optional: default 3; WithFailOpenOnRefreshFailure() opts out of failing closed
     .WithKeyWrapper(new NativeHkdfKeyWrapperV1("my.service"))
     .WithCryptoProviderFactory(new AesGcmCryptoProviderFactory(logger)) // logger: ILogger<AesGcmCryptoProvider>
@@ -405,7 +406,7 @@ thrown away. Once the ring has been resolved, the container owns it and disposes
 ```csharp
 await builder.Services.AddKeyRingAsync(ring => ring
     .WithServiceName("my.service")
-    .WithCachedKeyExpiry(60)
+    .WithKeyRefreshInterval(60)
     .WithKeyWrapper(new NativeHkdfKeyWrapperV1("my.service"))
     .WithCryptoProviderFactory(new AesGcmCryptoProviderFactory())
     .WithKeyFile(version: 1, pathToFile: "/path/to/wrapped-dek-v1.bin"));
@@ -536,9 +537,22 @@ All telemetry lives in `HkdfGuard.Diagnostics`. `HkdfGuardTelemetry` exposes one
 `CryptoProviderAesGcm256`, `KeyWrapping`), each with its own `ActivitySource`/`Meter` and an
 `EnableSensitiveLogging` flag - `Root`/`Cache`/`DataProtection`/`EncryptedConfiguration` share one
 flag; `CryptoProviderAesGcm256` and `KeyWrapping` each keep their own, independent flag. When
-enabled, operations emit a fixed-name `hkdfguard.sensitive_operation` debug event carrying only
-non-sensitive metadata (lengths, versions, identifiers) as attributes - raw key, plaintext, and
-ciphertext bytes are never logged, regardless of this setting.
+enabled, operations emit a fixed-name `hkdfguard.sensitive_operation` debug event. Raw key,
+plaintext, and ciphertext bytes are never logged, regardless of this setting, but what the event
+does carry is not nothing - decide before turning it on in production whether your tracing backend
+may hold it:
+
+- **Identifiers**: cache entry names, configuration keys, and protector purposes
+  (`hkdfguard.name`). These often say what a secret is ("ConnectionStrings:Admin"). With a logger,
+  `ProtectedCache` also writes each name to a debug log entry.
+- **Lengths**: plaintext, ciphertext, AAD, and formatted-value lengths. A plaintext length tells
+  an observer how long a secret is - enough to distinguish a 16-character password from a
+  64-character API key.
+- **Key versions**: which version encrypted a value, and whether an added version became current.
+
+Independently of this flag, failures are always recorded on the current activity
+(`RecordException`), and an exception message can name the entry involved - for example a
+duplicate `ProtectedCache.Add` names the existing entry. None includes key or plaintext bytes.
 
 Span, event, attribute, and metric names all follow OpenTelemetry semantic-convention style -
 lowercase, dot-separated (e.g. `hkdfguard.cache.add`, attribute `hkdfguard.plaintext_length`) - see

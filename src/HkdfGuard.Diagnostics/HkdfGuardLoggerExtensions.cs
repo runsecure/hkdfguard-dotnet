@@ -60,6 +60,14 @@ public static partial class HkdfGuardLoggerExtensions
         Message = "Ephemeral key retired: version {KeyVersion} has been removed and its key zeroed; values encrypted under it no longer decrypt.")]
     public static partial void EphemeralKeyRetired(this ILogger logger, int keyVersion);
 
+    /// <summary>
+    /// A key has performed enough encryptions to cross the warning threshold of its AES-GCM
+    /// budget; once it reaches the limit it refuses to encrypt, so rotate it before then.
+    /// </summary>
+    [LoggerMessage(EventId = 10, Level = LogLevel.Warning,
+        Message = "This key has performed {EncryptionCount} encryptions of its {EncryptionLimit} AES-GCM limit; rotate it before the limit, when it stops encrypting.")]
+    public static partial void EncryptionBudgetWarning(this ILogger logger, long encryptionCount, long encryptionLimit);
+
     /// <summary>A retired ephemeral key was removed from the ring but disposing it threw.</summary>
     [LoggerMessage(EventId = 9, Level = LogLevel.Error,
         Message = "Ephemeral key version {KeyVersion} was removed from the ring, but disposing it failed.")]

@@ -390,12 +390,72 @@ public class AesGcmCryptoProviderTests
     }
 
     [Fact]
-    public async Task FailOpen_IsTheDefault()
+    public async Task FailClosed_IsTheDefault_AndNullOptsIntoFailOpen()
     {
-        using var provider = await AesGcmCryptoProvider.CreateAsync(new FakeKeyWrapper(), "wrapped"u8.ToArray(), 60);
+        using var defaulted = await AesGcmCryptoProvider.CreateAsync(new FakeKeyWrapper(), "wrapped"u8.ToArray(), 60);
+        using var failOpen = await AesGcmCryptoProvider.CreateAsync(new FakeKeyWrapper(), "wrapped"u8.ToArray(), 60, maxRefreshFailures: null);
 
-        Assert.Null(provider.MaxRefreshFailures);
-        Assert.False(provider.KeyAccessSuspended);
+        Assert.Equal(RefreshFailurePolicy.DefaultMaxRefreshFailures, defaulted.MaxRefreshFailures);
+        Assert.Equal(3, RefreshFailurePolicy.DefaultMaxRefreshFailures);
+        Assert.Null(failOpen.MaxRefreshFailures);
+        Assert.False(defaulted.KeyAccessSuspended);
+    }
+
+    // --- One encryption budget per key, process-wide -------------------------------------------
+
+    [Fact]
+    public async Task TwoProvidersRevealingTheSameKey_DrawOnOneEncryptionCount()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        using var first = await AesGcmCryptoProvider.CreateAsync(new FakeKeyWrapper { FixedKey = key }, "wrapped"u8.ToArray(), 60);
+        using var second = await AesGcmCryptoProvider.CreateAsync(new FakeKeyWrapper { FixedKey = key }, "wrapped"u8.ToArray(), 60);
+        using var other = await AesGcmCryptoProvider.CreateAsync(new FakeKeyWrapper { FixedKey = RandomNumberGenerator.GetBytes(32) }, "wrapped"u8.ToArray(), 60);
+
+        first.Encrypt("one"u8.ToArray(), new byte[64]);
+        second.Encrypt("two"u8.ToArray(), new byte[64]);
+        second.Encrypt("three"u8.ToArray(), new byte[64]);
+
+        Assert.Equal(3, first.EncryptionCount);
+        Assert.Equal(3, second.EncryptionCount);
+        Assert.Equal(0, other.EncryptionCount);
+    }
+
+    [Fact]
+    public async Task TheSharedCount_OutlivesAProvider_SoRebuildingFromTheSameKeyFileDoesNotResetIt()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        var first = await AesGcmCryptoProvider.CreateAsync(new FakeKeyWrapper { FixedKey = key }, "wrapped"u8.ToArray(), 60);
+        first.Encrypt("one"u8.ToArray(), new byte[64]);
+        await first.DisposeAsync();
+
+        using var rebuilt = await AesGcmCryptoProvider.CreateAsync(new FakeKeyWrapper { FixedKey = key }, "wrapped"u8.ToArray(), 60);
+
+        Assert.Equal(1, rebuilt.EncryptionCount);
+    }
+
+    [Fact]
+    public void TheRegistry_IsKeyedByAnHmac_NotTheKey()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+
+        Assert.Same(EncryptionBudget.For(key), EncryptionBudget.For((byte[])key.Clone()));
+        Assert.NotSame(EncryptionBudget.For(key), EncryptionBudget.For(RandomNumberGenerator.GetBytes(32)));
+    }
+
+    [Fact]
+    public async Task CrossingTheWarningThreshold_IsAlsoLogged_SoItIsSeenWithoutAnActivityListener()
+    {
+        var logger = new RecordingLogger<AesGcmCryptoProvider>();
+        var wrapper = new FakeKeyWrapper { FixedKey = RandomNumberGenerator.GetBytes(32) };
+        using var provider = await AesGcmCryptoProvider.CreateAsync(wrapper, "wrapped"u8.ToArray(), 60, null,
+            new EncryptionBudget(warningThreshold: 2, limit: 10), CancellationToken.None, logger);
+
+        for (var i = 0; i < 4; i++)
+            provider.Encrypt("value"u8.ToArray(), new byte[64]);
+
+        var warning = Assert.Single(logger.Entries, e => e.EventId == 10);
+        Assert.Equal(LogLevel.Warning, warning.Level);
+        Assert.Contains("2 encryptions of its 10", warning.Message);
     }
 
     [Fact]
@@ -468,7 +528,7 @@ public class AesGcmCryptoProviderTests
     {
         var logger = new RecordingLogger<AesGcmCryptoProvider>();
         var wrapper = new FakeKeyWrapper { FixedKey = RandomNumberGenerator.GetBytes(32) };
-        using var provider = await AesGcmCryptoProvider.CreateAsync(wrapper, "wrapped"u8.ToArray(), 1, logger: logger);
+        using var provider = await AesGcmCryptoProvider.CreateAsync(wrapper, "wrapped"u8.ToArray(), 1, maxRefreshFailures: null, logger: logger);
 
         wrapper.ThrowOnDecrypt = new CryptographicException("KEK unreachable");
         await Task.Delay(TimeSpan.FromSeconds(2.6));

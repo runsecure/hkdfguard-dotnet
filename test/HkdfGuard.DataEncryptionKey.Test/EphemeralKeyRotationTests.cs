@@ -20,7 +20,7 @@ public class EphemeralKeyRotationTests
     private static KeyRingBuilder Builder(ICryptoProviderFactory factory) => new KeyRingBuilder()
         .WithKeyWrapper(new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)))
         .WithCryptoProviderFactory(factory)
-        .WithCachedKeyExpiry(60);
+        .WithKeyRefreshInterval(60);
 
     private static string EncryptedVersion(string formatted) => formatted.Split("::")[1];
 
