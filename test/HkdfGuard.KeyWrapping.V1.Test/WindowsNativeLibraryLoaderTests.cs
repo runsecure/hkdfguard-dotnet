@@ -16,6 +16,13 @@ public class WindowsNativeLibraryLoaderTests
     private static readonly SecurityIdentifier TrustedInstaller = new("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464");
     private static readonly SecurityIdentifier Users = new(WellKnownSidType.BuiltinUsersSid, null);
 
+    // Carried by every Artifact Signing leaf, whoever the customer.
+    private const string ArtifactSigningEku = "1.3.6.1.4.1.311.97.1.0";
+
+    // The genuine signing certificate's EKUs.
+    private static readonly string[] GenuineEkus =
+        [ArtifactSigningEku, WindowsNativeLibraryLoader.CodeSigningEku, WindowsNativeLibraryLoader.ExpectedProfileEku];
+
     [WindowsFact]
     public void InstalledPath_IsTheFixedProgramFilesLocation()
     {
@@ -178,6 +185,115 @@ public class WindowsNativeLibraryLoaderTests
         }
     }
 
+    [WindowsFact]
+    public void VerifySignerIdentity_ThePinnedRootProfileAndPublisher_Passes()
+    {
+        VerifySignerIdentity(GenuineEkus);
+    }
+
+    [WindowsFact]
+    public void VerifySignerIdentity_TheRootHashInLowerCase_Passes()
+    {
+        VerifySignerIdentity(GenuineEkus, rootSha256: WindowsNativeLibraryLoader.ExpectedRootSha256.ToLowerInvariant());
+    }
+
+    [WindowsFact]
+    public void VerifySignerIdentity_AnotherRoot_IsRefused()
+    {
+        // e.g. a root a non-administrator added to their own CurrentUser\Root, issuing the same subject.
+        var otherRoot = new string('A', 64);
+
+        var ex = Assert.Throws<SecurityException>(() => VerifySignerIdentity(GenuineEkus, rootSha256: otherRoot));
+
+        Assert.Contains(otherRoot, ex.Message);
+    }
+
+    [WindowsFact]
+    public void VerifySignerIdentity_NoProfileEku_IsRefused()
+    {
+        var ex = Assert.Throws<SecurityException>(() =>
+            VerifySignerIdentity([WindowsNativeLibraryLoader.CodeSigningEku, ArtifactSigningEku]));
+
+        Assert.Contains(WindowsNativeLibraryLoader.ExpectedProfileEku, ex.Message);
+    }
+
+    [WindowsFact]
+    public void VerifySignerIdentity_AnotherArtifactSigningProfile_IsRefused()
+    {
+        // Another Artifact Signing customer's leaf: same root, same shared EKU, its own profile EKU.
+        var ex = Assert.Throws<SecurityException>(() =>
+            VerifySignerIdentity([ArtifactSigningEku, WindowsNativeLibraryLoader.CodeSigningEku, "1.3.6.1.4.1.311.97.1.2.3.4"]));
+
+        Assert.Contains(WindowsNativeLibraryLoader.ExpectedProfileEku, ex.Message);
+    }
+
+    [WindowsFact]
+    public void VerifySignerIdentity_NoCodeSigningEku_IsRefused()
+    {
+        var ex = Assert.Throws<SecurityException>(() =>
+            VerifySignerIdentity([ArtifactSigningEku, WindowsNativeLibraryLoader.ExpectedProfileEku]));
+
+        Assert.Contains(WindowsNativeLibraryLoader.CodeSigningEku, ex.Message);
+    }
+
+    [WindowsFact]
+    public void VerifySignerIdentity_NoEkusAtAll_IsRefused()
+    {
+        Assert.Throws<SecurityException>(() => VerifySignerIdentity([]));
+    }
+
+    [WindowsFact]
+    public void VerifySignerIdentity_AnotherSubject_IsRefused_EvenWithThePinnedRootAndProfile()
+    {
+        var ex = Assert.Throws<SecurityException>(() => VerifySignerIdentity(GenuineEkus, leafSubject: "CN=Someone Else"));
+
+        Assert.Contains("not the expected HkdfGuard publisher", ex.Message);
+    }
+
+    [WindowsFact]
+    public void VerifySignature_WhenTheSignerCantBeRead_FailsClosedWithSecurityException()
+    {
+        var cause = new InvalidOperationException("no chain");
+
+        var ex = Assert.Throws<SecurityException>(() =>
+            WindowsNativeLibraryLoader.VerifySignature("test", WindowsNativeLibraryLoader.ExpectedPublisher, _ => throw cause));
+
+        Assert.Same(cause, ex.InnerException);
+    }
+
+    [WindowsFact]
+    public void VerifySignature_ASecurityExceptionFromTheReader_IsNotWrapped()
+    {
+        var refusal = new SecurityException("untrusted");
+
+        var ex = Assert.Throws<SecurityException>(() =>
+            WindowsNativeLibraryLoader.VerifySignature("test", WindowsNativeLibraryLoader.ExpectedPublisher, _ => throw refusal));
+
+        Assert.Same(refusal, ex);
+    }
+
+    [WindowsFact]
+    public void VerifySignature_AppliesTheSignerPolicyToWhatTheReaderReturns()
+    {
+        var signer = new WindowsNativeLibraryLoader.VerifiedSigner(
+            WindowsNativeLibraryLoader.ExpectedPublisher, GenuineEkus, new string('A', 64));
+
+        Assert.Throws<SecurityException>(() =>
+            WindowsNativeLibraryLoader.VerifySignature("test", WindowsNativeLibraryLoader.ExpectedPublisher, _ => signer));
+    }
+
+    [InstalledWindowsLibraryFact]
+    public void ReadVerifiedSigner_TheInstalledLibrary_ChainsToThePinnedRoot_WithTheProfileEku()
+    {
+        // The chain WinVerifyTrust validated, not one built separately.
+        var signer = WindowsNativeLibraryLoader.ReadVerifiedSigner(WindowsNativeLibraryLoader.InstalledPath);
+
+        Assert.Equal(WindowsNativeLibraryLoader.ExpectedPublisher, signer.LeafSubject);
+        Assert.Equal(WindowsNativeLibraryLoader.ExpectedRootSha256, signer.RootSha256);
+        Assert.Contains(WindowsNativeLibraryLoader.CodeSigningEku, signer.LeafEkuOids);
+        Assert.Contains(WindowsNativeLibraryLoader.ExpectedProfileEku, signer.LeafEkuOids);
+    }
+
     [InstalledWindowsLibraryFact]
     public void VerifyLocation_TheInstalledLibrary_Passes()
     {
@@ -248,6 +364,9 @@ public class WindowsNativeLibraryLoaderTests
 
         Assert.True(status < 0);
     }
+
+    private static void VerifySignerIdentity(string[] leafEkuOids, string leafSubject = WindowsNativeLibraryLoader.ExpectedPublisher, string rootSha256 = WindowsNativeLibraryLoader.ExpectedRootSha256)
+        => WindowsNativeLibraryLoader.VerifySignerIdentity("test", leafSubject, leafEkuOids, rootSha256, WindowsNativeLibraryLoader.ExpectedPublisher);
 
     private static FileSecurity Security(SecurityIdentifier owner, params (SecurityIdentifier Who, FileSystemRights Rights)[] allows)
     {

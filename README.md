@@ -328,7 +328,14 @@ On **Windows**, before mapping it, `WindowsNativeLibraryLoader` requires all of 
 - No folder on its path is a symlink or junction.
 - The file and every parent folder below the drive root are owned and writable only by SYSTEM,
   Administrators or TrustedInstaller.
-- The file has a valid, trusted Authenticode signature from the expected publisher.
+- The file has a valid, trusted Authenticode signature from the expected publisher. The chain
+  WinVerifyTrust validated must end at the pinned Azure Artifact Signing root (Microsoft Identity
+  Verification Root Certificate Authority 2020, matched by SHA-256, not by name). The signing
+  certificate must carry the Code Signing EKU and the EKU of HkdfGuard's own Artifact Signing
+  certificate profile. A matching subject from any other trusted root is refused, including a root
+  a user added to their own certificate store. The leaf and intermediate certificates are not
+  pinned, because Artifact Signing reissues them often. No revocation check or certificate download
+  is made, so loading never touches the network.
 
 Its dependencies are then loaded from System32 only. Any failed check throws, with no fallback, so
 a DLL planted on `PATH` or beside the application is never loaded.

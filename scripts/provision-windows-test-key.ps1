@@ -10,8 +10,8 @@
     Must run from an elevated PowerShell: creating a machine-wide KEK requires administrator rights.
 
     Before running the tool, the script checks that it is the signed HkdfGuard tool from the fixed
-    install location - the same publisher the library's own loader requires - so an elevated session
-    never runs an impostor.
+    install location - the same publisher, pinned root and Artifact Signing profile the library's
+    own loader requires - so an elevated session never runs an impostor.
 
     Once provisioned, the native tests in HkdfGuard.KeyWrapping.V1.Test run automatically on this
     machine instead of being reported as skipped:
@@ -34,8 +34,13 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-# The same publisher WindowsNativeLibraryLoader.ExpectedPublisher requires of HkdfGuardV1.dll.
+# The same publisher, root and Artifact Signing profile WindowsNativeLibraryLoader requires of
+# HkdfGuardV1.dll (ExpectedPublisher, ExpectedRootSha256, ExpectedProfileEku). Only the root is
+# pinned: Artifact Signing reissues the leaf every few days and rotates its intermediates.
 $ExpectedPublisher = 'CN=Torin Blair, O=Torin Blair, L=Littleton, S=co, C=US'
+$ExpectedRootSha256 = '5367F20C7ADE0E2BCA790915056D086B720C33C1FA2A2661ACF787E3292E1270'
+$ExpectedProfileEku = '1.3.6.1.4.1.311.97.492781510.305179978.413069662.611988563'
+$CodeSigningEku = '1.3.6.1.5.5.7.3.3'
 
 if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
     throw 'This script provisions a Windows KEK and must run on Windows.'
@@ -59,6 +64,39 @@ if ($signature.Status -ne 'Valid') {
 }
 if ($signature.SignerCertificate.Subject -ne $ExpectedPublisher) {
     throw "'$tool' is signed by '$($signature.SignerCertificate.Subject)', not the HkdfGuard publisher. Refusing to run it elevated."
+}
+
+# Get-AuthenticodeSignature has checked the chain is trusted, but any trusted root could issue that
+# subject. Rebuild the chain offline from the certificates embedded in the signature to see which
+# root it ends at. Expiry is ignored: the leaf lives only days, and the signature's timestamp,
+# already verified above, is what keeps it valid.
+$embedded = [Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
+$embedded.Import($tool)
+$chain = [Security.Cryptography.X509Certificates.X509Chain]::new()
+try {
+    $policy = $chain.ChainPolicy
+    $policy.RevocationMode = 'NoCheck'
+    $policy.VerificationFlags = 'IgnoreNotTimeValid'
+    $policy.ExtraStore.AddRange($embedded)
+    if ($policy.PSObject.Properties['DisableCertificateDownloads']) {
+        $policy.DisableCertificateDownloads = $true # not in Windows PowerShell's .NET Framework
+    }
+    if (-not $chain.Build($signature.SignerCertificate)) {
+        throw "'$tool' has no complete, trusted certificate chain ($(($chain.ChainStatus | ForEach-Object Status) -join ', ')). Refusing to run it elevated."
+    }
+    $root = $chain.ChainElements[$chain.ChainElements.Count - 1].Certificate
+    $rootSha256 = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($root.RawData)) -replace '-', ''
+}
+finally {
+    $chain.Dispose()
+}
+if ($rootSha256 -ne $ExpectedRootSha256) {
+    throw "'$tool' chains to '$($root.Subject)' (SHA-256 $rootSha256), not the Artifact Signing root HkdfGuard is signed under. Refusing to run it elevated."
+}
+
+$ekus = @($signature.SignerCertificate.EnhancedKeyUsageList | ForEach-Object ObjectId)
+if ($ekus -cnotcontains $CodeSigningEku -or $ekus -cnotcontains $ExpectedProfileEku) {
+    throw "'$tool' is not signed for code signing under HkdfGuard's Artifact Signing profile (EKUs: $($ekus -join ', ')). Refusing to run it elevated."
 }
 
 Write-Host "Provisioning the KEK for service '$ServiceName'..."
