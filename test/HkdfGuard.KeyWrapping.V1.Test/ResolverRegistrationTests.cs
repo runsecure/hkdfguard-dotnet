@@ -31,7 +31,8 @@ public class ResolverRegistrationTests
             return installed; // what this caller can rely on once Run returns
         });
 
-        Assert.False(second.Wait(TimeSpan.FromMilliseconds(200)), "the second caller returned before the install finished");
+        var secondReturnedEarly = await Task.WhenAny(second, Task.Delay(TimeSpan.FromMilliseconds(200))) == second;
+        Assert.False(secondReturnedEarly, "the second caller returned before the install finished");
 
         release.Set();
         await first;

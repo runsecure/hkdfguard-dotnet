@@ -19,8 +19,10 @@ namespace HkdfGuard.KeyWrapping.V1.Interop;
 /// when the system install merely can't be examined (lstat fails with anything but ENOENT or
 /// ENOTDIR, say EACCES): only "nothing is there" counts as "not installed".</item>
 /// <item><b>Path integrity.</b> No component of the path, from the file up to /, may be a symbolic
-/// link, or writable by anyone other than its owner - except root-owned directories writable by
-/// the wheel or admin group, as /Library's are. Every component of a system install must be owned
+/// link, or writable by anyone other than its owner - except that the system directories above
+/// an install (/, /Library, /Library/Application Support, /Users) may also be writable by the
+/// wheel or admin group when root owns them, as /Library/Application Support often is. The
+/// install's own directories and the file get no such exception. Every component of a system install must be owned
 /// by root; of a user install, by root or the current user. So only root, or for a user install
 /// the user themselves, could have put the file there.</item>
 /// <item><b>Code signature.</b> The file's signature must be valid and satisfy
@@ -66,6 +68,12 @@ internal static class MacOsNativeLibraryLoader
     // gid 0 (wheel) and 80 (admin): on macOS, root-owned system directories such as
     // /Library/Application Support may be writable by these groups. Both are administrators.
     private static readonly uint[] AdministrativeGroups = [0, 80];
+
+    // The only directories that exception applies to: the system ones above the two installs,
+    // which macOS - not the HkdfGuard installer - owns and permissions. Everything from the
+    // install's own directory down must be writable by its owner alone.
+    private static readonly HashSet<string> SharedSystemDirectories =
+        new(["/", "/Library", "/Library/Application Support", "/Users"], StringComparer.Ordinal);
 
     /// <summary>The library's own minimum (its LC_BUILD_VERSION minos).</summary>
     internal static readonly Version MinimumMacOsVersion = new(13, 0);
@@ -258,9 +266,9 @@ internal static class MacOsNativeLibraryLoader
             throw new SecurityException($"'{path}' is writable by every user; the HkdfGuard native library is only loaded from a location only its owner can modify.");
 
         if (status.Permissions.HasFlag(UnixFileMode.GroupWrite)
-            && !(status.OwnerId == 0 && AdministrativeGroups.Contains(status.GroupId)))
+            && !(status.OwnerId == 0 && AdministrativeGroups.Contains(status.GroupId) && SharedSystemDirectories.Contains(path)))
             throw new SecurityException(
-                $"'{path}' is writable by group {status.GroupId}; the HkdfGuard native library is only loaded from a location only its owner (or, for a root-owned directory, administrators) can modify.");
+                $"'{path}' is writable by group {status.GroupId}; the HkdfGuard native library is only loaded from a location only its owner can modify (administrators may also write only to the system directories above an install: {string.Join(", ", SharedSystemDirectories.Order(StringComparer.Ordinal))}).");
     }
 
     /// <summary>Requires a valid code signature that satisfies <see cref="CodeRequirement"/>.</summary>

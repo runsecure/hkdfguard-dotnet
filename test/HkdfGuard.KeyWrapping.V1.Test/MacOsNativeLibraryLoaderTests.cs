@@ -257,6 +257,63 @@ public class MacOsNativeLibraryLoaderTests
         Verify(fs, MacOsNativeLibraryLoader.SystemPath, SystemOwners);
     }
 
+    [Theory]
+    [InlineData("/")]
+    [InlineData("/Library")]
+    [InlineData("/Library/Application Support")]
+    public void TheSystemDirectoriesAboveASystemInstall_MayBeAdminWritable(string directory)
+    {
+        var fs = SystemInstall();
+        fs[directory] = Dir(Root, Admin, Mode775);
+
+        Verify(fs, MacOsNativeLibraryLoader.SystemPath, SystemOwners);
+    }
+
+    [Fact]
+    public void Users_MayBeAdminWritable_AboveAUserInstall()
+    {
+        var fs = UserInstall();
+        fs["/Users"] = Dir(Root, Admin, Mode775);
+
+        Verify(fs, MacOsNativeLibraryLoader.UserPath(Home), UserOwners);
+    }
+
+    [Theory]
+    [InlineData("/Library/Application Support/HkdfGuard")]
+    [InlineData("/Library/Application Support/HkdfGuard/v1")]
+    public void TheInstallsOwnDirectories_AreNeverAdminWritable_EvenWhenRootOwned(string directory)
+    {
+        foreach (var group in new[] { Wheel, Admin })
+        {
+            var fs = SystemInstall();
+            fs[directory] = Dir(Root, group, Mode775);
+
+            var ex = Assert.Throws<SecurityException>(() => Verify(fs, MacOsNativeLibraryLoader.SystemPath, SystemOwners));
+
+            Assert.Contains($"'{directory}' is writable by group {group}", ex.Message);
+        }
+    }
+
+    [Fact]
+    public void TheLibraryFile_IsNeverAdminWritable_EvenWhenRootOwned()
+    {
+        var fs = SystemInstall();
+        fs[MacOsNativeLibraryLoader.SystemPath] = File(Root, Admin, Mode644 | UnixFileMode.GroupWrite);
+
+        Assert.Throws<SecurityException>(() => Verify(fs, MacOsNativeLibraryLoader.SystemPath, SystemOwners));
+    }
+
+    [Fact]
+    public void AnotherRootOwnedDirectory_IsNotAdminWritable_JustBecauseItLooksLikeASystemOne()
+    {
+        // The exception is by exact path: a root-owned, admin-writable directory elsewhere - here
+        // a home directory a user install sits under - gets no exception.
+        var fs = UserInstall();
+        fs[Home] = Dir(Root, Admin, Mode775);
+
+        Assert.Throws<SecurityException>(() => Verify(fs, MacOsNativeLibraryLoader.UserPath(Home), UserOwners));
+    }
+
     [Fact]
     public void ASymbolicLinkedDirectory_IsRefused()
     {

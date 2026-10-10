@@ -342,8 +342,10 @@ system install that merely can't be examined (say, a directory this process may 
 - No component of the path, up to `/`, is a symbolic link.
 - Every component of a system install is owned by root; of a user install, by root or the current
   user.
-- No component is writable by anyone but its owner. The one exception is root-owned directories
-  writable by the `wheel` or `admin` group, as `/Library/Application Support` is.
+- No component is writable by anyone but its owner. The one exception is the system directories
+  above an install (`/`, `/Library`, `/Library/Application Support`, `/Users`), which may also be
+  writable by the `wheel` or `admin` group when root owns them, as `/Library/Application Support`
+  often is. The install's own directories and the library file never are.
 - The file's code signature is valid, carries the identifier `libhkdfguard_v1`, and was made with
   a Developer ID Application certificate issued through Apple's CA to the HkdfGuard team
   (`MFW3T8R8J3`). A development-signed build, or any other binary the team signs, is refused.

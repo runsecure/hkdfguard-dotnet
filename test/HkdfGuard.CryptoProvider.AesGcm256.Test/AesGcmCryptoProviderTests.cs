@@ -477,7 +477,7 @@ public class AesGcmCryptoProviderTests
         var encryptError = Assert.Throws<CryptographicException>(() => provider.Encrypt("x"u8.ToArray(), new byte[64]));
         Assert.Contains("suspended", encryptError.Message);
         Assert.Throws<CryptographicException>(() => provider.Decrypt(ciphertext.AsSpan(0, written), new byte[plaintext.Length]));
-        var suspended = Assert.Single(refreshes.SelectMany(a => a.Events).Where(e => e.Name == EventNames.KeyAccessSuspended));
+        var suspended = Assert.Single(refreshes.SelectMany(a => a.Events), e => e.Name == EventNames.KeyAccessSuspended);
         Assert.Equal(2, suspended.Tags.Single(t => t.Key == AttributeNames.ConsecutiveFailures).Value);
 
         // The KEK comes back: the next successful refresh resumes service with the same DEK.
