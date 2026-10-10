@@ -205,6 +205,33 @@ public class HkdfGuardOptionsValidatorTests
     }
 
     [Theory]
+    [InlineData(1)]
+    [InlineData(24)]
+    [InlineData(24 * 365)]
+    public void Validate_EphemeralKeyRetentionHoursAtLeastOne_Succeeds(int hours)
+    {
+        var options = ValidOptions();
+        options.EphemeralKeyRetentionHours = hours;
+
+        Assert.True(new HkdfGuardOptionsValidator().Validate(null, options).Succeeded);
+        Assert.Equal(TimeSpan.FromHours(hours), options.ApplyTo(new KeyRingBuilder()).EphemeralKeyRetention);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void Validate_EphemeralKeyRetentionHoursBelowOne_Fails(int hours)
+    {
+        var options = ValidOptions();
+        options.EphemeralKeyRetentionHours = hours;
+
+        var result = new HkdfGuardOptionsValidator().Validate(null, options);
+
+        Assert.True(result.Failed);
+        Assert.Contains(result.Failures!, f => f.Contains("EphemeralKeyRetentionHours"));
+    }
+
+    [Theory]
     [InlineData(0)]
     [InlineData(-1)]
     [InlineData(HkdfGuardOptions.MaxEphemeralKeyRotationHours + 1)]

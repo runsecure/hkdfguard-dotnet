@@ -8,24 +8,26 @@ tracking and purpose-scoped Additional Authenticated Data (AAD).
 
 ## Key concepts
 
-- **The KEK never enters this process, and a revealed DEK is held only as long as configured.**
+- **The KEK never enters this process, and a revealed DEK lives only in pinned memory.**
   Wrapping/unwrapping a data encryption key (DEK) is delegated entirely to the native KMS library
   for the current OS (`NativeHkdfKeyWrapperV1`) - the KEK never leaves that native library. This
-  library sees the wrapped payload and the revealed DEK, which it caches in memory for at most the
-  configured expiry (1-300 seconds) and zeroes when replaced or disposed; it never writes a
-  plaintext DEK to disk.
+  library sees the wrapped payload and the revealed DEK. It holds the DEK in pinned memory for as
+  long as that key is in use, and zeroes it when the ring is disposed, when the key fails closed
+  because the KEK became unavailable, or, for an ephemeral key, when its retention ends; it never
+  writes a plaintext DEK to disk.
 - **Identified by service name, not a shared master key.** A key is identified to the native KMS
   library by a service name - not by any secret this library holds itself. `KeyRingBuilder` carries this,
-  along with a cache-expiry/rotation policy, fluently.
+  along with a key refresh/rotation policy, fluently.
 - **One `IKeyWrapper` per KEK, not per wrapped payload.** `IKeyWrapper.UnwrapAsync` takes the
   wrapped payload as an explicit argument, so a single wrapper instance (bound only to a KEK - e.g. a
   `NativeHkdfKeyWrapperV1` for one service name) can reveal any number of different wrapped DEKs
   sharing that KEK, one per registered key file. Its methods (`WrapAsync`/`UnwrapAsync`/
   `GenerateAndWrapAsync`) are asynchronous so network-backed KEKs can be awaited; the native
   wrapper completes synchronously.
-- **Cached, expiring, proactively-refreshed cipher sessions via `ICryptoProvider`.** A revealed
-  DEK is bound into an internal cipher session once, not re-derived on every Encrypt/Decrypt - the
-  configured expiry (1-300 seconds) marks when it should be refreshed instead of reused.
+- **Cached, proactively-refreshed cipher sessions via `ICryptoProvider`.** A revealed DEK is
+  bound into an internal cipher session once, not re-revealed on every Encrypt/Decrypt - the
+  configured interval (`CachedKeyExpiry`, 1-300 seconds) sets how often that session is rebuilt
+  from a fresh reveal.
   `ICryptoProvider` owns that refresh itself, and does it ahead of time: a background timer,
   ticking every `expirySeconds`, reveals and builds the next session, then swaps it in and
   disposes the outgoing one (zeroing its key) - so an Encrypt/Decrypt call never pays the unwrap
@@ -135,20 +137,29 @@ event outside the running process:
 | Data encryption keys in key files | Every release | The release pipeline generates a fresh DEK, re-encrypts that release's configuration under it, wraps it into a new key file, and deploys the file. Nothing is carried over from the previous release. |
 | Ephemeral keys (`WithEphemeralKey`) | Every 24 hours by default, and on every application restart | Generated in memory and never written anywhere. On a schedule the ring generates a fresh one and adds it as the next version, so every later `Encrypt` uses it. A restart discards them all and builds a new ring. |
 
-Scheduled ephemeral rotation only ever adds keys. Earlier ephemeral keys stay registered, so
-values encrypted under them still decrypt until the process restarts. Configure the schedule on
-the builder, or in configuration through `HkdfGuardOptions`:
+A rotation adds the new key and keeps the one it replaced for a **retention** period (24 hours
+by default), so values encrypted just before the rotation still decrypt. Once a superseded key
+has been out of use for that long, the next rotation retires it: it is removed from the ring and
+disposed, zeroing its DEK and stopping its background refresh, and anything still encrypted under
+it fails with `KeyNotFoundException`. A ring therefore holds at most about `retention / interval`
+superseded ephemeral keys, however long the process runs. Keys from key files are never retired.
+Configure both on the builder, or in configuration through `HkdfGuardOptions`:
 
 ```csharp
-builder.WithEphemeralKeyRotation(TimeSpan.FromHours(6)); // 1 minute to ~49 days; default 24 hours
-builder.WithoutEphemeralKeyRotation();                   // keep the startup key until restart
-builder.WithLogger(logger);                              // ILogger<KeyRing>: logs each rotation and failure
+builder.WithEphemeralKeyRotation(TimeSpan.FromHours(6));  // 1 hour to ~49 days; default 24 hours
+builder.WithEphemeralKeyRetention(TimeSpan.FromHours(12)); // at least 1 minute; default 24 hours
+builder.WithoutEphemeralKeyRotation();                    // keep the startup key until restart
+builder.WithLogger(logger);                               // ILogger<KeyRing>: logs each rotation, retirement and failure
 ```
 
 ```jsonc
 { "EphemeralKeyRotationHours": 6 }          // 1-1193
+{ "EphemeralKeyRetentionHours": 12 }        // at least 1; default 24
 { "DisableEphemeralKeyRotation": true }
 ```
+
+Rotation can't be set below one hour. Each rotation generates a key through the KEK and starts a
+background refresh loop for it, so rotating faster buys nothing and only loads the KMS.
 
 A ring built only from key files never rotates on a schedule; its key-file version stays current.
 If creating a new key fails, for example because the KEK is unreachable, the current key stays in
@@ -182,9 +193,11 @@ What this means in practice:
 - **A background refresh is not a rotation.** Every `CachedKeyExpiry` seconds a provider re-reveals
   the same key, to confirm the KEK is still reachable. It never changes which key encrypts; only a
   release, a restart, or a scheduled ephemeral rotation does that.
-- **Old ephemeral keys accumulate until restart.** Each one keeps its own background refresh
-  running. At the default schedule that is one more key per day of uptime, so a process that runs
-  for months carries months of keys. Restarting periodically resets this.
+- **Size the retention to the cache's life.** A cached value is readable only while the key that
+  encrypted it is in the ring: the current key, or a superseded one still within retention. With
+  the defaults (24-hour rotation, 24-hour retention) a value written just before a rotation stays
+  readable for at least 24 hours and at most 48. If values must live longer, raise the retention;
+  if a key's exposure window matters more, lower it and treat older cached values as rebuildable.
 
 ## Architecture overview
 

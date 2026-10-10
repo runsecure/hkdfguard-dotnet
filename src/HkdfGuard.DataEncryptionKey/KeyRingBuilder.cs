@@ -32,11 +32,25 @@ public sealed class KeyRingBuilder
     /// <summary>How often a ring with ephemeral keys adds a fresh one as its current version, unless configured otherwise.</summary>
     public static readonly TimeSpan DefaultEphemeralKeyRotationInterval = TimeSpan.FromHours(24);
 
-    /// <summary>Shortest rotation interval <see cref="WithEphemeralKeyRotation"/> accepts.</summary>
-    public static readonly TimeSpan MinEphemeralKeyRotationInterval = TimeSpan.FromMinutes(1);
+    /// <summary>
+    /// Shortest rotation interval <see cref="WithEphemeralKeyRotation"/> accepts. Every rotation
+    /// generates a key through the KEK and starts another background refresh loop, so rotating
+    /// faster than this buys no security and only loads the KMS.
+    /// </summary>
+    public static readonly TimeSpan MinEphemeralKeyRotationInterval = TimeSpan.FromHours(1);
 
     /// <summary>Longest rotation interval <see cref="WithEphemeralKeyRotation"/> accepts - the longest period a timer supports, about 49.7 days.</summary>
     public static readonly TimeSpan MaxEphemeralKeyRotationInterval = TimeSpan.FromMilliseconds(uint.MaxValue - 1);
+
+    /// <summary>
+    /// How long a superseded ephemeral key stays in the ring for decryption, unless configured
+    /// otherwise: values encrypted under it remain readable for at least this long after a rotation
+    /// replaced it, then it is disposed (zeroing its DEK) and removed.
+    /// </summary>
+    public static readonly TimeSpan DefaultEphemeralKeyRetention = TimeSpan.FromHours(24);
+
+    /// <summary>Shortest retention <see cref="WithEphemeralKeyRetention"/> accepts.</summary>
+    public static readonly TimeSpan MinEphemeralKeyRetention = TimeSpan.FromMinutes(1);
 
     /// <summary>
     /// The refresh-failure policy every built provider gets unless configured otherwise: fail
@@ -64,9 +78,18 @@ public sealed class KeyRingBuilder
     public TimeSpan? EphemeralKeyRotationInterval { get; private set; } = DefaultEphemeralKeyRotationInterval;
 
     /// <summary>
+    /// How long a superseded ephemeral key stays registered for decryption after a rotation
+    /// replaces it, before the ring disposes and removes it. Defaults to
+    /// <see cref="DefaultEphemeralKeyRetention"/>. Only a ring that rotates ever supersedes a key,
+    /// so this has no effect without rotation.
+    /// </summary>
+    public TimeSpan EphemeralKeyRetention { get; private set; } = DefaultEphemeralKeyRetention;
+
+    /// <summary>
     /// Sets how often the built ring rotates its ephemeral encryption key: each interval it
     /// generates a fresh ephemeral key and adds it at CurrentVersion + 1, so every later Encrypt
-    /// uses it. Earlier keys stay registered, so what they encrypted still decrypts.
+    /// uses it. Earlier keys stay registered for <see cref="EphemeralKeyRetention"/>, so what they
+    /// encrypted still decrypts for that long.
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">interval is outside
     /// <see cref="MinEphemeralKeyRotationInterval"/>-<see cref="MaxEphemeralKeyRotationInterval"/></exception>
@@ -98,6 +121,31 @@ public sealed class KeyRingBuilder
     }
 
     /// <summary>
+    /// Sets how long a superseded ephemeral key stays registered for decryption after a rotation
+    /// replaces it. Once that long has passed - checked at the next rotation - the key is disposed,
+    /// zeroing its DEK, and removed: a value encrypted under it then fails with
+    /// KeyNotFoundException. Keys read from key files are never retired. Not calling this keeps
+    /// <see cref="DefaultEphemeralKeyRetention"/>.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">retention is below <see cref="MinEphemeralKeyRetention"/></exception>
+    public KeyRingBuilder WithEphemeralKeyRetention(TimeSpan retention)
+    {
+        if (retention < MinEphemeralKeyRetention)
+            throw new ArgumentOutOfRangeException(nameof(retention), retention,
+                $"The ephemeral key retention must be at least {MinEphemeralKeyRetention}.");
+
+        EphemeralKeyRetention = retention;
+        return this;
+    }
+
+    // Tests only: any positive retention, so retirement can be observed in milliseconds.
+    internal KeyRingBuilder WithEphemeralKeyRetentionForTesting(TimeSpan retention)
+    {
+        EphemeralKeyRetention = retention;
+        return this;
+    }
+
+    /// <summary>
     /// Receives an informational entry for every ephemeral key rotation and an error for every
     /// failed one. Optional.
     /// </summary>
@@ -121,8 +169,12 @@ public sealed class KeyRingBuilder
     }
 
     /// <summary>
-    /// How many seconds a revealed key may be cached in memory before it must be re-derived -
-    /// the same 1-300 range AesGcmCryptoProvider accepts, so a bad value fails here, not at Build.
+    /// How often, in seconds, each key is re-revealed through the KEK to confirm the KEK is still
+    /// available - the same 1-300 range AesGcmCryptoProvider accepts, so a bad value fails here,
+    /// not at Build. A revocation check, not a limit on how long the DEK stays in memory: the same
+    /// DEK is revealed each time, and it stays in memory until the ring is disposed. Together with
+    /// <see cref="MaxRefreshFailures"/> it sets how quickly a revoked KEK stops a running process -
+    /// about MaxRefreshFailures × CachedKeyExpiry.
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">cachedKeyExpiry is not between 1 and 300</exception>
     public KeyRingBuilder WithCachedKeyExpiry(int cachedKeyExpiry)
@@ -269,6 +321,7 @@ public sealed class KeyRingBuilder
                 var wrapper = _keyWrapper;
                 var expiry = CachedKeyExpiry.Value;
                 var maxRefreshFailures = MaxRefreshFailures;
+                ring.ConfigureEphemeralKeyRetention(EphemeralKeyRetention, _ephemeralVersions);
                 ring.StartEphemeralKeyRotation(interval, async ct =>
                     new DataEncryptionKey(await factory.CreateEphemeralAsync(wrapper, expiry, maxRefreshFailures, ct).ConfigureAwait(false)),
                     _logger);

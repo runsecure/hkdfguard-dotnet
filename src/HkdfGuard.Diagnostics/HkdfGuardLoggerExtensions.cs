@@ -51,4 +51,17 @@ public static partial class HkdfGuardLoggerExtensions
     [LoggerMessage(EventId = 7, Level = LogLevel.Error,
         Message = "Ephemeral key rotation failed; version {KeyVersion} stays current until the next attempt.")]
     public static partial void EphemeralKeyRotationFailed(this ILogger logger, int keyVersion, Exception exception);
+
+    /// <summary>
+    /// A superseded ephemeral key's retention ran out: it has been removed from the ring and
+    /// disposed, so values encrypted under it can no longer be decrypted.
+    /// </summary>
+    [LoggerMessage(EventId = 8, Level = LogLevel.Information,
+        Message = "Ephemeral key retired: version {KeyVersion} has been removed and its key zeroed; values encrypted under it no longer decrypt.")]
+    public static partial void EphemeralKeyRetired(this ILogger logger, int keyVersion);
+
+    /// <summary>A retired ephemeral key was removed from the ring but disposing it threw.</summary>
+    [LoggerMessage(EventId = 9, Level = LogLevel.Error,
+        Message = "Ephemeral key version {KeyVersion} was removed from the ring, but disposing it failed.")]
+    public static partial void EphemeralKeyRetirementFailed(this ILogger logger, int keyVersion, Exception exception);
 }

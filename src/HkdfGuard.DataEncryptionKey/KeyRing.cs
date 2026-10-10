@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using HkdfGuard.DataEncryptionKey.Protector;
 using HkdfGuard.Abstractions;
 using HkdfGuard.Diagnostics;
@@ -24,9 +25,12 @@ namespace HkdfGuard.DataEncryptionKey;
 ///
 /// A ring built with ephemeral keys also rotates its encryption key on a schedule (see
 /// KeyRingBuilder.WithEphemeralKeyRotation): every interval it generates a fresh ephemeral key and
-/// Adds it at CurrentVersion + 1, so it becomes current and every later Encrypt uses it. Nothing
-/// is removed - earlier keys stay registered so everything already encrypted under them still
-/// decrypts. Dispose stops the rotation before disposing any key.
+/// Adds it at CurrentVersion + 1, so it becomes current and every later Encrypt uses it. A
+/// superseded ephemeral key stays registered for <see cref="EphemeralKeyRetention"/>, so values
+/// encrypted under it still decrypt for that long; then the next rotation disposes it (zeroing its
+/// DEK and stopping its background refresh) and removes it, so a ring never accumulates keys
+/// without bound. Keys read from key files are never retired. Dispose stops the rotation before
+/// disposing any key.
 /// </summary>
 public sealed class KeyRing(IEncryptedFormatProvider formatProvider) : IKeyRing, IDisposable, IAsyncDisposable
 {
@@ -41,11 +45,36 @@ public sealed class KeyRing(IEncryptedFormatProvider formatProvider) : IKeyRing,
     private CancellationTokenSource? _rotationCts;
     private Task? _rotationTask;
 
+    // Retention state. Only the single rotation loop (or a test driving one rotation at a time)
+    // touches these after construction, so they need no synchronization of their own.
+    private readonly HashSet<int> _ephemeralVersions = [];
+    // Version -> the Stopwatch timestamp at which a rotation first saw it superseded. Monotonic,
+    // so a wall-clock jump can neither retire a key early nor keep it forever.
+    private readonly Dictionary<int, long> _supersededAt = [];
+
     /// <summary>
     /// How often this ring adds a fresh ephemeral key as its new current version; null when it
     /// doesn't rotate (no ephemeral keys, or rotation turned off).
     /// </summary>
     public TimeSpan? EphemeralKeyRotationInterval { get; private set; }
+
+    /// <summary>
+    /// How long a superseded ephemeral key stays registered before a rotation retires it; null
+    /// when this ring doesn't rotate, since only a rotation supersedes a key.
+    /// </summary>
+    public TimeSpan? EphemeralKeyRetention { get; private set; }
+
+    /// <summary>
+    /// Enables retirement: <paramref name="ephemeralVersions"/> are the versions eligible for it
+    /// (every version a later rotation adds is too), and <paramref name="retention"/> is how long a
+    /// superseded one is kept. Called once, by KeyRingBuilder.BuildAsync, before rotation starts.
+    /// </summary>
+    internal void ConfigureEphemeralKeyRetention(TimeSpan retention, IEnumerable<int> ephemeralVersions)
+    {
+        EphemeralKeyRetention = retention;
+        foreach (var version in ephemeralVersions)
+            _ephemeralVersions.Add(version);
+    }
 
     /// <summary>
     /// Starts the scheduled rotation: every <paramref name="interval"/>, create a key with
@@ -80,9 +109,10 @@ public sealed class KeyRing(IEncryptedFormatProvider formatProvider) : IKeyRing,
     }
 
     /// <summary>
-    /// One rotation: create a fresh key and Add it at CurrentVersion + 1. A failure - the key
-    /// wrapper unavailable, the next version already taken, versions exhausted - is recorded and
-    /// logged, the current key stays in use, and the next interval tries again.
+    /// One rotation: create a fresh key and Add it at CurrentVersion + 1, then retire every
+    /// ephemeral key whose retention has run out. A failure - the key wrapper unavailable, the next
+    /// version already taken, versions exhausted - is recorded and logged, the current key stays in
+    /// use, and the next interval tries again.
     /// </summary>
     /// <returns>True if a new key became current.</returns>
     internal async Task<bool> RotateEphemeralKeyAsync(Func<CancellationToken, ValueTask<IDataEncryptionKey>> createKey,
@@ -105,9 +135,9 @@ public sealed class KeyRing(IEncryptedFormatProvider formatProvider) : IKeyRing,
         {
             key = await createKey(cancellationToken).ConfigureAwait(false);
             Add(current + 1, key);
+            _ephemeralVersions.Add(current + 1);
             activity?.SetTag(AttributeNames.KeyVersion, current + 1);
             logger?.EphemeralKeyRotated(current + 1);
-            return true;
         }
         catch (Exception ex)
         {
@@ -121,6 +151,57 @@ public sealed class KeyRing(IEncryptedFormatProvider formatProvider) : IKeyRing,
             ComponentTelemetry.RecordException(activity, ex);
             logger?.EphemeralKeyRotationFailed(current, ex);
             return false;
+        }
+
+        await RetireSupersededEphemeralKeysAsync(Stopwatch.GetTimestamp(), logger, cancellationToken).ConfigureAwait(false);
+        return true;
+    }
+
+    /// <summary>
+    /// Retires every ephemeral key that stopped being current at least <see cref="EphemeralKeyRetention"/>
+    /// ago: removes it from the ring, so Get/TryGet no longer find it, and disposes it, zeroing its
+    /// DEK and stopping its background refresh. An ephemeral key is first seen as superseded by the
+    /// rotation that follows the one replacing it, so it is kept for at least the retention - never
+    /// less. Does nothing on a ring without retention configured. Key-file versions are never
+    /// touched.
+    /// </summary>
+    /// <param name="now">The current Stopwatch timestamp; a parameter so tests can move time.</param>
+    internal async Task RetireSupersededEphemeralKeysAsync(long now, ILogger? logger, CancellationToken cancellationToken)
+    {
+        if (EphemeralKeyRetention is not { } retention)
+            return;
+
+        var current = CurrentVersion;
+        foreach (var version in _ephemeralVersions)
+        {
+            if (version != current && !_supersededAt.ContainsKey(version))
+                _supersededAt[version] = now;
+        }
+
+        foreach (var (version, supersededAt) in _supersededAt.ToArray())
+        {
+            if (version == current || Stopwatch.GetElapsedTime(supersededAt, now) < retention)
+                continue;
+
+            _supersededAt.Remove(version);
+            _ephemeralVersions.Remove(version);
+            if (!_keysByVersion.TryRemove(version, out var key))
+                continue;
+
+            try
+            {
+                if (key is IAsyncDisposable asyncDisposable)
+                    await asyncDisposable.DisposeAsync().ConfigureAwait(false);
+                else
+                    (key as IDisposable)?.Dispose();
+
+                logger?.EphemeralKeyRetired(version);
+            }
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                // Already out of the ring; a failure to release it must not stop the rotation loop.
+                logger?.EphemeralKeyRetirementFailed(version, ex);
+            }
         }
     }
 
@@ -194,7 +275,8 @@ public sealed class KeyRing(IEncryptedFormatProvider formatProvider) : IKeyRing,
     /// </summary>
     /// <param name="version">The key version to retrieve</param>
     /// <returns>The registered IDataEncryptionKey</returns>
-    /// <exception cref="KeyNotFoundException">No key is registered for this version</exception>
+    /// <exception cref="KeyNotFoundException">No key is registered for this version: it was never
+    /// added, or it was a superseded ephemeral key whose retention ran out and has been retired</exception>
     public IDataEncryptionKey Get(int version)
     {
         if (_keysByVersion.TryGetValue(version, out var key))

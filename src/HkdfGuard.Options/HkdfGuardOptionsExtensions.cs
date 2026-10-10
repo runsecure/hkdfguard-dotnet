@@ -31,6 +31,9 @@ public static class HkdfGuardOptionsExtensions
         if (options.DisableEphemeralKeyRotation)
             builder.WithoutEphemeralKeyRotation();
 
+        if (options.EphemeralKeyRetentionHours is { } retentionHours)
+            builder.WithEphemeralKeyRetention(TimeSpan.FromHours(retentionHours));
+
         foreach (var keyFile in options.KeyFiles)
             builder.WithKeyFile(keyFile.Version, keyFile.Path);
 

@@ -16,7 +16,11 @@ public sealed class HkdfGuardOptions
     public string? ServiceName { get; set; }
 
     /// <summary>
-    /// How many seconds a revealed key may be cached in memory before it must be re-derived.
+    /// How often, in seconds (1-300), each key is re-revealed through the KEK to confirm the KEK is
+    /// still available. A revocation check, not a limit on how long the DEK stays in memory: the
+    /// same DEK is revealed each time, and it stays in memory until the ring is disposed. Together
+    /// with MaxRefreshFailures it sets how quickly a revoked KEK stops a running process - about
+    /// MaxRefreshFailures × CachedKeyExpiry.
     /// </summary>
     public int? CachedKeyExpiry { get; set; }
 
@@ -51,6 +55,14 @@ public sealed class HkdfGuardOptions
 
     /// <summary>Largest EphemeralKeyRotationHours - the longest period a timer supports, in whole hours.</summary>
     public const int MaxEphemeralKeyRotationHours = 1193;
+
+    /// <summary>
+    /// How many hours a superseded ephemeral key stays registered for decryption after a rotation
+    /// replaces it, before the ring disposes and removes it. At least 1. Unset keeps
+    /// KeyRingBuilder's default of 24 hours. Applies only when EphemeralKeys is not empty and
+    /// rotation is on.
+    /// </summary>
+    public int? EphemeralKeyRetentionHours { get; set; }
 
     /// <summary>
     /// Versions whose wrapped DEK is read from a file on disk.

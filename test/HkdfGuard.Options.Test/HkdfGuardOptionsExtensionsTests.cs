@@ -62,6 +62,22 @@ public class HkdfGuardOptionsExtensionsTests
     }
 
     [Fact]
+    public void ApplyTo_EphemeralKeyRetentionHours_SetsTheRetention()
+    {
+        var builder = new HkdfGuardOptions { EphemeralKeyRetentionHours = 48 }.ApplyTo(new KeyRingBuilder());
+
+        Assert.Equal(TimeSpan.FromHours(48), builder.EphemeralKeyRetention);
+    }
+
+    [Fact]
+    public void ApplyTo_RetentionUnset_KeepsTheTwentyFourHourDefault()
+    {
+        var builder = new HkdfGuardOptions().ApplyTo(new KeyRingBuilder());
+
+        Assert.Equal(KeyRingBuilder.DefaultEphemeralKeyRetention, builder.EphemeralKeyRetention);
+    }
+
+    [Fact]
     public void ApplyTo_DisableEphemeralKeyRotation_TurnsItOff()
     {
         var builder = new HkdfGuardOptions { DisableEphemeralKeyRotation = true }.ApplyTo(new KeyRingBuilder());

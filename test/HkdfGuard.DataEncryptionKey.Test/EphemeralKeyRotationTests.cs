@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using HkdfGuard.Abstractions;
 using HkdfGuard.CryptoProvider.AesGcm256;
@@ -9,8 +10,8 @@ namespace HkdfGuard.DataEncryptionKey.Test;
 
 /// <summary>
 /// Scheduled ephemeral key rotation: a ring with ephemeral keys adds a fresh one at
-/// CurrentVersion + 1 every interval, keeps every earlier key for decryption, and stops rotating
-/// when disposed.
+/// CurrentVersion + 1 every interval, keeps each superseded key for decryption until its retention
+/// runs out and then retires it, and stops rotating when disposed.
 /// </summary>
 public class EphemeralKeyRotationTests
 {
@@ -33,26 +34,55 @@ public class EphemeralKeyRotationTests
     }
 
     [Theory]
-    [InlineData(1)]       // the minimum, one minute
-    [InlineData(60)]
-    [InlineData(6 * 60)]
-    public void WithEphemeralKeyRotation_AcceptsTheRange(int minutes)
+    [InlineData(1)]       // the minimum, one hour
+    [InlineData(6)]
+    [InlineData(24 * 7)]
+    public void WithEphemeralKeyRotation_AcceptsTheRange(int hours)
     {
         var builder = new KeyRingBuilder();
 
-        Assert.Same(builder, builder.WithEphemeralKeyRotation(TimeSpan.FromMinutes(minutes)));
-        Assert.Equal(TimeSpan.FromMinutes(minutes), builder.EphemeralKeyRotationInterval);
+        Assert.Same(builder, builder.WithEphemeralKeyRotation(TimeSpan.FromHours(hours)));
+        Assert.Equal(TimeSpan.FromHours(hours), builder.EphemeralKeyRotationInterval);
     }
 
     [Fact]
-    public void WithEphemeralKeyRotation_AcceptsTheMaximum_AndRefusesBeyondEitherEnd()
+    public void WithEphemeralKeyRotation_NeverAcceptsLessThanAnHour()
+    {
+        Assert.Equal(TimeSpan.FromHours(1), KeyRingBuilder.MinEphemeralKeyRotationInterval);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new KeyRingBuilder().WithEphemeralKeyRotation(TimeSpan.FromMinutes(59)));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new KeyRingBuilder().WithEphemeralKeyRotation(TimeSpan.FromMinutes(1)));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new KeyRingBuilder().WithEphemeralKeyRotation(TimeSpan.Zero));
+    }
+
+    [Fact]
+    public void WithEphemeralKeyRotation_AcceptsTheMaximum_AndRefusesBeyondIt()
     {
         new KeyRingBuilder().WithEphemeralKeyRotation(KeyRingBuilder.MaxEphemeralKeyRotationInterval);
 
-        Assert.Throws<ArgumentOutOfRangeException>(() => new KeyRingBuilder().WithEphemeralKeyRotation(TimeSpan.FromSeconds(59)));
-        Assert.Throws<ArgumentOutOfRangeException>(() => new KeyRingBuilder().WithEphemeralKeyRotation(TimeSpan.Zero));
         Assert.Throws<ArgumentOutOfRangeException>(() =>
             new KeyRingBuilder().WithEphemeralKeyRotation(KeyRingBuilder.MaxEphemeralKeyRotationInterval + TimeSpan.FromMilliseconds(1)));
+    }
+
+    [Fact]
+    public void Retention_DefaultsToTwentyFourHours()
+    {
+        Assert.Equal(TimeSpan.FromHours(24), KeyRingBuilder.DefaultEphemeralKeyRetention);
+        Assert.Equal(KeyRingBuilder.DefaultEphemeralKeyRetention, new KeyRingBuilder().EphemeralKeyRetention);
+    }
+
+    [Fact]
+    public void WithEphemeralKeyRetention_AcceptsFromOneMinuteUp_AndRefusesLess()
+    {
+        var builder = new KeyRingBuilder();
+
+        Assert.Same(builder, builder.WithEphemeralKeyRetention(KeyRingBuilder.MinEphemeralKeyRetention));
+        Assert.Equal(TimeSpan.FromMinutes(1), builder.EphemeralKeyRetention);
+        builder.WithEphemeralKeyRetention(TimeSpan.FromDays(30));
+        Assert.Equal(TimeSpan.FromDays(30), builder.EphemeralKeyRetention);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new KeyRingBuilder().WithEphemeralKeyRetention(TimeSpan.FromSeconds(59)));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new KeyRingBuilder().WithEphemeralKeyRetention(TimeSpan.Zero));
     }
 
     [Fact]
@@ -209,6 +239,138 @@ public class EphemeralKeyRotationTests
         Assert.Null(exception);
     }
 
+    // --- Retention ---------------------------------------------------------------------------
+
+    [Fact]
+    public async Task ARotatingRing_RetiresSupersededEphemeralKeys_OnceTheirRetentionHasPassed()
+    {
+        var logger = new RecordingLogger<KeyRing>();
+        var factory = new RecordingCryptoProviderFactory();
+        await using var ring = await Builder(factory)
+            .WithEphemeralKey(1)
+            .WithEphemeralKeyRotationForTesting(Fast)
+            .WithEphemeralKeyRetentionForTesting(Fast * 2.5)
+            .WithLogger(logger)
+            .BuildAsync();
+        var protector = ring.CreateProtector("retention");
+        var underV1 = protector.Encrypt("written under v1");
+        Assert.Equal(Fast * 2.5, ring.EphemeralKeyRetention);
+
+        await Task.Delay(Fast * 8);
+
+        // Version 1 was superseded long ago and is gone - from the ring and from memory.
+        Assert.False(ring.TryGet(1, out _));
+        Assert.Throws<KeyNotFoundException>(() => protector.Decrypt(underV1, new char[64]));
+        Assert.Contains(logger.Entries, e => e.EventId == 8 && e.Level == LogLevel.Information && e.Message.Contains("version 1 "));
+        var first = Assert.IsType<AesGcmCryptoProvider>(factory.CreatedProviders[0]);
+        Assert.Throws<ObjectDisposedException>(() => first.Encrypt(new byte[1], new byte[64]));
+
+        // The current key and the one just before it are still within retention.
+        var current = ring.CurrentVersion;
+        Assert.True(current >= 5, $"CurrentVersion is {current}");
+        Assert.True(ring.TryGet(current, out _));
+        Assert.True(ring.TryGet(current - 1, out _));
+        var result = new char[64];
+        var underCurrent = protector.Encrypt("still works");
+        Assert.Equal("still works", new string(result, 0, protector.Decrypt(underCurrent, result)));
+    }
+
+    [Fact]
+    public async Task WithoutRotation_NothingIsEverRetired()
+    {
+        await using var ring = await Builder(new RecordingCryptoProviderFactory())
+            .WithEphemeralKey(1)
+            .WithoutEphemeralKeyRotation()
+            .WithEphemeralKeyRetentionForTesting(Fast)
+            .BuildAsync();
+
+        await Task.Delay(Fast * 3);
+
+        Assert.Null(ring.EphemeralKeyRetention);
+        Assert.True(ring.TryGet(1, out _));
+    }
+
+    // --- Retention, driven directly with a movable clock ----------------------------------------
+
+    private static long Timestamp(TimeSpan fromNow) => Stopwatch.GetTimestamp() + (long)(fromNow.TotalSeconds * Stopwatch.Frequency);
+
+    [Fact]
+    public async Task Retire_KeepsASupersededKey_UntilItsRetentionHasPassed_ThenDisposesAndRemovesIt()
+    {
+        var logger = new RecordingLogger<KeyRing>();
+        using var ring = new KeyRing(new DefaultFormatProvider());
+        var superseded = new TrackingKey();
+        ring.Add(1, superseded);
+        ring.ConfigureEphemeralKeyRetention(TimeSpan.FromHours(1), [1]);
+
+        // The rotation adds 2 and first sees 1 as superseded, starting its retention clock.
+        Assert.True(await ring.RotateEphemeralKeyAsync(_ => ValueTask.FromResult<IDataEncryptionKey>(new TrackingKey()), logger, CancellationToken.None));
+        Assert.True(ring.TryGet(1, out _));
+
+        await ring.RetireSupersededEphemeralKeysAsync(Timestamp(TimeSpan.FromMinutes(59)), logger, CancellationToken.None);
+        Assert.True(ring.TryGet(1, out _));
+        Assert.False(superseded.Disposed);
+
+        await ring.RetireSupersededEphemeralKeysAsync(Timestamp(TimeSpan.FromMinutes(61)), logger, CancellationToken.None);
+        Assert.False(ring.TryGet(1, out _));
+        Assert.Throws<KeyNotFoundException>(() => ring.Get(1));
+        Assert.True(superseded.Disposed);
+        Assert.Equal(2, ring.CurrentVersion);
+        Assert.True(ring.TryGet(2, out _));
+        var retired = Assert.Single(logger.Entries, e => e.EventId == 8);
+        Assert.Contains("version 1 ", retired.Message);
+    }
+
+    [Fact]
+    public async Task Retire_NeverTouchesKeyFileVersions_OrTheCurrentKey()
+    {
+        using var ring = new KeyRing(new DefaultFormatProvider());
+        var keyFile = new TrackingKey();
+        var ephemeral = new TrackingKey();
+        ring.Add(1, keyFile);    // a key file: not ephemeral
+        ring.Add(2, ephemeral);
+        ring.ConfigureEphemeralKeyRetention(TimeSpan.FromHours(1), [2]);
+
+        Assert.True(await ring.RotateEphemeralKeyAsync(_ => ValueTask.FromResult<IDataEncryptionKey>(new TrackingKey()), null, CancellationToken.None));
+        await ring.RetireSupersededEphemeralKeysAsync(Timestamp(TimeSpan.FromDays(365)), null, CancellationToken.None);
+
+        Assert.True(ring.TryGet(1, out _));
+        Assert.False(keyFile.Disposed);
+        Assert.False(ring.TryGet(2, out _));
+        Assert.True(ephemeral.Disposed);
+        Assert.True(ring.TryGet(3, out _)); // current, however old
+        Assert.Equal(3, ring.CurrentVersion);
+    }
+
+    [Fact]
+    public async Task Retire_WithoutRetentionConfigured_DoesNothing()
+    {
+        using var ring = new KeyRing(new DefaultFormatProvider());
+        ring.Add(1, new TrackingKey());
+
+        Assert.True(await ring.RotateEphemeralKeyAsync(_ => ValueTask.FromResult<IDataEncryptionKey>(new TrackingKey()), null, CancellationToken.None));
+        await ring.RetireSupersededEphemeralKeysAsync(Timestamp(TimeSpan.FromDays(365)), null, CancellationToken.None);
+
+        Assert.Null(ring.EphemeralKeyRetention);
+        Assert.True(ring.TryGet(1, out _));
+    }
+
+    [Fact]
+    public async Task Retire_WhenDisposingAKeyThrows_StillRemovesIt_AndLogsAnError()
+    {
+        var logger = new RecordingLogger<KeyRing>();
+        using var ring = new KeyRing(new DefaultFormatProvider());
+        ring.Add(1, new TrackingKey { ThrowOnDispose = true });
+        ring.ConfigureEphemeralKeyRetention(TimeSpan.FromMinutes(1), [1]);
+        Assert.True(await ring.RotateEphemeralKeyAsync(_ => ValueTask.FromResult<IDataEncryptionKey>(new TrackingKey()), logger, CancellationToken.None));
+
+        await ring.RetireSupersededEphemeralKeysAsync(Timestamp(TimeSpan.FromMinutes(2)), logger, CancellationToken.None);
+
+        Assert.False(ring.TryGet(1, out _));
+        var failure = Assert.Single(logger.Entries, e => e.EventId == 9);
+        Assert.Equal(LogLevel.Error, failure.Level);
+    }
+
     // --- Single rotations, driven directly -----------------------------------------------------
 
     [Fact]
@@ -309,6 +471,7 @@ public class EphemeralKeyRotationTests
     private sealed class TrackingKey : IDataEncryptionKey, IAsyncDisposable
     {
         public bool Disposed { get; private set; }
+        public bool ThrowOnDispose { get; init; }
 
         public byte[] Encrypt(Span<byte> plaintext) => [];
         public byte[] Encrypt(Span<byte> plaintext, ReadOnlySpan<byte> aad) => [];
@@ -318,7 +481,7 @@ public class EphemeralKeyRotationTests
         public ValueTask DisposeAsync()
         {
             Disposed = true;
-            return ValueTask.CompletedTask;
+            return ThrowOnDispose ? ValueTask.FromException(new InvalidOperationException("dispose failed")) : ValueTask.CompletedTask;
         }
     }
 
