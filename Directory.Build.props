@@ -31,6 +31,13 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
 
+  <!-- Each shipped library also packs a symbols package (.snupkg) beside its .nupkg. Releases
+       Authenticode-sign each assembly before packing; see scripts/HkdfGuardPackaging.ps1. -->
+  <PropertyGroup Condition="!$(MSBuildProjectName.EndsWith('.Test')) And '$(MSBuildProjectName)' != 'HkdfGuard.Benchmarks'">
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
   <!-- Every *.Test project shares these: not packable, and xUnit's own API available without a
        per-file using directive. -->
   <PropertyGroup Condition="$(MSBuildProjectName.EndsWith('.Test'))">

@@ -1,0 +1,67 @@
+# Reusable build-and-test workflow, called by ci.yml (every push and pull
+# request) and release.yml (version tags), so a release ships exactly what CI
+# built and tested - there is one definition of "the build", not two.
+#
+# Restores the locked dependency graph, builds Release with the given version
+# stamped in, runs the tests, and uploads every src project's bin\ and obj\
+# UNSIGNED as "unsigned-build". The next job packs from that output with
+# `dotnet pack --no-build`, so it must run on the same runner image (the
+# restore paths in obj\ are absolute). Holds no signing access at all;
+# signing happens only in release.yml's sign job.
+#
+# Windows, because the sign job that consumes this output must be Windows x64
+# (signtool and the Artifact Signing plugin), and because the Windows native
+# loader's tests only run there.
+name: Build
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Package version to stamp into the assemblies, e.g. 1.2.3
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Third-party actions are pinned to full commit SHAs; see release.yml.
+
+jobs:
+  build:
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false # nothing later in this job pushes
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+
+      # Directory.Build.props turns on locked-mode restore and deterministic
+      # CI builds whenever GITHUB_ACTIONS is set.
+      - name: Restore, build and test (Release, unsigned)
+        shell: powershell
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          . .\scripts\HkdfGuardPackaging.ps1
+          Invoke-HkdfGuardBuild -RepoRoot (Get-Location).Path -Version $env:VERSION
+
+      # Unsigned here on purpose: signing happens once, in release.yml's sign
+      # job, so build jobs never hold signing access.
+      - name: Upload the unsigned build output
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unsigned-build
+          path: |
+            src/*/bin/
+            src/*/obj/
+          if-no-files-found: error
+          retention-days: 3

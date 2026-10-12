@@ -619,6 +619,111 @@ Native release artifacts are never committed: `.gitignore` excludes every `runti
 Where one is present locally, `.gitattributes` keeps it byte-exact and `NativeRuntimesTests` fails
 if any file stops matching its `SHA256SUMS`.
 
+## Signing and releases
+
+### What is signed
+
+Every assembly built from this repository (`HkdfGuard.*.dll`, for every target framework) is
+Authenticode-signed through Azure Artifact Signing before it is packed. That is the same account
+and certificate profile (`RunSecureSigning` / `runsecure-release`) that signs the native
+`HkdfGuardV1.dll`, so the publisher is `CN=Torin Blair, O=Torin Blair, L=Littleton, S=co, C=US`.
+Artifact Signing certificates are valid for about three days, so every signature is RFC 3161
+timestamped. That keeps it valid after the certificate expires.
+
+**The NuGet packages themselves are not author-signed.** The assemblies inside them are signed;
+the `.nupkg` and `.snupkg` files are not. nuget.org can't yet accept Artifact Signing's
+short-lived certificates without registering each new certificate by hand
+([NuGet/NuGetGallery#10027](https://github.com/NuGet/NuGetGallery/issues/10027)). nuget.org adds
+its own repository signature to every package it accepts.
+
+Third-party and framework assemblies are never signed by this repository. Signing is separate
+from strong naming, which these assemblies don't use.
+
+### Cutting a release
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The tag must be `vMAJOR.MINOR.PATCH`, optionally with a pre-release suffix (`v1.2.0-rc.1`). The
+version without the `v` is stamped into every assembly and package. The **Release** workflow
+(`.github/workflows/release.yml`) then:
+
+1. **build** (the shared `build.yml`, the same one CI runs): restores the locked dependency
+   graph, builds Release, runs the tests, and uploads the unsigned output. It holds no signing
+   access.
+2. **sign** (Windows x64, in the `release` environment): signs each project's assembly, packs with
+   `--no-build` so the packages carry the signed assemblies, opens every package to verify each
+   assembly in it is validly signed and timestamped, and attests build provenance of the packages
+   and assemblies. Any failure fails the release; there is no unsigned fallback.
+3. **publish**: creates a GitHub Release with every `.nupkg`, `.snupkg` and `.sha256`. Versions
+   `0.x`, and any with a pre-release suffix, are published as GitHub pre-releases.
+
+Nothing is pushed to a NuGet feed yet.
+
+The **CI** workflow (`ci.yml`) runs on every push to `main` and every pull request. It builds,
+tests and packs exactly as a release does, but unsigned, with no secrets, no `release` environment
+and no Azure sign-in.
+
+### One-time setup
+
+These are Azure and GitHub settings, not code:
+
+1. **Federated credential.** On the Entra app registration that `hkdfguard-native-windows` signs as
+   (or a new app with the same role), add a federated credential for this repository's `release`
+   environment, with subject `repo:runsecure/hkdfguard-dotnet:environment:release`. A credential for
+   a branch or tag doesn't match a job that runs in an environment.
+2. **Role.** The app holds **Artifact Signing Certificate Profile Signer** on the `RunSecureSigning`
+   account or the `runsecure-release` profile. This is already true if you reuse the native repo's app.
+3. **Repository secrets:** `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and `AZURE_SUBSCRIPTION_ID`. There is no
+   client secret; sign-in is OIDC only.
+4. **Environment.** Create a `release` environment (Settings > Environments) restricted to tags
+   matching `v*`, so only a release can reach the signing account.
+
+The signing account, profile and endpoint are in `build/signing/metadata.json`, which holds no
+secrets.
+
+### Signing on a developer machine
+
+```powershell
+scripts\build-signed.bat -Version 0.1.0
+```
+
+This checks the signing setup first, then cleans, builds, tests, signs, packs into
+`artifacts\packages`, and verifies the assemblies inside every package. It needs:
+
+- Windows x64, with the Windows SDK signing tools 10.0.22621 or newer (`signtool.exe`);
+- the Artifact Signing client tools: `winget install -e --id Microsoft.Azure.ArtifactSigningClientTools`;
+- the Azure CLI, signed in (`az login`) as an account holding the Signer role above.
+
+The signing helpers are `scripts/ArtifactSigning.ps1` (ported from `hkdfguard-native-windows`) and
+`scripts/HkdfGuardPackaging.ps1`.
+
+### Verifying a package
+
+A `.nupkg` is a zip file. Extract it and check the assembly:
+
+```powershell
+Expand-Archive HkdfGuard.DataEncryptionKey.1.0.0.nupkg -DestinationPath pkg   # rename to .zip first on Windows PowerShell 5.1
+Get-AuthenticodeSignature pkg\lib\net10.0\HkdfGuard.DataEncryptionKey.dll |
+    Format-List Status, SignerCertificate, TimeStamperCertificate
+```
+
+`Status` must be `Valid`, the signer `CN=Torin Blair, ...`, and `TimeStamperCertificate` set.
+
+Check the package came from this repository's release workflow:
+
+```bash
+gh attestation verify HkdfGuard.DataEncryptionKey.1.0.0.nupkg --repo runsecure/hkdfguard-dotnet
+```
+
+Attestations need a public repository, or GitHub Enterprise Cloud for a private one.
+
+`dotnet nuget verify --all <package>.nupkg` reports a package downloaded from nuget.org as
+repository-signed by nuget.org. A package taken from a GitHub Release is unsigned at the NuGet
+level, as described above.
+
 ## License
 
 HkdfGuard is licensed under the [Mozilla Public License 2.0](LICENSE) (MPL-2.0), and every NuGet
