@@ -1,0 +1,75 @@
+# Continuous integration: every push to main, every pull request, and on
+# demand. Runs the same build.yml that release.yml runs - so a green CI
+# commit is one a tag will build and test identically - then packs from that
+# build output exactly as a release does (dotnet pack --no-build in a second
+# job), unsigned, so a packaging mistake shows up here rather than in the
+# middle of a release.
+#
+# No signing, no secrets, no "release" environment, no id-token: pull
+# requests from forks run this too, and must not be able to reach the
+# signing account.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch or PR supersedes the run in progress.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+    permissions:
+      contents: read
+    with:
+      version: 0.0.0-ci.${{ github.run_number }}
+
+  package:
+    needs: build
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Download the unsigned build output
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: unsigned-build
+          path: src
+
+      - name: Pack (unsigned)
+        shell: powershell
+        env:
+          VERSION: 0.0.0-ci.${{ github.run_number }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          . .\scripts\HkdfGuardPackaging.ps1
+          $root = (Get-Location).Path
+          Invoke-Dotnet @("restore", "HkdfGuard.sln", "--locked-mode")
+          $packages = Invoke-HkdfGuardPack -RepoRoot $root -Version $env:VERSION -OutputDirectory (Join-Path $root "artifacts\packages")
+          $packages | ForEach-Object { Write-Host "  $_" }
+
+      - name: Upload the unsigned packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unsigned-packages
+          path: artifacts/packages/
+          if-no-files-found: error
+          retention-days: 7
