@@ -140,6 +140,19 @@ public class DefaultFormatProviderTests
             Assert.Throws<FormatException>(() => _provider.Parse(encrypted)));
     }
 
+    [Theory]
+    [InlineData("enc::v1::AQID    ")]
+    [InlineData("enc::v1::AQ ID")]
+    [InlineData("enc::v1::AQID\t")]
+    [InlineData("enc::v1::AQID\r\n")]
+    [InlineData("enc::v1:: AQID")]
+    public void ParseAndGetMaxDecryptedLength_RejectBase64ContainingWhitespace(string encrypted)
+    {
+        // Base64 validation alone accepts these, but sizes them as if the whitespace were data.
+        Assert.Throws<FormatException>(() => _provider.Parse(encrypted));
+        Assert.Throws<FormatException>(() => _provider.GetMaxDecryptedLength(encrypted));
+    }
+
     [Fact]
     public void Format_WithANullValue_ThrowsArgumentNullException()
     {

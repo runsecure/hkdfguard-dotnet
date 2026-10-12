@@ -53,10 +53,14 @@ public class AesGcmCryptoProviderFactoryTests
         using var created = await Factory.CreateAsync(new FakeKeyWrapper(), "wrapped"u8.ToArray(), 60, maxRefreshFailures: 4);
         using var ephemeral = await Factory.CreateEphemeralAsync(new FakeKeyWrapper(), 60, maxRefreshFailures: 5);
         using var defaulted = await Factory.CreateAsync(new FakeKeyWrapper(), "wrapped"u8.ToArray(), 60);
+        using var ephemeralDefaulted = await Factory.CreateEphemeralAsync(new FakeKeyWrapper(), 60);
+        using var failOpen = await Factory.CreateAsync(new FakeKeyWrapper(), "wrapped"u8.ToArray(), 60, maxRefreshFailures: null);
 
         Assert.Equal(4, Assert.IsType<AesGcmCryptoProvider>(created).MaxRefreshFailures);
         Assert.Equal(5, Assert.IsType<AesGcmCryptoProvider>(ephemeral).MaxRefreshFailures);
-        Assert.Null(Assert.IsType<AesGcmCryptoProvider>(defaulted).MaxRefreshFailures);
+        Assert.Equal(RefreshFailurePolicy.DefaultMaxRefreshFailures, Assert.IsType<AesGcmCryptoProvider>(defaulted).MaxRefreshFailures);
+        Assert.Equal(RefreshFailurePolicy.DefaultMaxRefreshFailures, Assert.IsType<AesGcmCryptoProvider>(ephemeralDefaulted).MaxRefreshFailures);
+        Assert.Null(Assert.IsType<AesGcmCryptoProvider>(failOpen).MaxRefreshFailures);
     }
 
     [Fact]

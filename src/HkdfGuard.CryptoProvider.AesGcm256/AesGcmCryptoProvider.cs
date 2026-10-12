@@ -17,10 +17,11 @@ namespace HkdfGuard.CryptoProvider.AesGcm256;
 /// <para>
 /// A refresh re-reveals the <em>same</em> DEK, so it is a periodic re-check that the KEK is still
 /// accessible, not a bound on how long the DEK value exists in memory. What happens when that
-/// check fails is the refresh-failure policy: with no <c>maxRefreshFailures</c> the last good
-/// session stays in use indefinitely (fail open); with one, that many consecutive failures
-/// dispose every session (zeroing the DEK) and suspend Encrypt/Decrypt - they throw
-/// CryptographicException - until a later refresh succeeds and operation resumes.
+/// check fails is the refresh-failure policy: by default, <see cref="RefreshFailurePolicy.DefaultMaxRefreshFailures"/>
+/// consecutive failures dispose every session (zeroing the DEK) and suspend Encrypt/Decrypt - they
+/// throw CryptographicException - until a later refresh succeeds and operation resumes. Passing a
+/// null <c>maxRefreshFailures</c> instead keeps the last good session in use indefinitely (fail
+/// open).
 /// </para>
 /// </summary>
 public sealed class AesGcmCryptoProvider : ICryptoProvider
@@ -28,8 +29,9 @@ public sealed class AesGcmCryptoProvider : ICryptoProvider
     /// <summary>
     /// Encryptions after which this provider refuses to encrypt (decryption keeps working): half of
     /// NIST SP 800-38D's 2^32 random-nonce limit, since a per-process counter can't see the other
-    /// instances sharing the same key file. The count is per wrapped DEK - a background refresh
-    /// re-reveals the same key, so it does not reset the count.
+    /// processes sharing the same key file. The count is per DEK and shared by every provider in
+    /// this process that reveals it; a background refresh re-reveals the same key, so it does not
+    /// reset the count.
     /// </summary>
     public const long MaxEncryptionsPerKey = EncryptionBudget.DefaultLimit;
 
@@ -85,27 +87,31 @@ public sealed class AesGcmCryptoProvider : ICryptoProvider
     /// <param name="expirySeconds">How long each session is used before the next background
     /// refresh, 1-300 seconds; also the refresh interval.</param>
     /// <param name="maxRefreshFailures">Consecutive failed background refreshes tolerated before
-    /// failing closed (see the class remarks), at least 1; null (the default) fails open.</param>
+    /// failing closed (see the class remarks), at least 1. Defaults to
+    /// <see cref="RefreshFailurePolicy.DefaultMaxRefreshFailures"/>; pass null to fail open.</param>
     /// <param name="cancellationToken">Cancels the first key reveal.</param>
     /// <param name="logger">Receives an error for every failed background refresh, a critical entry
-    /// when key access is suspended, and an informational one when it resumes. Optional, but
-    /// without it (or an ActivityListener) a revoked KEK goes unnoticed under fail-open.</param>
+    /// when key access is suspended, an informational one when it resumes, and a warning when the
+    /// key nears its encryption limit. Optional, but without it (or an ActivityListener) none of
+    /// these is visible - and under fail-open a revoked KEK goes unnoticed.</param>
     /// <exception cref="ArgumentOutOfRangeException">expirySeconds is not between 1 and 300, or maxRefreshFailures is below 1</exception>
     public static Task<AesGcmCryptoProvider> CreateAsync(IKeyWrapper keyWrapper, byte[] wrapped, int expirySeconds,
-        int? maxRefreshFailures = null, CancellationToken cancellationToken = default, ILogger? logger = null)
-        => CreateAsync(keyWrapper, wrapped, expirySeconds, maxRefreshFailures, new EncryptionBudget(), cancellationToken, logger);
+        int? maxRefreshFailures = RefreshFailurePolicy.DefaultMaxRefreshFailures, CancellationToken cancellationToken = default, ILogger? logger = null)
+        => CreateAsync(keyWrapper, wrapped, expirySeconds, maxRefreshFailures, budget: null, cancellationToken, logger);
 
     internal static Task<AesGcmCryptoProvider> CreateAsync(IKeyWrapper keyWrapper, byte[] wrapped, int expirySeconds, EncryptionBudget budget)
         => CreateAsync(keyWrapper, wrapped, expirySeconds, null, budget, CancellationToken.None, null);
 
+    /// <param name="budget">The count to draw on; null for the process-wide one for whichever key
+    /// is revealed (see EncryptionBudget.For). Tests pass their own.</param>
     internal static async Task<AesGcmCryptoProvider> CreateAsync(IKeyWrapper keyWrapper, byte[] wrapped, int expirySeconds,
-        int? maxRefreshFailures, EncryptionBudget budget, CancellationToken cancellationToken, ILogger? logger)
+        int? maxRefreshFailures, EncryptionBudget? budget, CancellationToken cancellationToken, ILogger? logger)
     {
         Validate(expirySeconds, maxRefreshFailures);
         // Don't rely on the key wrapper to honour a token that's already cancelled.
         cancellationToken.ThrowIfCancellationRequested();
-        var firstSession = await RevealAsync(keyWrapper, wrapped, budget, cancellationToken).ConfigureAwait(false);
-        return new AesGcmCryptoProvider(keyWrapper, wrapped, expirySeconds, maxRefreshFailures, budget, firstSession, logger);
+        var firstSession = await RevealAsync(keyWrapper, wrapped, budget, logger, cancellationToken).ConfigureAwait(false);
+        return new AesGcmCryptoProvider(keyWrapper, wrapped, expirySeconds, maxRefreshFailures, firstSession.Budget, firstSession, logger);
     }
 
     /// <summary>
@@ -123,7 +129,7 @@ public sealed class AesGcmCryptoProvider : ICryptoProvider
     /// <summary>The configured refresh-failure policy; null means fail open.</summary>
     public int? MaxRefreshFailures => _maxRefreshFailures;
 
-    private string RefreshFailurePolicy => _maxRefreshFailures is { } max
+    private string RefreshFailurePolicyDescription => _maxRefreshFailures is { } max
         ? $"fail closed after {max} consecutive failures"
         : "fail open (the last good key stays in use)";
 
@@ -143,28 +149,42 @@ public sealed class AesGcmCryptoProvider : ICryptoProvider
     /// <inheritdoc/>
     public int Encrypt(Span<byte> plaintext, ReadOnlySpan<byte> aad, Span<byte> result)
     {
-        AesGcmCryptoSession session;
-        try
+        while (true)
         {
-            session = Session;
-        }
-        catch
-        {
-            // Suspended or disposed: no session will run its own zeroing, so honour the
-            // ICryptoProvider contract here.
-            ArrayUtility.ZeroMemory(plaintext);
-            throw;
-        }
+            AesGcmCryptoSession session;
+            try
+            {
+                session = Session;
+            }
+            catch
+            {
+                // Suspended or disposed: no session will run its own zeroing, so honour the
+                // ICryptoProvider contract here.
+                ArrayUtility.ZeroMemory(plaintext);
+                throw;
+            }
 
-        // The session zeroes plaintext itself, on success and on every failure.
-        return session.Encrypt(plaintext, aad, result);
+            // Once it starts, the session zeroes plaintext itself, on success and on every failure.
+            // False means it was retired and disposed after it was read here, before it started -
+            // nothing was touched, so go round again for the session that replaced it. _current is
+            // never set to a disposed session, so this ends.
+            if (session.TryEncrypt(plaintext, aad, result, out var written))
+                return written;
+        }
     }
 
     public int Decrypt(ReadOnlySpan<byte> ciphertext, Span<byte> result)
-        => Session.Decrypt(ciphertext, ReadOnlySpan<byte>.Empty, result);
+        => Decrypt(ciphertext, ReadOnlySpan<byte>.Empty, result);
 
     public int Decrypt(ReadOnlySpan<byte> ciphertext, ReadOnlySpan<byte> aad, Span<byte> result)
-        => Session.Decrypt(ciphertext, aad, result);
+    {
+        // As Encrypt: a session retired between reading it and starting is skipped for the current one.
+        while (true)
+        {
+            if (Session.TryDecrypt(ciphertext, aad, result, out var written))
+                return written;
+        }
+    }
 
     private AesGcmCryptoSession Session
     {
@@ -194,8 +214,9 @@ public sealed class AesGcmCryptoProvider : ICryptoProvider
 
     // Reveals the DEK through the key wrapper and builds a session around it. Shared by the first
     // reveal (constructor or CreateAsync) and every background refresh.
+    // A null budget means the process-wide one for whichever key is revealed.
     private static async Task<AesGcmCryptoSession> RevealAsync(IKeyWrapper keyWrapper, byte[] wrapped,
-        EncryptionBudget budget, CancellationToken cancellationToken)
+        EncryptionBudget? budget, ILogger? logger, CancellationToken cancellationToken)
     {
         // Pinned: this array becomes the session's key and lives until the next refresh, across
         // many collections; a movable array could leave unzeroed copies behind when compacted.
@@ -209,7 +230,7 @@ public sealed class AesGcmCryptoProvider : ICryptoProvider
             if (written != KeyLength)
                 throw new CryptographicException($"Key wrapper revealed {written} bytes; a {KeyLength}-byte DEK is required.");
 
-            return new AesGcmCryptoSession(key, budget);
+            return new AesGcmCryptoSession(key, budget ?? EncryptionBudget.For(key), logger);
         }
         catch
         {
@@ -222,7 +243,7 @@ public sealed class AesGcmCryptoProvider : ICryptoProvider
     // background loop refreshes once the provider exists.
     private async Task RefreshAsync(CancellationToken cancellationToken)
     {
-        var fresh = await RevealAsync(_keyWrapper, _wrapped, _budget, cancellationToken).ConfigureAwait(false);
+        var fresh = await RevealAsync(_keyWrapper, _wrapped, _budget, _logger, cancellationToken).ConfigureAwait(false);
 
         lock (_gate)
         {
@@ -266,7 +287,7 @@ public sealed class AesGcmCryptoProvider : ICryptoProvider
                         .RecordException(activity, ex);
 
                     var failures = Interlocked.Increment(ref _consecutiveRefreshFailures);
-                    _logger?.KeyRefreshFailed(failures, RefreshFailurePolicy, ex);
+                    _logger?.KeyRefreshFailed(failures, RefreshFailurePolicyDescription, ex);
                     if (failures == _maxRefreshFailures)
                     {
                         SuspendKeyAccess(activity, failures);

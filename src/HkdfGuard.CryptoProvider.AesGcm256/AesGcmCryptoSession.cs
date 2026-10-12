@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using HkdfGuard.Abstractions;
 using HkdfGuard.Diagnostics;
+using Microsoft.Extensions.Logging;
 
 namespace HkdfGuard.CryptoProvider.AesGcm256;
 
@@ -30,6 +31,7 @@ internal class AesGcmCryptoSession : IDisposable
 
     private readonly byte[] _key;
     private readonly EncryptionBudget _budget;
+    private readonly ILogger? _logger;
     // Instances not currently in use by an operation. Rent pops one (or builds one if empty),
     // Return pushes it back - so an instance is only ever touched by one thread at a time.
     private readonly ConcurrentStack<AesGcm> _idle = new();
@@ -49,9 +51,11 @@ internal class AesGcmCryptoSession : IDisposable
     /// <param name="key">See the single-argument constructor.</param>
     /// <param name="budget">The encryption count for this key - shared across every session built
     /// on the same key, since the nonce-reuse limit applies to the key, not the session.</param>
-    internal AesGcmCryptoSession(byte[] key, EncryptionBudget budget)
+    /// <param name="logger">Receives a warning when the budget's warning threshold is crossed. Optional.</param>
+    internal AesGcmCryptoSession(byte[] key, EncryptionBudget budget, ILogger? logger = null)
     {
         _budget = budget;
+        _logger = logger;
 
         if (ArrayUtility.IsNullOrEmpty(key))
             throw new ArgumentException("AES key must not be empty or all zero.", nameof(key));
@@ -67,10 +71,13 @@ internal class AesGcmCryptoSession : IDisposable
         _instanceCount = 1;
     }
 
-    /// <summary>How many AesGcm instances this session has built so far - the peak concurrency it has seen.</summary>
     /// <summary>The key array, for tests to check it is pinned and zeroed.</summary>
     internal byte[] Key => _key;
 
+    /// <summary>The encryption count this session draws on - the same one every session on this key shares.</summary>
+    internal EncryptionBudget Budget => _budget;
+
+    /// <summary>How many AesGcm instances this session has built so far - the peak concurrency it has seen.</summary>
     internal int InstanceCount => Volatile.Read(ref _instanceCount);
 
     /// <summary>How many AesGcm instances are pooled and not in use by an operation right now.</summary>
@@ -81,6 +88,27 @@ internal class AesGcmCryptoSession : IDisposable
 
     internal int Encrypt(Span<byte> plaintext, ReadOnlySpan<byte> aad, Span<byte> result)
     {
+        if (TryEncrypt(plaintext, aad, result, out var written))
+            return written;
+
+        ArrayUtility.ZeroMemory(plaintext);
+        throw new ObjectDisposedException(GetType().FullName);
+    }
+
+    /// <summary>
+    /// Encrypts, unless this session has been disposed - then returns false having touched
+    /// nothing: no encryption counted, and <paramref name="plaintext"/> still intact, so a caller
+    /// holding a session that was retired under it can retry on the current one. Once it starts,
+    /// it zeroes plaintext on success and on every failure, as Encrypt does.
+    /// </summary>
+    internal bool TryEncrypt(Span<byte> plaintext, ReadOnlySpan<byte> aad, Span<byte> result, out int written)
+    {
+        if (!TryRent(out var aes))
+        {
+            written = 0;
+            return false;
+        }
+
         using var activity = HkdfGuardTelemetry.CryptoProviderAesGcm256.ActivitySource.StartActivity(ActivityNames.CryptoProviderAesGcm256.Encrypt);
         if (HkdfGuardTelemetry.CryptoProviderAesGcm256.EnableSensitiveLogging)
             HkdfGuardTelemetry.CryptoProviderAesGcm256.LogSensitiveOperation(activity, ActivityNames.CryptoProviderAesGcm256.Encrypt,
@@ -89,21 +117,18 @@ internal class AesGcmCryptoSession : IDisposable
         try
         {
             if (_budget.Consume())
+            {
                 activity?.AddEvent(new ActivityEvent(EventNames.EncryptionBudgetWarning, tags: new ActivityTagsCollection
                 {
                     [AttributeNames.EncryptionCount] = _budget.Count,
                     [AttributeNames.EncryptionLimit] = _budget.Limit,
                 }));
+                // An Activity event alone is lost without a listener; the log is not.
+                _logger?.EncryptionBudgetWarning(_budget.Count, _budget.Limit);
+            }
 
-            var aes = Rent();
-            try
-            {
-                return CoreEncrypt(aes, plaintext, aad, result);
-            }
-            finally
-            {
-                Return(aes);
-            }
+            written = CoreEncrypt(aes, plaintext, aad, result);
+            return true;
         }
         catch (Exception ex)
         {
@@ -112,6 +137,7 @@ internal class AesGcmCryptoSession : IDisposable
         }
         finally
         {
+            Return(aes);
             ArrayUtility.ZeroMemory(plaintext);
         }
     }
@@ -137,7 +163,19 @@ internal class AesGcmCryptoSession : IDisposable
         => Decrypt(ciphertext, ReadOnlySpan<byte>.Empty, result);
 
     internal int Decrypt(ReadOnlySpan<byte> ciphertext, ReadOnlySpan<byte> aad, Span<byte> result)
+        => TryDecrypt(ciphertext, aad, result, out var written)
+            ? written
+            : throw new ObjectDisposedException(GetType().FullName);
+
+    /// <summary>Decrypts, unless this session has been disposed - then returns false, having done nothing.</summary>
+    internal bool TryDecrypt(ReadOnlySpan<byte> ciphertext, ReadOnlySpan<byte> aad, Span<byte> result, out int written)
     {
+        if (!TryRent(out var aes))
+        {
+            written = 0;
+            return false;
+        }
+
         using var activity = HkdfGuardTelemetry.CryptoProviderAesGcm256.ActivitySource.StartActivity(ActivityNames.CryptoProviderAesGcm256.Decrypt);
         if (HkdfGuardTelemetry.CryptoProviderAesGcm256.EnableSensitiveLogging)
             HkdfGuardTelemetry.CryptoProviderAesGcm256.LogSensitiveOperation(activity, ActivityNames.CryptoProviderAesGcm256.Decrypt,
@@ -145,20 +183,17 @@ internal class AesGcmCryptoSession : IDisposable
 
         try
         {
-            var aes = Rent();
-            try
-            {
-                return CoreDecrypt(aes, ciphertext, aad, result);
-            }
-            finally
-            {
-                Return(aes);
-            }
+            written = CoreDecrypt(aes, ciphertext, aad, result);
+            return true;
         }
         catch (Exception ex)
         {
             ComponentTelemetry.RecordException(activity, ex);
             throw;
+        }
+        finally
+        {
+            Return(aes);
         }
     }
 
@@ -188,16 +223,41 @@ internal class AesGcmCryptoSession : IDisposable
     /// <exception cref="ObjectDisposedException">This session has been disposed</exception>
     internal AesGcm Rent()
     {
-        if (_idle.TryPop(out var aes))
-            return aes;
+        ObjectDisposedException.ThrowIf(!TryRent(out var aes), this);
+        return aes;
+    }
+
+    /// <summary>
+    /// <see cref="Rent"/> without throwing: false once this session has been disposed - including
+    /// when an instance an in-flight operation returned after Dispose is still briefly in the pool,
+    /// so a disposed session never runs another operation.
+    /// </summary>
+    internal bool TryRent(out AesGcm aes)
+    {
+        if (_idle.TryPop(out aes!))
+        {
+            if (!_disposed)
+                return true;
+
+            // Pushed back by an operation finishing after Dispose drained the pool: release it.
+            aes.Dispose();
+            aes = null!;
+            return false;
+        }
 
         lock (_gate)
         {
             // Dispose drains the pool and zeroes the key under this same lock, so a session that
             // is disposed can't hand out an instance built from a zeroed key.
-            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_disposed)
+            {
+                aes = null!;
+                return false;
+            }
+
             Interlocked.Increment(ref _instanceCount);
-            return new AesGcm(_key, TagSize);
+            aes = new AesGcm(_key, TagSize);
+            return true;
         }
     }
 

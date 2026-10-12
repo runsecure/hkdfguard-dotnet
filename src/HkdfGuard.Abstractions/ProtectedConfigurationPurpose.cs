@@ -12,8 +12,9 @@ namespace HkdfGuard.Abstractions;
 /// <para>
 /// The rule, which every language port implements identically: the purpose is
 /// <c>"HkdfGuard.EncryptedConfiguration:" + key</c> with the ASCII letters a-z upper-cased and every
-/// other UTF-16 code unit left exactly as it is; the AAD is that purpose's UTF-8 bytes (an unpaired
-/// surrogate encodes as U+FFFD). It deliberately does not follow .NET configuration's
+/// other UTF-16 code unit left exactly as it is; the AAD is that purpose's UTF-8 bytes. A key that
+/// isn't valid UTF-16 (it holds an unpaired surrogate) is rejected: encoding it would substitute
+/// U+FFFD, giving different keys the same AAD. It deliberately does not follow .NET configuration's
 /// OrdinalIgnoreCase: that comparison depends on the runtime's Unicode tables, which change between
 /// versions and which no other language reproduces, so a non-ASCII rule could not give the same
 /// purpose everywhere.
@@ -34,12 +35,18 @@ public static class ProtectedConfigurationPurpose
     // Purposes up to this many chars are built on the stack; longer ones in a pooled array.
     private const int MaxStackPurposeLength = 256;
 
+    // Throws (an ArgumentException) on an unpaired surrogate instead of substituting U+FFFD, which
+    // would give two different keys the same AAD - the rule ProtectedCacheBase applies to names.
+    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
     /// <summary>The purpose name for a configuration key - pass to KeyRing.CreateProtector.</summary>
     /// <param name="configurationKey">The full configuration path the value is stored under.</param>
-    /// <exception cref="ArgumentException">configurationKey is null or empty</exception>
+    /// <exception cref="ArgumentException">configurationKey is null or empty, or not valid UTF-16</exception>
     public static string For(string configurationKey)
     {
         ArgumentException.ThrowIfNullOrEmpty(configurationKey);
+        // Throws on an unpaired surrogate, so a purpose is only ever made for a key AadFor accepts.
+        StrictUtf8.GetByteCount(configurationKey);
 
         return string.Create(Prefix.Length + 1 + configurationKey.Length, configurationKey,
             static (destination, key) => WritePurpose(key, destination));
@@ -50,7 +57,7 @@ public static class ProtectedConfigurationPurpose
     /// <paramref name="configurationKey"/> is encrypted with (IPipelineDataProtector derives it
     /// from the secret identifier it's given; KeyRing protectors from <see cref="For"/>).
     /// </summary>
-    /// <exception cref="ArgumentException">configurationKey is null or empty</exception>
+    /// <exception cref="ArgumentException">configurationKey is null or empty, or not valid UTF-16</exception>
     public static byte[] AadFor(string configurationKey)
     {
         ArgumentException.ThrowIfNullOrEmpty(configurationKey);
@@ -69,8 +76,8 @@ public static class ProtectedConfigurationPurpose
         try
         {
             WritePurpose(configurationKey, buffer);
-            var aad = new byte[Encoding.UTF8.GetByteCount(buffer)];
-            Encoding.UTF8.GetBytes(buffer, aad);
+            var aad = new byte[StrictUtf8.GetByteCount(buffer)];
+            StrictUtf8.GetBytes(buffer, aad);
             return aad;
         }
         finally

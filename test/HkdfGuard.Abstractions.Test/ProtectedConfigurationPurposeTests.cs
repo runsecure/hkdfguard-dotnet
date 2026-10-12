@@ -112,12 +112,26 @@ public class ProtectedConfigurationPurposeTests
     }
 
     [Fact]
-    public void For_KeepsAnUnpairedSurrogateAsIs()
+    public void ForAndAadFor_RejectAnUnpairedSurrogate()
     {
-        var lone = "Key\uD800Tail";
+        // Encoding one would substitute U+FFFD, so "Key\uD800Tail" and "Key\uD801Tail" would share an
+        // AAD. Built here rather than in InlineData, which replaces lone surrogates when serializing.
+        string[] keys = ["Key\uD800Tail", "Key\uDC00Tail", "Key\uD800"]; // lone high, lone low, high at the end
+        foreach (var key in keys)
+        {
+            Assert.ThrowsAny<ArgumentException>(() => ProtectedConfigurationPurpose.For(key));
+            Assert.ThrowsAny<ArgumentException>(() => ProtectedConfigurationPurpose.AadFor(key));
+            Assert.ThrowsAny<ArgumentException>(() => ProtectedConfigurationPurpose.AadFor(key.AsSpan()));
+        }
+    }
 
-        Assert.Equal($"{ProtectedConfigurationPurpose.Prefix}:KEY\uD800TAIL", ProtectedConfigurationPurpose.For(lone));
-        Assert.Equal(Encoding.UTF8.GetBytes(ProtectedConfigurationPurpose.For(lone)), ProtectedConfigurationPurpose.AadFor(lone));
+    [Fact]
+    public void ForAndAadFor_AcceptASurrogatePair()
+    {
+        var key = "Key😀Tail"; // U+1F600
+
+        Assert.Equal($"{ProtectedConfigurationPurpose.Prefix}:KEY😀TAIL", ProtectedConfigurationPurpose.For(key));
+        Assert.Equal(Encoding.UTF8.GetBytes(ProtectedConfigurationPurpose.For(key)), ProtectedConfigurationPurpose.AadFor(key));
     }
 
     [Fact]

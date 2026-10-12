@@ -274,6 +274,61 @@ public class AesGcmCryptoSessionTests
     }
 
     [Fact]
+    public void AfterDispose_AnInstanceReturnedLate_IsNeverRentedAgain()
+    {
+        var cipher = new AesGcmCryptoSession(RandomNumberGenerator.GetBytes(32));
+        var rented = cipher.Rent();
+        cipher.Dispose();
+
+        // Return pushes the instance back before it notices the dispose and drains the pool; even
+        // if another thread pops it in that window, it must not get a usable instance.
+        cipher.Return(rented);
+
+        Assert.False(cipher.TryRent(out _));
+        Assert.Throws<ObjectDisposedException>(() => cipher.Rent());
+        Assert.Equal(0, cipher.IdleInstanceCount);
+    }
+
+    [Fact]
+    public void TryEncrypt_OnADisposedSession_ReturnsFalse_LeavingPlaintextAndTheCountUntouched()
+    {
+        var budget = new EncryptionBudget();
+        var cipher = new AesGcmCryptoSession(RandomNumberGenerator.GetBytes(32), budget);
+        cipher.Dispose();
+        var plaintext = "still here"u8.ToArray();
+
+        Assert.False(cipher.TryEncrypt(plaintext, ReadOnlySpan<byte>.Empty, new byte[64], out var written));
+
+        Assert.Equal(0, written);
+        Assert.Equal("still here"u8.ToArray(), plaintext); // intact, so a caller can retry on the current session
+        Assert.Equal(0, budget.Count);
+    }
+
+    [Fact]
+    public void Encrypt_OnADisposedSession_Throws_AndStillZeroesThePlaintext()
+    {
+        var cipher = new AesGcmCryptoSession(RandomNumberGenerator.GetBytes(32));
+        cipher.Dispose();
+        var plaintext = "secret"u8.ToArray();
+
+        Assert.Throws<ObjectDisposedException>(() => cipher.Encrypt(plaintext, new byte[64]));
+
+        Assert.All(plaintext, b => Assert.Equal(0, b));
+    }
+
+    [Fact]
+    public void TryDecrypt_OnADisposedSession_ReturnsFalse_AndDecryptThrows()
+    {
+        var cipher = new AesGcmCryptoSession(RandomNumberGenerator.GetBytes(32));
+        var ciphertext = new byte[4 + 28];
+        cipher.Encrypt("abcd"u8.ToArray(), ciphertext);
+        cipher.Dispose();
+
+        Assert.False(cipher.TryDecrypt(ciphertext, ReadOnlySpan<byte>.Empty, new byte[4], out _));
+        Assert.Throws<ObjectDisposedException>(() => cipher.Decrypt(ciphertext, new byte[4]));
+    }
+
+    [Fact]
     public void Dispose_Twice_IsSafe()
     {
         var cipher = new AesGcmCryptoSession(RandomNumberGenerator.GetBytes(32));

@@ -8,7 +8,7 @@ public class HkdfGuardOptionsValidatorTests
         => new()
         {
             ServiceName = "my.service",
-            CachedKeyExpiry = 60,
+            KeyRefreshInterval = 60,
             EphemeralKeys = [1],
         };
 
@@ -63,24 +63,24 @@ public class HkdfGuardOptionsValidatorTests
     [InlineData(-1)]
     [InlineData(0)]
     [InlineData(301)]
-    public void Validate_CachedKeyExpiryOutOfRange_Fails(int cachedKeyExpiry)
+    public void Validate_KeyRefreshIntervalOutOfRange_Fails(int keyRefreshInterval)
     {
         var options = ValidOptions();
-        options.CachedKeyExpiry = cachedKeyExpiry;
+        options.KeyRefreshInterval = keyRefreshInterval;
 
         var result = new HkdfGuardOptionsValidator().Validate(null, options);
 
         Assert.False(result.Succeeded);
-        Assert.Contains(result.Failures!, f => f.Contains("CachedKeyExpiry"));
+        Assert.Contains(result.Failures!, f => f.Contains("KeyRefreshInterval"));
     }
 
     [Theory]
     [InlineData(1)]
     [InlineData(300)]
-    public void Validate_CachedKeyExpiryWithinRange_Succeeds(int cachedKeyExpiry)
+    public void Validate_KeyRefreshIntervalWithinRange_Succeeds(int keyRefreshInterval)
     {
         var options = ValidOptions();
-        options.CachedKeyExpiry = cachedKeyExpiry;
+        options.KeyRefreshInterval = keyRefreshInterval;
 
         var result = new HkdfGuardOptionsValidator().Validate(null, options);
 
@@ -88,10 +88,10 @@ public class HkdfGuardOptionsValidatorTests
     }
 
     [Fact]
-    public void Validate_CachedKeyExpiryUnset_Succeeds()
+    public void Validate_KeyRefreshIntervalUnset_Succeeds()
     {
         var options = ValidOptions();
-        options.CachedKeyExpiry = null;
+        options.KeyRefreshInterval = null;
 
         var result = new HkdfGuardOptionsValidator().Validate(null, options);
 
@@ -202,6 +202,33 @@ public class HkdfGuardOptionsValidatorTests
 
         Assert.True(new HkdfGuardOptionsValidator().Validate(null, options).Succeeded);
         options.ApplyTo(new KeyRingBuilder()); // and the builder accepts every hour the validator does
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(24)]
+    [InlineData(24 * 365)]
+    public void Validate_EphemeralKeyRetentionHoursAtLeastOne_Succeeds(int hours)
+    {
+        var options = ValidOptions();
+        options.EphemeralKeyRetentionHours = hours;
+
+        Assert.True(new HkdfGuardOptionsValidator().Validate(null, options).Succeeded);
+        Assert.Equal(TimeSpan.FromHours(hours), options.ApplyTo(new KeyRingBuilder()).EphemeralKeyRetention);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void Validate_EphemeralKeyRetentionHoursBelowOne_Fails(int hours)
+    {
+        var options = ValidOptions();
+        options.EphemeralKeyRetentionHours = hours;
+
+        var result = new HkdfGuardOptionsValidator().Validate(null, options);
+
+        Assert.True(result.Failed);
+        Assert.Contains(result.Failures!, f => f.Contains("EphemeralKeyRetentionHours"));
     }
 
     [Theory]

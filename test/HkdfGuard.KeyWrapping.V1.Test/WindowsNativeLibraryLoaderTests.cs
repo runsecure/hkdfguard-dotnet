@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Reflection.PortableExecutable;
+using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Security;
 using System.Security.AccessControl;
@@ -15,6 +17,13 @@ public class WindowsNativeLibraryLoaderTests
     private static readonly SecurityIdentifier Administrators = new(WellKnownSidType.BuiltinAdministratorsSid, null);
     private static readonly SecurityIdentifier TrustedInstaller = new("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464");
     private static readonly SecurityIdentifier Users = new(WellKnownSidType.BuiltinUsersSid, null);
+
+    // Carried by every Artifact Signing leaf, whoever the customer.
+    private const string ArtifactSigningEku = "1.3.6.1.4.1.311.97.1.0";
+
+    // The genuine signing certificate's EKUs.
+    private static readonly string[] GenuineEkus =
+        [ArtifactSigningEku, WindowsNativeLibraryLoader.CodeSigningEku, WindowsNativeLibraryLoader.ExpectedProfileEku];
 
     [WindowsFact]
     public void InstalledPath_IsTheFixedProgramFilesLocation()
@@ -138,6 +147,118 @@ public class WindowsNativeLibraryLoaderTests
     }
 
     [WindowsFact]
+    public void VerifyDriveRoot_ADefaultSystemDriveAcl_Passes()
+    {
+        // As a default C:\: Authenticated Users may create folders in the root (0x4, AD) and get
+        // Modify on what they create (inherit-only) - neither lets them rename an existing folder.
+        var security = new DirectorySecurity();
+        security.SetSecurityDescriptorSddlForm("O:SYD:(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)(A;OICIIO;SDGXGWGR;;;AU)(A;;0x4;;;AU)");
+
+        WindowsNativeLibraryLoader.VerifyDriveRoot(security, "C:\\");
+    }
+
+    [WindowsTheory]
+    [InlineData("0x40")] // FILE_DELETE_CHILD: rename or delete any folder beneath, e.g. Program Files
+    [InlineData("WD")]   // WRITE_DAC: grant itself delete-child
+    [InlineData("WO")]   // WRITE_OWNER: take ownership, then the same
+    [InlineData("GA")]   // GENERIC_ALL
+    [InlineData("FA")]   // FILE_ALL_ACCESS
+    public void VerifyDriveRoot_ARightThatCouldRenameAFolderBeneath_IsRefused(string right)
+    {
+        var security = new DirectorySecurity();
+        security.SetSecurityDescriptorSddlForm($"O:SYD:(A;OICI;FA;;;SY)(A;;{right};;;BU)");
+
+        var ex = Assert.Throws<SecurityException>(() => WindowsNativeLibraryLoader.VerifyDriveRoot(security, "C:\\"));
+
+        Assert.Contains(Users.Value, ex.Message);
+    }
+
+    [WindowsTheory]
+    [InlineData("0x1")] // FILE_ADD_FILE
+    [InlineData("0x4")] // FILE_ADD_SUBDIRECTORY
+    [InlineData("GW")]  // GENERIC_WRITE maps to neither delete-child nor ACL rights
+    public void VerifyDriveRoot_RightsThatOnlyCreateNewEntries_AreAllowed(string right)
+    {
+        var security = new DirectorySecurity();
+        security.SetSecurityDescriptorSddlForm($"O:SYD:(A;OICI;FA;;;SY)(A;;{right};;;BU)");
+
+        WindowsNativeLibraryLoader.VerifyDriveRoot(security, "C:\\");
+    }
+
+    [WindowsFact]
+    public void VerifyDriveRoot_AnUntrustedOwner_IsRefused()
+    {
+        var security = new DirectorySecurity();
+        security.SetSecurityDescriptorSddlForm("O:BUD:(A;OICI;FA;;;SY)");
+
+        Assert.Throws<SecurityException>(() => WindowsNativeLibraryLoader.VerifyDriveRoot(security, "C:\\"));
+    }
+
+    [WindowsTheory]
+    [InlineData(Architecture.X64, Machine.Amd64)]
+    [InlineData(Architecture.Arm64, Machine.Arm64)]
+    [InlineData(Architecture.X86, Machine.I386)]
+    public void VerifyImageKind_ADllForThisProcessArchitecture_Passes(Architecture process, Machine machine)
+    {
+        WindowsNativeLibraryLoader.VerifyImageKind("test", Characteristics.Dll | Characteristics.ExecutableImage, machine, process);
+    }
+
+    [WindowsFact]
+    public void VerifyImageKind_AnExecutable_IsRefused()
+    {
+        // e.g. hkdfguard-v1-initialize.exe renamed into place: signed by the same profile.
+        var ex = Assert.Throws<SecurityException>(() =>
+            WindowsNativeLibraryLoader.VerifyImageKind("test", Characteristics.ExecutableImage, Machine.Amd64, Architecture.X64));
+
+        Assert.Contains("not a DLL", ex.Message);
+    }
+
+    [WindowsTheory]
+    [InlineData(Architecture.X64, Machine.Arm64)]
+    [InlineData(Architecture.Arm64, Machine.Amd64)]
+    [InlineData(Architecture.X64, Machine.I386)]
+    [InlineData(Architecture.Wasm, Machine.Unknown)] // no Windows PE machine for it at all
+    public void VerifyImageKind_ADllForAnotherArchitecture_IsRefused(Architecture process, Machine machine)
+    {
+        Assert.Throws<SecurityException>(() =>
+            WindowsNativeLibraryLoader.VerifyImageKind("test", Characteristics.Dll | Characteristics.ExecutableImage, machine, process));
+    }
+
+    [WindowsFact]
+    public void VerifyImageKind_AFileThatIsNotAPeImage_FailsClosedWithSecurityException()
+    {
+        var path = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllBytes(path, [0x4D, 0x5A, 0x90, 0x00]);
+
+            Assert.Throws<SecurityException>(() => WindowsNativeLibraryLoader.VerifyImageKind(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [InstalledWindowsLibraryFact]
+    public void VerifyImageKind_TheInstalledLibrary_Passes()
+    {
+        WindowsNativeLibraryLoader.VerifyImageKind(WindowsNativeLibraryLoader.InstalledPath);
+    }
+
+    [InstalledWindowsLibraryFact]
+    public void TheInstalledProvisioningTool_PassesTheSignerChecks_ButIsRefusedAsNotADll()
+    {
+        // Installed beside the library and signed under the same profile: only the image check
+        // tells them apart.
+        var tool = Path.Combine(Path.GetDirectoryName(WindowsNativeLibraryLoader.InstalledPath)!, "hkdfguard-v1-initialize.exe");
+        Assert.True(File.Exists(tool), $"{tool} is installed with the library.");
+
+        WindowsNativeLibraryLoader.VerifySignature(tool, WindowsNativeLibraryLoader.ExpectedPublisher);
+        Assert.Throws<SecurityException>(() => WindowsNativeLibraryLoader.VerifyImageKind(tool));
+    }
+
+    [WindowsFact]
     public void VerifyNotReparsePoint_AJunction_IsRefused()
     {
         // Junctions need no privilege to create, unlike symbolic links.
@@ -176,6 +297,115 @@ public class WindowsNativeLibraryLoaderTests
         {
             File.Delete(path);
         }
+    }
+
+    [WindowsFact]
+    public void VerifySignerIdentity_ThePinnedRootProfileAndPublisher_Passes()
+    {
+        VerifySignerIdentity(GenuineEkus);
+    }
+
+    [WindowsFact]
+    public void VerifySignerIdentity_TheRootHashInLowerCase_Passes()
+    {
+        VerifySignerIdentity(GenuineEkus, rootSha256: WindowsNativeLibraryLoader.ExpectedRootSha256.ToLowerInvariant());
+    }
+
+    [WindowsFact]
+    public void VerifySignerIdentity_AnotherRoot_IsRefused()
+    {
+        // e.g. a root a non-administrator added to their own CurrentUser\Root, issuing the same subject.
+        var otherRoot = new string('A', 64);
+
+        var ex = Assert.Throws<SecurityException>(() => VerifySignerIdentity(GenuineEkus, rootSha256: otherRoot));
+
+        Assert.Contains(otherRoot, ex.Message);
+    }
+
+    [WindowsFact]
+    public void VerifySignerIdentity_NoProfileEku_IsRefused()
+    {
+        var ex = Assert.Throws<SecurityException>(() =>
+            VerifySignerIdentity([WindowsNativeLibraryLoader.CodeSigningEku, ArtifactSigningEku]));
+
+        Assert.Contains(WindowsNativeLibraryLoader.ExpectedProfileEku, ex.Message);
+    }
+
+    [WindowsFact]
+    public void VerifySignerIdentity_AnotherArtifactSigningProfile_IsRefused()
+    {
+        // Another Artifact Signing customer's leaf: same root, same shared EKU, its own profile EKU.
+        var ex = Assert.Throws<SecurityException>(() =>
+            VerifySignerIdentity([ArtifactSigningEku, WindowsNativeLibraryLoader.CodeSigningEku, "1.3.6.1.4.1.311.97.1.2.3.4"]));
+
+        Assert.Contains(WindowsNativeLibraryLoader.ExpectedProfileEku, ex.Message);
+    }
+
+    [WindowsFact]
+    public void VerifySignerIdentity_NoCodeSigningEku_IsRefused()
+    {
+        var ex = Assert.Throws<SecurityException>(() =>
+            VerifySignerIdentity([ArtifactSigningEku, WindowsNativeLibraryLoader.ExpectedProfileEku]));
+
+        Assert.Contains(WindowsNativeLibraryLoader.CodeSigningEku, ex.Message);
+    }
+
+    [WindowsFact]
+    public void VerifySignerIdentity_NoEkusAtAll_IsRefused()
+    {
+        Assert.Throws<SecurityException>(() => VerifySignerIdentity([]));
+    }
+
+    [WindowsFact]
+    public void VerifySignerIdentity_AnotherSubject_IsRefused_EvenWithThePinnedRootAndProfile()
+    {
+        var ex = Assert.Throws<SecurityException>(() => VerifySignerIdentity(GenuineEkus, leafSubject: "CN=Someone Else"));
+
+        Assert.Contains("not the expected HkdfGuard publisher", ex.Message);
+    }
+
+    [WindowsFact]
+    public void VerifySignature_WhenTheSignerCantBeRead_FailsClosedWithSecurityException()
+    {
+        var cause = new InvalidOperationException("no chain");
+
+        var ex = Assert.Throws<SecurityException>(() =>
+            WindowsNativeLibraryLoader.VerifySignature("test", WindowsNativeLibraryLoader.ExpectedPublisher, _ => throw cause));
+
+        Assert.Same(cause, ex.InnerException);
+    }
+
+    [WindowsFact]
+    public void VerifySignature_ASecurityExceptionFromTheReader_IsNotWrapped()
+    {
+        var refusal = new SecurityException("untrusted");
+
+        var ex = Assert.Throws<SecurityException>(() =>
+            WindowsNativeLibraryLoader.VerifySignature("test", WindowsNativeLibraryLoader.ExpectedPublisher, _ => throw refusal));
+
+        Assert.Same(refusal, ex);
+    }
+
+    [WindowsFact]
+    public void VerifySignature_AppliesTheSignerPolicyToWhatTheReaderReturns()
+    {
+        var signer = new WindowsNativeLibraryLoader.VerifiedSigner(
+            WindowsNativeLibraryLoader.ExpectedPublisher, GenuineEkus, new string('A', 64));
+
+        Assert.Throws<SecurityException>(() =>
+            WindowsNativeLibraryLoader.VerifySignature("test", WindowsNativeLibraryLoader.ExpectedPublisher, _ => signer));
+    }
+
+    [InstalledWindowsLibraryFact]
+    public void ReadVerifiedSigner_TheInstalledLibrary_ChainsToThePinnedRoot_WithTheProfileEku()
+    {
+        // The chain WinVerifyTrust validated, not one built separately.
+        var signer = WindowsNativeLibraryLoader.ReadVerifiedSigner(WindowsNativeLibraryLoader.InstalledPath);
+
+        Assert.Equal(WindowsNativeLibraryLoader.ExpectedPublisher, signer.LeafSubject);
+        Assert.Equal(WindowsNativeLibraryLoader.ExpectedRootSha256, signer.RootSha256);
+        Assert.Contains(WindowsNativeLibraryLoader.CodeSigningEku, signer.LeafEkuOids);
+        Assert.Contains(WindowsNativeLibraryLoader.ExpectedProfileEku, signer.LeafEkuOids);
     }
 
     [InstalledWindowsLibraryFact]
@@ -248,6 +478,9 @@ public class WindowsNativeLibraryLoaderTests
 
         Assert.True(status < 0);
     }
+
+    private static void VerifySignerIdentity(string[] leafEkuOids, string leafSubject = WindowsNativeLibraryLoader.ExpectedPublisher, string rootSha256 = WindowsNativeLibraryLoader.ExpectedRootSha256)
+        => WindowsNativeLibraryLoader.VerifySignerIdentity("test", leafSubject, leafEkuOids, rootSha256, WindowsNativeLibraryLoader.ExpectedPublisher);
 
     private static FileSecurity Security(SecurityIdentifier owner, params (SecurityIdentifier Who, FileSystemRights Rights)[] allows)
     {

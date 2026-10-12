@@ -8,24 +8,26 @@ tracking and purpose-scoped Additional Authenticated Data (AAD).
 
 ## Key concepts
 
-- **The KEK never enters this process, and a revealed DEK is held only as long as configured.**
+- **The KEK never enters this process, and a revealed DEK lives only in pinned memory.**
   Wrapping/unwrapping a data encryption key (DEK) is delegated entirely to the native KMS library
   for the current OS (`NativeHkdfKeyWrapperV1`) - the KEK never leaves that native library. This
-  library sees the wrapped payload and the revealed DEK, which it caches in memory for at most the
-  configured expiry (1-300 seconds) and zeroes when replaced or disposed; it never writes a
-  plaintext DEK to disk.
+  library sees the wrapped payload and the revealed DEK. It holds the DEK in pinned memory for as
+  long as that key is in use, and zeroes it when the ring is disposed, when the key fails closed
+  because the KEK became unavailable, or, for an ephemeral key, when its retention ends; it never
+  writes a plaintext DEK to disk.
 - **Identified by service name, not a shared master key.** A key is identified to the native KMS
   library by a service name - not by any secret this library holds itself. `KeyRingBuilder` carries this,
-  along with a cache-expiry/rotation policy, fluently.
+  along with a key refresh/rotation policy, fluently.
 - **One `IKeyWrapper` per KEK, not per wrapped payload.** `IKeyWrapper.UnwrapAsync` takes the
   wrapped payload as an explicit argument, so a single wrapper instance (bound only to a KEK - e.g. a
   `NativeHkdfKeyWrapperV1` for one service name) can reveal any number of different wrapped DEKs
   sharing that KEK, one per registered key file. Its methods (`WrapAsync`/`UnwrapAsync`/
   `GenerateAndWrapAsync`) are asynchronous so network-backed KEKs can be awaited; the native
   wrapper completes synchronously.
-- **Cached, expiring, proactively-refreshed cipher sessions via `ICryptoProvider`.** A revealed
-  DEK is bound into an internal cipher session once, not re-derived on every Encrypt/Decrypt - the
-  configured expiry (1-300 seconds) marks when it should be refreshed instead of reused.
+- **Cached, proactively-refreshed cipher sessions via `ICryptoProvider`.** A revealed DEK is
+  bound into an internal cipher session once, not re-revealed on every Encrypt/Decrypt - the
+  configured interval (`KeyRefreshInterval`, 1-300 seconds) sets how often that session is rebuilt
+  from a fresh reveal.
   `ICryptoProvider` owns that refresh itself, and does it ahead of time: a background timer,
   ticking every `expirySeconds`, reveals and builds the next session, then swaps it in and
   disposes the outgoing one (zeroing its key) - so an Encrypt/Decrypt call never pays the unwrap
@@ -38,16 +40,17 @@ tracking and purpose-scoped Additional Authenticated Data (AAD).
   disposes its sessions - zeroing every revealed copy of the DEK - raises an
   `hkdfguard.key_access_suspended` event, and every Encrypt/Decrypt throws
   `CryptographicException` until a later refresh succeeds, at which point service resumes with no
-  restart. So revoking the KEK stops a running process within about `3 × CachedKeyExpiry`.
+  restart. So revoking the KEK stops a running process within about `3 × KeyRefreshInterval`.
   `WithMaxRefreshFailures(n)` (or `HkdfGuardOptions.MaxRefreshFailures`) changes `n`; pick it so
-  that `n × CachedKeyExpiry` is longer than any KEK outage you'd rather ride out.
+  that `n × KeyRefreshInterval` is longer than any KEK outage you'd rather ride out.
   `WithFailOpenOnRefreshFailure()` (or `HkdfGuardOptions.FailOpenOnRefreshFailure`) opts out: the
   last good session then stays in use indefinitely, and revoking the KEK never stops the process.
   Either way, give the factory a logger - `new AesGcmCryptoProviderFactory(logger)` - and every
   failed refresh is logged as an error, a suspension as critical, and a resumption as
   information; under fail-open that error is the only sign the KEK is gone. (Providers created
-  directly through `ICryptoProviderFactory` or `AesGcmCryptoProvider.CreateAsync` still treat a
-  null `maxRefreshFailures` as fail-open; the secure default lives in `KeyRingBuilder`.) The concrete
+  directly through `ICryptoProviderFactory` or `AesGcmCryptoProvider.CreateAsync` fail closed by
+  default too, after `RefreshFailurePolicy.DefaultMaxRefreshFailures`; passing a null
+  `maxRefreshFailures` explicitly opts them into fail-open.) The concrete
   session type itself (e.g. `AesGcmCryptoSession`) is an internal implementation detail - callers
   only ever see it through the public `ICryptoProvider` they were given (e.g.
   `AesGcmCryptoProvider`), which exposes Encrypt/Decrypt directly. `ICryptoProviderFactory` is the
@@ -135,20 +138,29 @@ event outside the running process:
 | Data encryption keys in key files | Every release | The release pipeline generates a fresh DEK, re-encrypts that release's configuration under it, wraps it into a new key file, and deploys the file. Nothing is carried over from the previous release. |
 | Ephemeral keys (`WithEphemeralKey`) | Every 24 hours by default, and on every application restart | Generated in memory and never written anywhere. On a schedule the ring generates a fresh one and adds it as the next version, so every later `Encrypt` uses it. A restart discards them all and builds a new ring. |
 
-Scheduled ephemeral rotation only ever adds keys. Earlier ephemeral keys stay registered, so
-values encrypted under them still decrypt until the process restarts. Configure the schedule on
-the builder, or in configuration through `HkdfGuardOptions`:
+A rotation adds the new key and keeps the one it replaced for a **retention** period (24 hours
+by default), so values encrypted just before the rotation still decrypt. Once a superseded key
+has been out of use for that long, the next rotation retires it: it is removed from the ring and
+disposed, zeroing its DEK and stopping its background refresh, and anything still encrypted under
+it fails with `KeyNotFoundException`. A ring therefore holds at most about `retention / interval`
+superseded ephemeral keys, however long the process runs. Keys from key files are never retired.
+Configure both on the builder, or in configuration through `HkdfGuardOptions`:
 
 ```csharp
-builder.WithEphemeralKeyRotation(TimeSpan.FromHours(6)); // 1 minute to ~49 days; default 24 hours
-builder.WithoutEphemeralKeyRotation();                   // keep the startup key until restart
-builder.WithLogger(logger);                              // ILogger<KeyRing>: logs each rotation and failure
+builder.WithEphemeralKeyRotation(TimeSpan.FromHours(6));  // 1 hour to ~49 days; default 24 hours
+builder.WithEphemeralKeyRetention(TimeSpan.FromHours(12)); // at least 1 minute; default 24 hours
+builder.WithoutEphemeralKeyRotation();                    // keep the startup key until restart
+builder.WithLogger(logger);                               // ILogger<KeyRing>: logs each rotation, retirement and failure
 ```
 
 ```jsonc
 { "EphemeralKeyRotationHours": 6 }          // 1-1193
+{ "EphemeralKeyRetentionHours": 12 }        // at least 1; default 24
 { "DisableEphemeralKeyRotation": true }
 ```
+
+Rotation can't be set below one hour. Each rotation generates a key through the KEK and starts a
+background refresh loop for it, so rotating faster buys nothing and only loads the KMS.
 
 A ring built only from key files never rotates on a schedule; its key-file version stays current.
 If creating a new key fails, for example because the KEK is unreachable, the current key stays in
@@ -179,12 +191,14 @@ What this means in practice:
 - **Expect the cache to be empty after a restart.** Everything encrypted under an ephemeral key
   becomes unreadable once the process restarts, so treat cached values as rebuildable. Never
   persist them. Rotating the cache key on every restart is intended.
-- **A background refresh is not a rotation.** Every `CachedKeyExpiry` seconds a provider re-reveals
+- **A background refresh is not a rotation.** Every `KeyRefreshInterval` seconds a provider re-reveals
   the same key, to confirm the KEK is still reachable. It never changes which key encrypts; only a
   release, a restart, or a scheduled ephemeral rotation does that.
-- **Old ephemeral keys accumulate until restart.** Each one keeps its own background refresh
-  running. At the default schedule that is one more key per day of uptime, so a process that runs
-  for months carries months of keys. Restarting periodically resets this.
+- **Size the retention to the cache's life.** A cached value is readable only while the key that
+  encrypted it is in the ring: the current key, or a superseded one still within retention. With
+  the defaults (24-hour rotation, 24-hour retention) a value written just before a rotation stays
+  readable for at least 24 hours and at most 48. If values must live longer, raise the retention;
+  if a key's exposure window matters more, lower it and treat older cached values as rebuildable.
 
 ## Architecture overview
 
@@ -259,7 +273,7 @@ Node/Python mirror this layering, adding their own consumer branches as they cat
 | `HkdfGuard.Cache` | `ProtectedCache` (an `IProtectedCache` backed by an `IKeyRing` - encrypts under the ring's current key on Add/AddOrUpdate and records its version, reveals under that version on Decrypt, so it follows key rotation; nothing held as plaintext beyond a single call; each value is bound to its name as AAD, so a ciphertext under any other name fails authentication, and names match ignoring ASCII case only) and `ProtectedCacheCollection` (aggregates multiple `IProtectedReadOnlyCache` sources behind one read-only surface, checked in registration order). |
 | `HkdfGuard.EncryptedConfiguration` | `ProtectedConfigurationRoot` (an `IProtectedConfigurationRoot`) - wraps an `IConfigurationRoot`, revealing values formatted as protected secrets via a `KeyRing`; configuration itself only ever holds ciphertext, and `Decrypt` reads fresh from the underlying root every time so `Reload` takes effect immediately. Each value is bound to its own configuration key (`ProtectedConfigurationPurpose`), so a value copied to another key fails to decrypt. |
 | `HkdfGuard.DependencyInjection` | `AddKeyRingAsync` - builds a `KeyRing` asynchronously at registration and registers it as a singleton in an `IServiceCollection`. |
-| `HkdfGuard.Options` | `HkdfGuardOptions`/`HkdfGuardOptionsValidator`/`HkdfGuardOptionsExtensions.ApplyTo` - a plain-data mirror of `KeyRingBuilder`'s configuration surface (`ServiceName`, `CachedKeyExpiry`, `MaxRefreshFailures`/`FailOpenOnRefreshFailure`, key files, ephemeral keys), for binding a `KeyRing`'s identity/policy/key files from configuration. |
+| `HkdfGuard.Options` | `HkdfGuardOptions`/`HkdfGuardOptionsValidator`/`HkdfGuardOptionsExtensions.ApplyTo` - a plain-data mirror of `KeyRingBuilder`'s configuration surface (`ServiceName`, `KeyRefreshInterval`, `MaxRefreshFailures`/`FailOpenOnRefreshFailure`, key files, ephemeral keys), for binding a `KeyRing`'s identity/policy/key files from configuration. |
 | `HkdfGuard.Diagnostics.Test`, `HkdfGuard.Abstractions.Test`, `HkdfGuard.CryptoProvider.AesGcm256.Test`, `HkdfGuard.KeyWrapping.V1.Test`, `HkdfGuard.DataEncryptionKey.Test`, `HkdfGuard.Cache.Test`, `HkdfGuard.EncryptedConfiguration.Test`, `HkdfGuard.DependencyInjection.Test`, `HkdfGuard.Options.Test` | xUnit test suites, maintained at full line/branch coverage for their respective projects. |
 
 Requires **.NET 10** (`net10.0`).
@@ -302,19 +316,32 @@ Where each platform's library comes from:
 | Platform | Library | How it is found |
 |---|---|---|
 | Windows | `HkdfGuardV1.dll` | Installed to `%ProgramFiles%\HkdfGuard\v1` and loaded only from there. Not shipped in the package. |
-| macOS | `libhkdfguard_v1.dylib` | Installed system-wide to `/Library/Application Support/HkdfGuard/v1`, or per user to `~/.hkdfguard/v1`, and loaded only from there. Not shipped in the package. |
-| Linux | `HkdfGuardKeyProtectionLinux` | The runtime's default search. |
+| macOS | `libhkdfguard_v1.dylib` | Installed system-wide to `/Library/Application Support/HkdfGuard/v1`, or per user to `~/.hkdfguard/v1`, and loaded only from there. Not shipped in the package. Requires Apple silicon and macOS 13 or later, with an arm64 .NET runtime (not an x64 one under Rosetta). |
+| Linux | `libhkdfguard.so.1` | Installed by the `libhkdfguard1` package (`hkdfguard-libs` on RPM distributions) to `/usr/lib/<multiarch>` or `/usr/lib64`, and loaded only from there. Not shipped in the package. x64 and arm64. |
 
 The NuGet package contains no native library. Each one is distributed and installed separately,
 together with its `hkdfguard-v1-initialize` provisioning tool.
 
-The library sees every DEK, so on Windows and macOS it is never located by a search path.
+The library sees every DEK, so it is never located by a search path.
 
 On **Windows**, before mapping it, `WindowsNativeLibraryLoader` requires all of the following:
 - No folder on its path is a symlink or junction.
 - The file and every parent folder below the drive root are owned and writable only by SYSTEM,
   Administrators or TrustedInstaller.
-- The file has a valid, trusted Authenticode signature from the expected publisher.
+- The drive root has a trusted owner and lets no one else rename or delete a folder directly
+  beneath it (delete-child, or the right to change its ACL or owner). Creating new folders there,
+  which a default `C:\` allows every user, is permitted.
+- The file has a valid, trusted Authenticode signature from the expected publisher. The chain
+  WinVerifyTrust validated must end at the pinned Azure Artifact Signing root (Microsoft Identity
+  Verification Root Certificate Authority 2020, matched by SHA-256, not by name). The signing
+  certificate must carry the Code Signing EKU and the EKU of HkdfGuard's own Artifact Signing
+  certificate profile. A matching subject from any other trusted root is refused, including a root
+  a user added to their own certificate store. The leaf and intermediate certificates are not
+  pinned, because Artifact Signing reissues them often. No revocation check or certificate download
+  is made, so loading never touches the network.
+- The signed PE header marks the file as a DLL for the process's architecture. The publisher's
+  other signed binaries, such as `hkdfguard-v1-initialize.exe`, pass the signature checks, so
+  this check is what refuses one renamed into place.
 
 Its dependencies are then loaded from System32 only. Any failed check throws, with no fallback, so
 a DLL planted on `PATH` or beside the application is never loaded.
@@ -322,18 +349,59 @@ a DLL planted on `PATH` or beside the application is never loaded.
 On **macOS**, `MacOsNativeLibraryLoader` uses the system install whenever it exists, and the
 per-user install only when there is no system install. Anything running as the user can write to
 the user's home, so a per-user file must never be able to override a root-owned system one. If the
-system install exists but fails a check, loading fails instead of falling back. Before loading,
-it requires all of the following:
+system install exists but fails a check, loading fails instead of falling back - and so does a
+system install that merely can't be examined (say, a directory this process may not read): only
+"nothing is there" counts as "not installed". Before loading, it requires all of the following:
 - No component of the path, up to `/`, is a symbolic link.
 - Every component of a system install is owned by root; of a user install, by root or the current
   user.
-- No component is writable by anyone but its owner. The one exception is root-owned directories
-  writable by the `wheel` or `admin` group, as `/Library/Application Support` is.
-- The file's code signature is valid and issued through Apple's CA to the HkdfGuard team
-  (`BQ4343E7W2`).
+- No component is writable by anyone but its owner. The one exception is the system directories
+  above an install (`/`, `/Library`, `/Library/Application Support`, `/Users`), which may also be
+  writable by the `wheel` or `admin` group when root owns them, as `/Library/Application Support`
+  often is. The install's own directories and the library file never are.
+- The file's code signature is valid, carries the identifier `libhkdfguard_v1`, and was made with
+  a Developer ID Application certificate issued through Apple's CA to the HkdfGuard team
+  (`MFW3T8R8J3`). A development-signed build, or any other binary the team signs, is refused.
 
-The library's own dependencies are absolute system paths, so `DYLD_LIBRARY_PATH` can't redirect
-them.
+`dlopen` of an absolute path does not load exactly that path: dyld first looks for the file's
+name in every `DYLD_LIBRARY_PATH` directory, and the `dotnet` host honours `DYLD_*` variables
+despite its hardened runtime. So the loader refuses, before loading, if a `DYLD_LIBRARY_PATH`
+directory contains a `libhkdfguard_v1.dylib`; and after loading it asks dyld which file it really
+mapped, unloading and refusing anything but the verified path. The library's own dependencies are
+absolute system paths and need no such check.
+
+On **Linux**, `LinuxNativeLibraryLoader` uses the package's file in the Debian multiarch directory
+(`/usr/lib/x86_64-linux-gnu` or `/usr/lib/aarch64-linux-gnu`) if it is there, otherwise the one in
+`/usr/lib64`. Only "nothing is there" moves on; a location that can't be examined is refused.
+Before loading, it requires all of the following:
+- Every directory on the path, every symbolic link followed, and the file itself are owned by root,
+  and no directory or file is writable by its group or by others. Links are followed one component
+  at a time and each target is checked where it lies, so `/lib -> usr/lib` passes and a link into a
+  user's directory does not.
+- The file's SHA-256 is a release this version of `HkdfGuard.KeyWrapping.V1` lists. Linux has no
+  platform code signature, so this pin is the content check. Each distribution and architecture
+  has its own build, and a release that isn't listed is refused until the package lists it.
+- The dynamic linker's environment can't substitute anything. `dlopen` of an absolute path is
+  never searched for, but the library's dependencies are found by name - and `libtss2-esys`
+  receives every ECDH shared secret. So every `LD_LIBRARY_PATH` directory, and every path-named
+  `LD_PRELOAD` or `LD_AUDIT` object, must pass the same path checks, and none may be relative,
+  empty (the working directory) or use `$ORIGIN`-style tokens. Both the environment the process
+  started with (`/proc/self/environ`) and the current one are checked.
+
+After loading, `dladdr` must place the library's export in the verified file, and every object in
+its dependency closure, read from each file's `DT_NEEDED` entries, must be bound to a file that
+passes the path checks. That catches a dependency the process had already loaded from somewhere
+else under the same name; the library is then unloaded and the load refused. Two things are outside
+the loader's reach: the TPM transport module tpm2-tss loads at the first TPM call, which only the
+environment check covers, and the .NET runtime's own injection points (startup hooks, CLR
+profilers), which need a protected service environment on every platform.
+
+On Linux, `NativeProcessHardening.Apply()` also exposes the library's opt-in process hardening:
+core dumps off (hard limit included) and the process marked non-dumpable, so other unprivileged
+processes of the same user can't attach a debugger or read its memory. It is process-wide, so
+debuggers and `dotnet-dump` stop working; call it once, early, after any privilege drop. It does not
+stop root or `CAP_SYS_PTRACE`, nor keep memory out of swap. Other platforms throw
+`PlatformNotSupportedException`.
 
 ### 2. Build a `KeyRing`
 
@@ -344,8 +412,8 @@ files - one per version - then reads each file, mints its own `ICryptoProvider` 
 `WithEphemeralKey` registers a version whose key is instead generated fresh at build time (via
 `ICryptoProviderFactory.CreateEphemeralAsync`) and never written to disk - it shares the same
 `IKeyWrapper`/`ICryptoProviderFactory`, so no extra configuration is needed for it. Range checks
-happen in the setters (`WithServiceName`, `WithCachedKeyExpiry`, `WithMaxRefreshFailures`); `BuildAsync` checks that a key
-wrapper, a crypto provider factory, a cached key expiry (there's no default), and at least one key
+happen in the setters (`WithServiceName`, `WithKeyRefreshInterval`, `WithMaxRefreshFailures`); `BuildAsync` checks that a key
+wrapper, a crypto provider factory, a key refresh interval (there's no default), and at least one key
 were configured. Each key file must hold 1 to `WrappedKeyLimits.MaxBytes` (512) bytes; `BuildAsync`
 never reads more than one byte past that, so pointing it at the wrong file can't make startup
 allocate an unbounded buffer. The limit leaves room for larger keys and extra fingerprinting
@@ -360,7 +428,7 @@ cloud KMS). There is no synchronous `Build()` - await it at startup.
 ```csharp
 var ring = await new KeyRingBuilder()
     .WithServiceName("my.service")
-    .WithCachedKeyExpiry(60)   // seconds, 1-300 - required before building
+    .WithKeyRefreshInterval(60)   // seconds, 1-300 - required before building
     .WithMaxRefreshFailures(5) // optional: default 3; WithFailOpenOnRefreshFailure() opts out of failing closed
     .WithKeyWrapper(new NativeHkdfKeyWrapperV1("my.service"))
     .WithCryptoProviderFactory(new AesGcmCryptoProviderFactory(logger)) // logger: ILogger<AesGcmCryptoProvider>
@@ -386,7 +454,7 @@ thrown away. Once the ring has been resolved, the container owns it and disposes
 ```csharp
 await builder.Services.AddKeyRingAsync(ring => ring
     .WithServiceName("my.service")
-    .WithCachedKeyExpiry(60)
+    .WithKeyRefreshInterval(60)
     .WithKeyWrapper(new NativeHkdfKeyWrapperV1("my.service"))
     .WithCryptoProviderFactory(new AesGcmCryptoProviderFactory())
     .WithKeyFile(version: 1, pathToFile: "/path/to/wrapped-dek-v1.bin"));
@@ -464,7 +532,9 @@ its secret identifier, so the value only decrypts under the key it was written f
 string into a less-privileged setting.
 
 The purpose is `HkdfGuard.EncryptedConfiguration:` plus the key with ASCII letters `a-z`
-upper-cased and every other character left as it is; its UTF-8 bytes are the AAD. Every language
+upper-cased and every other character left as it is; its UTF-8 bytes are the AAD. A key that isn't
+valid UTF-16 (one holding an unpaired surrogate) is refused, as protector and cache names are,
+because encoding it would substitute U+FFFD and give different keys the same AAD. Every language
 port implements this same rule, so a value encrypted by one decrypts in another. Keys differing only
 in ASCII case share a purpose, as they do in configuration. Keys differing in non-ASCII case, such
 as `café` and `CAFÉ`, never do: reading such a value under the other spelling fails authentication
@@ -517,9 +587,22 @@ All telemetry lives in `HkdfGuard.Diagnostics`. `HkdfGuardTelemetry` exposes one
 `CryptoProviderAesGcm256`, `KeyWrapping`), each with its own `ActivitySource`/`Meter` and an
 `EnableSensitiveLogging` flag - `Root`/`Cache`/`DataProtection`/`EncryptedConfiguration` share one
 flag; `CryptoProviderAesGcm256` and `KeyWrapping` each keep their own, independent flag. When
-enabled, operations emit a fixed-name `hkdfguard.sensitive_operation` debug event carrying only
-non-sensitive metadata (lengths, versions, identifiers) as attributes - raw key, plaintext, and
-ciphertext bytes are never logged, regardless of this setting.
+enabled, operations emit a fixed-name `hkdfguard.sensitive_operation` debug event. Raw key,
+plaintext, and ciphertext bytes are never logged, regardless of this setting, but what the event
+does carry is not nothing - decide before turning it on in production whether your tracing backend
+may hold it:
+
+- **Identifiers**: cache entry names, configuration keys, and protector purposes
+  (`hkdfguard.name`). These often say what a secret is ("ConnectionStrings:Admin"). With a logger,
+  `ProtectedCache` also writes each name to a debug log entry.
+- **Lengths**: plaintext, ciphertext, AAD, and formatted-value lengths. A plaintext length tells
+  an observer how long a secret is - enough to distinguish a 16-character password from a
+  64-character API key.
+- **Key versions**: which version encrypted a value, and whether an added version became current.
+
+Independently of this flag, failures are always recorded on the current activity
+(`RecordException`), and an exception message can name the entry involved - for example a
+duplicate `ProtectedCache.Add` names the existing entry. None includes key or plaintext bytes.
 
 Span, event, attribute, and metric names all follow OpenTelemetry semantic-convention style -
 lowercase, dot-separated (e.g. `hkdfguard.cache.add`, attribute `hkdfguard.plaintext_length`) - see
@@ -545,11 +628,13 @@ dotnet test test/HkdfGuard.DataEncryptionKey.Test --collect:"XPlat Code Coverage
 Every library is at 100% line and branch coverage, with two documented exceptions:
 
 - **Native bindings** (`LinuxHkdfGuardKmsLibrary`/`MacOsHkdfGuardKmsLibrary`/
-  `WindowsHkdfGuardKmsLibrary`, the `WinTrust` signature check, and the macOS system calls in
-  `MacOsNative`) are marked `[ExcludeFromCodeCoverage]`. They are thin P/Invoke bindings that can
-  only run on their own operating system. The loaders' decisions are covered everywhere: the
-  Windows checks run against the real installed DLL on Windows, and the macOS checks run against
-  simulated filesystems on every platform.
+  `WindowsHkdfGuardKmsLibrary`, the `WinTrust` signature check, and the system calls in
+  `MacOsNative` and `LinuxNative`) are marked `[ExcludeFromCodeCoverage]`. They are thin P/Invoke
+  bindings that can only run on their own operating system. The loaders' decisions are covered
+  everywhere: the Windows checks run against the real installed DLL on Windows, the macOS and
+  Linux checks run against simulated filesystems on every platform, and the Linux checks also run
+  against the real filesystem and the installed package on Linux. `NativeProcessHardening.Apply()`
+  hardens the whole test host, so its test runs only with `HKDFGUARD_TEST_PROCESS_HARDENING=1`.
 - **`AesGcmCryptoProvider`'s refresh loop and `KeyRing`'s ephemeral rotation loop** each have one
   unreachable branch: the loop's exit when its `PeriodicTimer` reports it has been disposed. Each
   timer is local to its loop and disposed only after it, so this never happens; the check stays as
@@ -565,9 +650,132 @@ hkdfguard-v1-initialize provision --service-name hkdfguard.integrationtest   # e
 HKDFGUARD_TEST_SERVICE=hkdfguard.integrationtest dotnet test test/HkdfGuard.KeyWrapping.V1.Test
 ```
 
+On a Linux host with a TPM, the package installs no policy or TPM derivation secret, so nothing
+can be provisioned until root adds them. `scripts/provision-linux-test-key.sh` does that for a test
+host: run it once with `sudo` from the account that runs the tests (which must be in the `tss`
+group). It creates the derivation secret if there is none, writes a policy that requires the TPM
+and pins the two test services' TPM Names, and confirms both as that account. It never replaces a
+policy it didn't write or an existing secret; `--remove` removes its policy again. With it in place,
+`LinuxNativeIntegrationTests` also run: they check the exact Linux status codes, the native
+library's own service-name and length checks, that a failed unwrap zeroes the caller's buffer,
+that tampering anywhere in a payload is refused, and that a key file written by
+`hkdfguard-v1-initialize wrap` unwraps through `NativeHkdfKeyWrapperV1`.
+
+```bash
+sudo scripts/provision-linux-test-key.sh
+HKDFGUARD_TEST_SERVICE=com.hkdfguard.native.linux.test \
+HKDFGUARD_TEST_SERVICE_OTHER=com.hkdfguard.native.linux.test.other \
+dotnet test test/HkdfGuard.KeyWrapping.V1.Test
+```
+
 Native release artifacts are never committed: `.gitignore` excludes every `runtimes/` folder.
 Where one is present locally, `.gitattributes` keeps it byte-exact and `NativeRuntimesTests` fails
 if any file stops matching its `SHA256SUMS`.
+
+## Signing and releases
+
+### What is signed
+
+Every assembly built from this repository (`HkdfGuard.*.dll`, for every target framework) is
+Authenticode-signed through Azure Artifact Signing before it is packed. That is the same account
+and certificate profile (`RunSecureSigning` / `runsecure-release`) that signs the native
+`HkdfGuardV1.dll`, so the publisher is `CN=Torin Blair, O=Torin Blair, L=Littleton, S=co, C=US`.
+Artifact Signing certificates are valid for about three days, so every signature is RFC 3161
+timestamped. That keeps it valid after the certificate expires.
+
+**The NuGet packages themselves are not author-signed.** The assemblies inside them are signed;
+the `.nupkg` and `.snupkg` files are not. nuget.org can't yet accept Artifact Signing's
+short-lived certificates without registering each new certificate by hand
+([NuGet/NuGetGallery#10027](https://github.com/NuGet/NuGetGallery/issues/10027)). nuget.org adds
+its own repository signature to every package it accepts.
+
+Third-party and framework assemblies are never signed by this repository. Signing is separate
+from strong naming, which these assemblies don't use.
+
+### Cutting a release
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The tag must be `vMAJOR.MINOR.PATCH`, optionally with a pre-release suffix (`v1.2.0-rc.1`). The
+version without the `v` is stamped into every assembly and package. The **Release** workflow
+(`.github/workflows/release.yml`) then:
+
+1. **build** (the shared `build.yml`, the same one CI runs): restores the locked dependency
+   graph, builds Release, runs the tests, and uploads the unsigned output. It holds no signing
+   access.
+2. **sign** (Windows x64, in the `release` environment): signs each project's assembly, packs with
+   `--no-build` so the packages carry the signed assemblies, opens every package to verify each
+   assembly in it is validly signed and timestamped, and attests build provenance of the packages
+   and assemblies. Any failure fails the release; there is no unsigned fallback.
+3. **publish**: creates a GitHub Release with every `.nupkg`, `.snupkg` and `.sha256`. Versions
+   `0.x`, and any with a pre-release suffix, are published as GitHub pre-releases.
+
+Nothing is pushed to a NuGet feed yet.
+
+The **CI** workflow (`ci.yml`) runs on every push to `main` and every pull request. It builds,
+tests and packs exactly as a release does, but unsigned, with no secrets, no `release` environment
+and no Azure sign-in.
+
+### One-time setup
+
+These are Azure and GitHub settings, not code:
+
+1. **Federated credential.** On the Entra app registration that `hkdfguard-native-windows` signs as
+   (or a new app with the same role), add a federated credential for this repository's `release`
+   environment, with subject `repo:runsecure/hkdfguard-dotnet:environment:release`. A credential for
+   a branch or tag doesn't match a job that runs in an environment.
+2. **Role.** The app holds **Artifact Signing Certificate Profile Signer** on the `RunSecureSigning`
+   account or the `runsecure-release` profile. This is already true if you reuse the native repo's app.
+3. **Repository secrets:** `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and `AZURE_SUBSCRIPTION_ID`. There is no
+   client secret; sign-in is OIDC only.
+4. **Environment.** Create a `release` environment (Settings > Environments) restricted to tags
+   matching `v*`, so only a release can reach the signing account.
+
+The signing account, profile and endpoint are in `build/signing/metadata.json`, which holds no
+secrets.
+
+### Signing on a developer machine
+
+```powershell
+scripts\build-signed.bat -Version 0.1.0
+```
+
+This checks the signing setup first, then cleans, builds, tests, signs, packs into
+`artifacts\packages`, and verifies the assemblies inside every package. It needs:
+
+- Windows x64, with the Windows SDK signing tools 10.0.22621 or newer (`signtool.exe`);
+- the Artifact Signing client tools: `winget install -e --id Microsoft.Azure.ArtifactSigningClientTools`;
+- the Azure CLI, signed in (`az login`) as an account holding the Signer role above.
+
+The signing helpers are `scripts/ArtifactSigning.ps1` (ported from `hkdfguard-native-windows`) and
+`scripts/HkdfGuardPackaging.ps1`.
+
+### Verifying a package
+
+A `.nupkg` is a zip file. Extract it and check the assembly:
+
+```powershell
+Expand-Archive HkdfGuard.DataEncryptionKey.1.0.0.nupkg -DestinationPath pkg   # rename to .zip first on Windows PowerShell 5.1
+Get-AuthenticodeSignature pkg\lib\net10.0\HkdfGuard.DataEncryptionKey.dll |
+    Format-List Status, SignerCertificate, TimeStamperCertificate
+```
+
+`Status` must be `Valid`, the signer `CN=Torin Blair, ...`, and `TimeStamperCertificate` set.
+
+Check the package came from this repository's release workflow:
+
+```bash
+gh attestation verify HkdfGuard.DataEncryptionKey.1.0.0.nupkg --repo runsecure/hkdfguard-dotnet
+```
+
+Attestations need a public repository, or GitHub Enterprise Cloud for a private one.
+
+`dotnet nuget verify --all <package>.nupkg` reports a package downloaded from nuget.org as
+repository-signed by nuget.org. A package taken from a GitHub Release is unsigned at the NuGet
+level, as described above.
 
 ## License
 

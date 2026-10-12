@@ -22,9 +22,9 @@ public class ComponentTelemetryTests
         Assert.Equal(component.SourceName, component.Meter.Name);
     }
 
-    [Theory]
-    [MemberData(nameof(AllComponents))]
-    public void RecordException_WithNullActivity_DoesNotThrow(ComponentTelemetry component)
+    // RecordException is static, so there is no per-component case to run.
+    [Fact]
+    public void RecordException_WithNullActivity_DoesNotThrow()
     {
         var exception = Record.Exception(() => ComponentTelemetry.RecordException(null, new InvalidOperationException("boom")));
 

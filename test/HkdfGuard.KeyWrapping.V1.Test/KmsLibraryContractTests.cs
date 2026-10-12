@@ -68,7 +68,34 @@ public class KmsLibraryContractTests
         Assert.Equal(-5, LinuxHkdfGuardKmsLibrary.ErrCryptoError);
         Assert.Equal(-6, LinuxHkdfGuardKmsLibrary.ErrInternalError);
         Assert.Equal(-7, LinuxHkdfGuardKmsLibrary.ErrInvalidUtf8);
-        Assert.Equal(-8, LinuxHkdfGuardKmsLibrary.ErrMissingServiceName);
+        Assert.Equal(-8, LinuxHkdfGuardKmsLibrary.ErrInvalidServiceName);
+        Assert.Equal(-9, LinuxHkdfGuardKmsLibrary.ErrKekNotFound);
+        Assert.Equal(-16, LinuxHkdfGuardKmsLibrary.ErrFingerprintMismatch);
+        Assert.Equal(-17, LinuxHkdfGuardKmsLibrary.ErrProcessHardeningFailed);
+    }
+
+    [Fact]
+    public void LinuxHkdfGuardKmsLibrary_DescribesEveryReturnedStatus_ButNotTheReservedOrUnassignedOnes()
+    {
+        var library = new LinuxHkdfGuardKmsLibrary();
+
+        foreach (var status in new[] { -1, -2, -3, -4, -5, -6, -8, -9, -16, -17 })
+            Assert.False(string.IsNullOrEmpty(library.DescribeStatus(status)), $"no description for {status}");
+
+        Assert.Null(library.DescribeStatus(LinuxHkdfGuardKmsLibrary.ErrInvalidUtf8)); // reserved, no longer returned
+        foreach (var unassigned in new[] { -10, -11, -12, -13, -14, -15, -18, 1 })
+            Assert.Null(library.DescribeStatus(unassigned));
+
+        Assert.Contains("provision", library.DescribeStatus(LinuxHkdfGuardKmsLibrary.ErrKekNotFound));
+        Assert.Contains("different KEK", library.DescribeStatus(LinuxHkdfGuardKmsLibrary.ErrFingerprintMismatch));
+    }
+
+    [Fact]
+    public void TheLinuxLibrary_IsRoutedUnderItsOwnName_NotThatOfAnotherPlatform()
+    {
+        Assert.Equal("HkdfGuard.Kms.Linux.v1", LinuxHkdfGuardKmsLibrary.LibraryName);
+        Assert.NotEqual(WindowsHkdfGuardKmsLibrary.LibraryName, LinuxHkdfGuardKmsLibrary.LibraryName);
+        Assert.NotEqual(MacOsHkdfGuardKmsLibrary.LibraryName, LinuxHkdfGuardKmsLibrary.LibraryName);
     }
 
     [Fact]

@@ -14,7 +14,7 @@ public class KeyRingBuilderInputLimitsTests
     private static KeyRingBuilder Builder(ICryptoProviderFactory? factory = null) => new KeyRingBuilder()
         .WithKeyWrapper(new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)))
         .WithCryptoProviderFactory(factory ?? new AesGcmCryptoProviderFactory())
-        .WithCachedKeyExpiry(60);
+        .WithKeyRefreshInterval(60);
 
     private static async Task<T> WithKeyFileAsync<T>(int length, Func<string, Task<T>> test)
     {

@@ -5,8 +5,8 @@ namespace HkdfGuard.Options;
 
 /// <summary>
 /// Validates an HkdfGuardOptions instance against the same constraints KeyRingBuilder itself
-/// enforces (CachedKeyExpiry 1-300, MaxRefreshFailures at least 1, EphemeralKeyRotationHours 1-1193, at least
-/// one key source), plus what
+/// enforces (KeyRefreshInterval 1-300, MaxRefreshFailures at least 1, EphemeralKeyRotationHours 1-1193,
+/// EphemeralKeyRetentionHours at least 1, at least one key source), plus what
 /// ApplyTo needs to hold before it ever touches a KeyRingBuilder - a valid ServiceName (see ServiceNames), every
 /// KeyFile having a path, and version numbers that don't collide across KeyFiles/EphemeralKeys
 /// (KeyRing.Add throws on a duplicate version at Build time; catching it here up front gives a
@@ -21,14 +21,17 @@ public sealed class HkdfGuardOptionsValidator : IValidateOptions<HkdfGuardOption
         if (ServiceNames.GetProblem(options.ServiceName) is { } serviceNameProblem)
             failures.Add($"ServiceName is invalid: {serviceNameProblem}");
 
-        if (options.CachedKeyExpiry is < 1 or > 300)
-            failures.Add("CachedKeyExpiry must be between 1 and 300 seconds.");
+        if (options.KeyRefreshInterval is < 1 or > 300)
+            failures.Add("KeyRefreshInterval must be between 1 and 300 seconds.");
 
         if (options.MaxRefreshFailures is < 1)
             failures.Add("MaxRefreshFailures must be at least 1.");
 
         if (options.EphemeralKeyRotationHours is < 1 or > HkdfGuardOptions.MaxEphemeralKeyRotationHours)
             failures.Add($"EphemeralKeyRotationHours must be between 1 and {HkdfGuardOptions.MaxEphemeralKeyRotationHours}.");
+
+        if (options.EphemeralKeyRetentionHours is < 1)
+            failures.Add("EphemeralKeyRetentionHours must be at least 1.");
 
         if (options.DisableEphemeralKeyRotation && options.EphemeralKeyRotationHours is not null)
             failures.Add("DisableEphemeralKeyRotation and EphemeralKeyRotationHours can't both be set: one turns rotation off, the other schedules it.");

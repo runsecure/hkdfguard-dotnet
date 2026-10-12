@@ -1,0 +1,260 @@
+# Builds, tests, signs and packs every HkdfGuard NuGet package, then publishes
+# them as one versioned GitHub Release. Nothing is pushed to a NuGet feed yet.
+#
+# Triggered by pushing a version tag (vX.Y.Z, optionally with a pre-release
+# suffix such as v1.2.3-rc.1). Reuses this repo's scripts/ rather than
+# duplicating their logic here. Four jobs:
+#
+#   version  turns the tag into a package version; fails on a malformed tag.
+#   build    build.yml, the same reusable workflow ci.yml runs: build, test,
+#            upload the UNSIGNED output. Holds no signing access at all.
+#   sign     one Windows x64 job, in the "release" environment: Authenticode-
+#            signs every assembly built from this repository with
+#            scripts/ArtifactSigning.ps1 (the same code as a local
+#            scripts\build-signed.bat), packs with --no-build so the packages
+#            carry the signed assemblies, opens every package to verify them,
+#            and attests provenance of the signed files.
+#   publish  creates the GitHub Release from the sign job's output.
+#
+# The packages themselves are NOT NuGet-signed (see README.md, "Signing and
+# releases"): the assemblies inside them are Authenticode-signed.
+#
+# To cut a release: git tag v0.1.0; git push origin v0.1.0
+# Any v0.x.y tag, and any tag with a pre-release suffix, is published as a
+# GitHub pre-release.
+#
+# Signing setup this workflow depends on (Azure and GitHub, not code):
+#   - Repository secrets AZURE_CLIENT_ID (the Entra app GitHub signs in as),
+#     AZURE_TENANT_ID and AZURE_SUBSCRIPTION_ID. No client secret.
+#   - That app holds "Artifact Signing Certificate Profile Signer" on the
+#     signing account named in build/signing/metadata.json.
+#   - The app has a federated credential trusting this repository's
+#     "release" environment. The sign job runs in that environment, so the
+#     OIDC subject GitHub presents is
+#       repo:runsecure/hkdfguard-dotnet:environment:release
+#     A credential for a branch or tag does not match a job that runs in an
+#     environment.
+#   - The "release" environment (Settings > Environments) restricted to tags
+#     matching v*, so only a release can sign.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+# Least privilege by default; each job asks for exactly what it needs below.
+permissions:
+  contents: read
+
+# Third-party actions are pinned to full commit SHAs, not tags: a tag can be
+# moved to different code after the fact, a commit SHA cannot. The trailing
+# comment names the release each SHA corresponds to. To update one, look up
+# the new tag's commit (git ls-remote https://github.com/<action> refs/tags/<tag>;
+# for an annotated tag use the ^{} line) and replace both.
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Determine the release version
+        id: version
+        shell: powershell
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          . .\scripts\HkdfGuardPackaging.ps1
+          $version = ConvertFrom-HkdfGuardTag -Tag $env:TAG
+          $prerelease = if (Test-HkdfGuardPrerelease -Version $version) { "true" } else { "false" }
+          Write-Host "Version $version (pre-release: $prerelease)"
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "prerelease=$prerelease" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+  # Build and test; uploads unsigned-build. The same workflow ci.yml runs on
+  # every push.
+  build:
+    needs: version
+    uses: ./.github/workflows/build.yml
+    permissions:
+      contents: read
+    with:
+      version: ${{ needs.version.outputs.version }}
+
+  sign:
+    needs: [version, build]
+    runs-on: windows-2022 # x64: signtool and the Artifact Signing plugin are Windows x64
+    # The Entra app's federated credential trusts this environment (see the
+    # header). Restrict the environment to v* tags in the repository settings.
+    environment: release
+    permissions:
+      contents: read
+      id-token: write     # Azure sign-in (OIDC) and build provenance attestation
+      attestations: write # build provenance attestation (storage)
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Download the unsigned build output
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: unsigned-build
+          path: src
+
+      # Fills this runner's package cache with exactly the locked dependency
+      # graph, which pack reads for each package's dependencies. Builds nothing.
+      - name: Restore (locked)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          . .\scripts\HkdfGuardPackaging.ps1
+          Invoke-Dotnet @("restore", "HkdfGuard.sln", "--locked-mode")
+
+      # Federated (OIDC) sign-in: GitHub's short-lived token is exchanged for
+      # an Azure token for AZURE_CLIENT_ID - no stored Azure secret. Leaves
+      # the Azure CLI signed in, which the signing plugin uses.
+      - name: Sign in to Azure
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # The signtool plugin for Artifact Signing. The installer is fetched
+      # from Microsoft's documented download URL and must carry a valid
+      # Microsoft Authenticode signature before it is run.
+      - name: Install the Artifact Signing client tools
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $msi = Join-Path $env:RUNNER_TEMP "ArtifactSigningClientTools.msi"
+          Invoke-WebRequest -UseBasicParsing -Uri "https://download.microsoft.com/download/70ad2c3b-761f-4aa9-a9de-e7405aa2b4c1/ArtifactSigningClientTools.msi" -OutFile $msi
+          $sig = Get-AuthenticodeSignature -FilePath $msi
+          if ($sig.Status -ne "Valid" -or $sig.SignerCertificate.Subject -notmatch "O=Microsoft Corporation") {
+            throw "The downloaded client tools installer is not validly signed by Microsoft ($($sig.Status): $($sig.SignerCertificate.Subject))."
+          }
+          $proc = Start-Process msiexec.exe -ArgumentList @("/i", "`"$msi`"", "/quiet", "/norestart") -Wait -PassThru
+          if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) { throw "client tools install failed (msiexec exit $($proc.ExitCode))" }
+          # The installer may install per-user or per-machine; find the x64
+          # plugin either way and hand its location to the signing helper.
+          $dlib = @(
+            (Join-Path $env:LOCALAPPDATA "Microsoft\MicrosoftArtifactSigningClientTools\Azure.CodeSigning.Dlib.dll")
+            Get-ChildItem -Path $env:LOCALAPPDATA, $env:ProgramFiles, ${env:ProgramFiles(x86)} -Recurse -Filter Azure.CodeSigning.Dlib.dll -ErrorAction SilentlyContinue |
+              Select-Object -ExpandProperty FullName
+          ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+          if (-not $dlib) { throw "Azure.CodeSigning.Dlib.dll not found after installing the client tools" }
+          Write-Host "Artifact Signing plugin: $dlib"
+          "HKDFGUARD_SIGNING_DLIB=$dlib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # Same helpers and metadata (build/signing/metadata.json) as local
+      # signing. Signs each project's own assembly in bin\ - the copy pack
+      # takes - then packs and opens every package to verify the assemblies
+      # inside it. Fails unless every one is validly signed AND timestamped:
+      # there is no unsigned fallback for a release.
+      - name: Sign the assemblies, pack, and verify the packages
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          . .\scripts\ArtifactSigning.ps1
+          . .\scripts\HkdfGuardPackaging.ps1
+          $root = (Get-Location).Path
+          $config = Initialize-ArtifactSigning
+
+          $assemblies = Get-HkdfGuardBuiltAssemblies -RepoRoot $root
+          Invoke-ArtifactSigning -Files $assemblies -Config $config
+
+          $packages = Invoke-HkdfGuardPack -RepoRoot $root -Version $env:VERSION -OutputDirectory (Join-Path $root "artifacts\packages")
+          Assert-HkdfGuardPackagesSigned -Packages $packages -Config $config
+
+          # The signed assemblies on their own, for attestation and the
+          # release - exactly the files signed above, not the unsigned copies
+          # of referenced projects that also sit in each bin\.
+          foreach ($assembly in $assemblies) {
+            $tfm = Split-Path -Leaf (Split-Path -Parent $assembly)
+            $dir = Join-Path $root "artifacts\assemblies\$tfm"
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            Copy-Item $assembly $dir
+          }
+
+          foreach ($file in Get-ChildItem artifacts\packages -File) {
+            (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLower() |
+              Out-File -Encoding ascii "$($file.FullName).sha256"
+          }
+          Get-ChildItem artifacts -Recurse -File | ForEach-Object { Write-Host "  $($_.FullName.Substring($root.Length + 1))" }
+
+      # Signed, verifiable statement that these exact files (by SHA-256) were
+      # built by this workflow, from this commit, in this repository - made
+      # after signing, so it covers the files that ship. Verify one with:
+      #   gh attestation verify <file> --repo runsecure/hkdfguard-dotnet
+      # Attestations need a public repository, or GitHub Enterprise Cloud for
+      # a private one.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: |
+            artifacts/packages/*.nupkg
+            artifacts/packages/*.snupkg
+            artifacts/assemblies/*/*.dll
+
+      - name: Upload the signed release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-assets
+          path: artifacts/packages/
+          if-no-files-found: error
+
+  publish:
+    needs: [version, sign]
+    runs-on: windows-2022 # only needs the `gh` CLI (preinstalled)
+    permissions:
+      contents: write # required for the "Create GitHub Release" step below
+    steps:
+      - name: Download the signed release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-assets
+          path: release-assets
+
+      - name: Create GitHub Release
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          $files = Get-ChildItem -Path release-assets -File | Select-Object -ExpandProperty FullName
+          Write-Host "Release assets:"
+          $files | ForEach-Object { Write-Host "  $_" }
+          # A 0.x or suffixed version is pre-release testing: published as a
+          # GitHub pre-release, so it is never shown as "Latest".
+          $extra = @()
+          if ($env:PRERELEASE -eq "true") {
+            $extra += "--prerelease"
+            Write-Host "Publishing as a pre-release"
+          }
+          gh release create $env:TAG $files --title $env:TAG --generate-notes @extra --repo $env:REPOSITORY
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed (exit $LASTEXITCODE)" }

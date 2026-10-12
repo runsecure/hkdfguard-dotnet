@@ -19,7 +19,11 @@ internal sealed class DataProtector(
     KeyRing keyRing,
     IEncryptedFormatProvider formatProvider) : IDataProtector
 {
-    private readonly byte[] _aad = Encoding.UTF8.GetBytes(name);
+    // Strict: an unpaired surrogate throws (an ArgumentException, from KeyRing.CreateProtector)
+    // rather than encoding as U+FFFD, which would give two different names the same AAD.
+    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
+    private readonly byte[] _aad = StrictUtf8.GetBytes(name);
 
     /// <inheritdoc/>
     public string Encrypt(ReadOnlySpan<char> plaintext)

@@ -26,7 +26,8 @@ RUN apt-get update \
 WORKDIR /src
 COPY . .
 
-RUN dotnet restore HkdfGuard.sln
+# Locked: the restore must match the committed packages.lock.json files exactly.
+RUN dotnet restore HkdfGuard.sln --locked-mode
 RUN dotnet build HkdfGuard.sln --configuration Release --no-restore
 
 ENTRYPOINT ["dotnet", "test", "HkdfGuard.sln", "--configuration", "Release", "--no-build"]

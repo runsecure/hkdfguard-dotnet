@@ -250,7 +250,7 @@ public sealed class JsonConfigurationEndToEndTests : IDisposable
         var ring = await new KeyRingBuilder()
             .WithKeyWrapper(kek)
             .WithCryptoProviderFactory(new AesGcmCryptoProviderFactory())
-            .WithCachedKeyExpiry(60)
+            .WithKeyRefreshInterval(60)
             .WithKeyFile(KeyVersion, deployment.KeyFilePath)
             .BuildAsync();
         _rings.Add(ring);
