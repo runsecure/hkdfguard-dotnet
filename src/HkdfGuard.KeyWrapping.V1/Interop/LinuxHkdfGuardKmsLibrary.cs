@@ -59,7 +59,7 @@ internal sealed partial class LinuxHkdfGuardKmsLibrary : AbstractHkdfGuardKmsLib
         return status;
     }
 
-    public override int HardenProcess() => hkdfguard_harden_process();
+    public override int HardenProcess(uint flags) => hkdfguard_harden_process_with_flags(flags);
 
     protected override int OpenFile(string path, Span<byte> destination, out int bytesRead)
     {
@@ -82,7 +82,7 @@ internal sealed partial class LinuxHkdfGuardKmsLibrary : AbstractHkdfGuardKmsLib
         string service, Span<byte> output, ref int outLen);
 
     [LibraryImport(LibraryName)]
-    private static partial int hkdfguard_harden_process();
+    private static partial int hkdfguard_harden_process_with_flags(uint flags);
 
     [LibraryImport(LibraryName, StringMarshalling = StringMarshalling.Utf8)]
     private static partial int hkdfguard_open_file(string path, Span<byte> output, ref int outLen);

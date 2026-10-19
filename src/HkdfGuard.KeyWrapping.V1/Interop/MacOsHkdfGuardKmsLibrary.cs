@@ -33,6 +33,7 @@ internal sealed partial class MacOsHkdfGuardKmsLibrary : AbstractHkdfGuardKmsLib
         ErrKekNotFound => "no KEK is provisioned for this service in this keychain mode; run hkdfguard-v1-initialize provision",
         ErrKekAccessDenied => "the keychain denied access: it is locked, there is no session to prompt in, or this process isn't allowed",
         ErrKekInvalid => "the keychain item for this service can't be reconstructed into a key",
+        ErrProcessHardeningFailed => "process hardening failed: core dumps or debugger attachment could not be denied, or (with RequireProtectedSignature) the host executable's code signature still allows it - it needs the Hardened Runtime, without get-task-allow or DYLD_* entitlements",
         _ => base.DescribeStatus(status),
     };
 
@@ -68,6 +69,8 @@ internal sealed partial class MacOsHkdfGuardKmsLibrary : AbstractHkdfGuardKmsLib
     private static partial int hkdfguard_unwrap_dek(
         string service, ReadOnlySpan<byte> wrapped, int wrappedLen, Span<byte> output, ref int outLen);
 
+    public override int HardenProcess(uint flags) => hkdfguard_harden_process_with_flags(flags);
+
     protected override int OpenFile(string path, Span<byte> destination, out int bytesRead)
     {
         var outLen = destination.Length;
@@ -82,4 +85,7 @@ internal sealed partial class MacOsHkdfGuardKmsLibrary : AbstractHkdfGuardKmsLib
 
     [LibraryImport(LibraryName, StringMarshalling = StringMarshalling.Utf8)]
     private static partial int hkdfguard_open_file(string path, Span<byte> output, ref int outLen);
+
+    [LibraryImport(LibraryName)]
+    private static partial int hkdfguard_harden_process_with_flags(uint flags);
 }

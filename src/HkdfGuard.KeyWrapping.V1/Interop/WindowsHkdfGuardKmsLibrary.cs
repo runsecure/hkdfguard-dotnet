@@ -29,6 +29,7 @@ internal sealed partial class WindowsHkdfGuardKmsLibrary : AbstractHkdfGuardKmsL
         ErrKekNotFound => "no KEK is provisioned for this service; run hkdfguard provision from an elevated prompt",
         ErrKekAccessDenied => "the KEK exists, but this account is not authorized to use it (or, for a new KEK, the process is not elevated); add it to the HkdfGuardUsers group or a KeyUseGroups group",
         ErrKekInvalid => "the existing KEK's ACL is missing, lacks SYSTEM/Administrators, or grants an over-broad principal",
+        ErrProcessHardeningFailed => "process hardening failed: the crash-report heap exclusion or the process and thread access lists could not be set, or (with RequireProtectedSignature) the process could not be closed to its own user",
         _ => base.DescribeStatus(status),
     };
 
@@ -56,6 +57,8 @@ internal sealed partial class WindowsHkdfGuardKmsLibrary : AbstractHkdfGuardKmsL
         return status;
     }
 
+    public override int HardenProcess(uint flags) => hkdfguard_harden_process_with_flags(flags);
+
     protected override int OpenFile(string path, Span<byte> destination, out int bytesRead)
     {
         var outLen = destination.Length;
@@ -78,4 +81,7 @@ internal sealed partial class WindowsHkdfGuardKmsLibrary : AbstractHkdfGuardKmsL
 
     [LibraryImport(LibraryName, StringMarshalling = StringMarshalling.Utf8)]
     private static partial int hkdfguard_open_file(string path, Span<byte> output, ref int outLen);
+
+    [LibraryImport(LibraryName)]
+    private static partial int hkdfguard_harden_process_with_flags(uint flags);
 }

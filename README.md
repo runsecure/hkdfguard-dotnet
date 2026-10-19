@@ -398,12 +398,42 @@ the loader's reach: the TPM transport module tpm2-tss loads at the first TPM cal
 environment check covers, and the .NET runtime's own injection points (startup hooks, CLR
 profilers), which need a protected service environment on every platform.
 
-On Linux, `NativeProcessHardening.Apply()` also exposes the library's opt-in process hardening:
-core dumps off (hard limit included) and the process marked non-dumpable, so other unprivileged
-processes of the same user can't attach a debugger or read its memory. It is process-wide, so
-debuggers and `dotnet-dump` stop working; call it once, early, after any privilege drop. It does not
-stop root or `CAP_SYS_PTRACE`, nor keep memory out of swap. Other platforms throw
-`PlatformNotSupportedException`.
+### Process hardening
+
+DEKs pass through your process's memory, so a crash dump, or another process of the same user
+attaching a debugger or reading that memory, could recover them. `NativeProcessHardening.Apply()`
+calls the native library's `hkdfguard_harden_process_with_flags` to close that off, on every
+platform:
+
+| Platform | What it does |
+|---|---|
+| Windows | Crash reports leave out the heap, and the process's and its threads' access lists are replaced so only SYSTEM can read or write its memory, inject threads or duplicate its handles. Its own account keeps only query, synchronize and terminate. |
+| Linux | Core dumps off (hard limit included), and the process marked non-dumpable, which also stops ptrace and `/proc/<pid>/mem` access by the same user. |
+| macOS | Core dumps off and debugger attachment denied. Whether code can be injected depends on the host executable's code signature, which the library checks but can't change. |
+
+Neither the native library nor any machine policy does this for you: it changes process-wide
+state your application owns, so it is opt-in. Call it once, early in startup - before starting
+worker threads on Windows, and after any privilege drop on Linux:
+
+```csharp
+NativeProcessHardening.Apply();   // throws InvalidOperationException if it fails: don't start
+```
+
+Debuggers, `dotnet-dump` and crash dumps stop working for the process. It is a same-user barrier:
+it does not stop administrators, root, SYSTEM, `SeDebugPrivilege`, `CAP_SYS_PTRACE` or the kernel,
+and it does not keep memory out of swap, the page file or hibernation files.
+
+`NativeProcessHardening.Apply(ProcessHardeningOptions.RequireProtectedSignature)` is the strict
+form the native command-line tools use: it fails unless no other process of the same user can
+debug or inject into this one.
+
+- **Windows:** it also closes threads started later, and everything else the process creates
+  afterwards without its own security descriptor (child processes, named pipes, named events), to
+  its own account. Use it in a service that shares no objects with other processes by name.
+- **macOS:** it fails unless the host executable is signed with the Hardened Runtime and without
+  the `get-task-allow` or `DYLD_*` entitlements, so unsigned hosts such as `dotnet` itself can't
+  use it. Without it, a weak signature is only logged.
+- **Linux:** it adds nothing; the plain call already guarantees it.
 
 ### 2. Build a `KeyRing`
 
@@ -644,7 +674,8 @@ Every library is at 100% line and branch coverage, with two documented exception
   everywhere: the Windows checks run against the real installed DLL on Windows, the macOS and
   Linux checks run against simulated filesystems on every platform, and the Linux checks also run
   against the real filesystem and the installed package on Linux. `NativeProcessHardening.Apply()`
-  hardens the whole test host, so its test runs only with `HKDFGUARD_TEST_PROCESS_HARDENING=1`.
+  hardens the whole test host, so its tests (Windows and Linux) run only with
+  `HKDFGUARD_TEST_PROCESS_HARDENING=1`.
 - **`AesGcmCryptoProvider`'s refresh loop and `KeyRing`'s ephemeral rotation loop** each have one
   unreachable branch: the loop's exit when its `PeriodicTimer` reports it has been disposed. Each
   timer is local to its loop and disposed only after it, so this never happens; the check stays as

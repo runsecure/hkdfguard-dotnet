@@ -29,15 +29,18 @@ internal sealed class FakeHkdfGuardKmsLibrary : AbstractHkdfGuardKmsLibrary
 
     public override string? DescribeStatus(int status) => Describe is null ? base.DescribeStatus(status) : Describe(status);
 
-    /// <summary>When set, answers HardenProcess; otherwise the base class (not supported).</summary>
+    /// <summary>When set, answers HardenProcess; otherwise it succeeds.</summary>
     public Func<int>? Harden { get; set; }
 
     public int HardenCallCount { get; private set; }
 
-    public override int HardenProcess()
+    public uint? LastHardenFlags { get; private set; }
+
+    public override int HardenProcess(uint flags)
     {
         HardenCallCount++;
-        return Harden is null ? base.HardenProcess() : Harden();
+        LastHardenFlags = flags;
+        return Harden is null ? Ok : Harden();
     }
 
     public override int WrapDek(string service, ReadOnlySpan<byte> dek, Span<byte> destination, out int bytesWritten)

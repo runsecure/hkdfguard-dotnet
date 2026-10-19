@@ -192,12 +192,20 @@ internal abstract class AbstractHkdfGuardKmsLibrary
     protected abstract int OpenFile(string path, Span<byte> destination, out int bytesRead);
 
     /// <summary>
-    /// Makes this process's memory harder to recover: no core dumps, and no ptrace or
-    /// /proc/&lt;pid&gt;/mem access by other unprivileged processes of the same user. Only some
-    /// platforms' libraries offer it.
+    /// hkdfguard_harden_process_with_flags' HKDFGUARD_HARDEN_REQUIRE_PROTECTED_SIGNATURE: fail unless
+    /// no other process of the same user can debug or inject into this one. Same bit on every
+    /// platform.
     /// </summary>
-    /// <returns><see cref="Ok"/> on success, or a negative error code.</returns>
-    /// <exception cref="PlatformNotSupportedException">This platform's library has no such call.</exception>
-    public virtual int HardenProcess()
-        => throw new PlatformNotSupportedException("The HkdfGuard native KMS library on this platform has no process hardening call; it is available on Linux only.");
+    public const uint HardenRequireProtectedSignature = 0x1u;
+
+    /// <summary>
+    /// Makes this process's memory harder to recover, through hkdfguard_harden_process_with_flags -
+    /// on every platform: no crash dumps of its memory, and no debugger attach or memory reads by
+    /// other processes of the same user. What that takes differs per platform; see
+    /// NativeProcessHardening.
+    /// </summary>
+    /// <param name="flags">A bitwise OR of the HKDFGUARD_HARDEN_* flags, or 0.</param>
+    /// <returns><see cref="Ok"/> on success, or a negative error code:
+    /// <see cref="ErrProcessHardeningFailed"/>, or <see cref="ErrInvalidArgument"/> for an unknown flag.</returns>
+    public abstract int HardenProcess(uint flags);
 }
