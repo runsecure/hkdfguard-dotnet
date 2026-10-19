@@ -70,12 +70,9 @@ every deployment. It prints the KEK's fingerprint: record it, because `retire` r
 The KEK is a non-exportable P-256 key in the Microsoft Platform Crypto Provider (the TPM), or in
 the Microsoft Software Key Storage Provider when no TPM is available.
 
-> **TODO (maintainer):** describe:
-> - how the storage provider is chosen, and how `HKLM\Software\Policies\HkdfGuard\KeyStoragePolicy`
->   changes that (its value names and allowed values);
-> - the access list a new KEK gets, and how `HKLM\Software\Policies\HkdfGuard\KeyUseGroups`
->   adds groups to it (format, and what counts as "over-broad");
-> - whether the installer creates `HkdfGuardUsers`, and what a KEK grants it.
+How the provider is chosen, the access list a new KEK gets, and the `KeyStoragePolicy` and
+`KeyUseGroups` machine policies under `HKLM\Software\Policies\HkdfGuard` belong to the native
+library. See the `hkdfguard-native-windows` documentation and `hkdfguard --help`.
 
 Failures you may see:
 
@@ -135,8 +132,8 @@ Failures you may see:
 | -18 | The KEK exists, but this account may not use it | Run as an account in `HkdfGuardUsers` or a `KeyUseGroups` group |
 | -1 | Invalid argument, for example a DEK that isn't 32 bytes | Check the input is 44 base64 characters |
 
-> **TODO (maintainer):** add the error `wrap` reports for a `--group` that doesn't exist or isn't
-> allowed.
+For the full set of `wrap` failures, including a `--group` that doesn't exist or isn't allowed,
+see `hkdfguard wrap --help` and the native library's documentation.
 
 ### `status`
 
@@ -194,8 +191,6 @@ Installed system-wide at `/Library/Application Support/HkdfGuard/v1`, or per use
 `~/.hkdfguard/v1`, beside `libhkdfguard_v1.dylib`, and still named `hkdfguard-v1-initialize`. The
 KEK is a Secure Enclave key, so it needs Apple silicon and macOS 13 or later.
 
-What is known so far:
-
 - `provision --service-name <name>` creates the service's KEK, as on Windows.
 - `wrap` accepts `--dek-stdin`, as on Windows, and also `--dek-file <path>`. Prefer standard
   input: a file leaves the key on disk until it is securely deleted.
@@ -204,9 +199,8 @@ What is known so far:
 - `status` and `retire --fingerprint <hex>` work as on Windows.
 - Service names are matched case-insensitively on macOS.
 
-> **TODO (maintainer):** paste the macOS `--help` output for the tool and each command, and fill in
-> this section to match the Windows one: options, exit codes, where the fingerprint comes from,
-> keychain modes (system and per-user), and the permissions written on a key file.
+For the full options, exit codes, keychain modes (system and per-user) and key file permissions,
+run `hkdfguard-v1-initialize --help` and see the macOS native library's documentation.
 
 ## Linux
 

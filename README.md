@@ -717,6 +717,32 @@ HKDFGUARD_TEST_SERVICE_OTHER=com.hkdfguard.native.linux.test.other \
 dotnet test test/HkdfGuard.KeyWrapping.V1.Test
 ```
 
+### Native integration test coverage
+
+The same platform native integration cases exist in every HkdfGuard port (.NET, Java, Python, Go,
+Node). In `HkdfGuard.KeyWrapping.V1.Test` each platform's suite is reported as skipped - never
+passed - where its platform, library or service isn't there:
+
+- **Windows** - `WindowsNativeLibraryLoaderTests` (installed-library cases), `NativeKeyFileTests`,
+  `NativeKeyWrappingIntegrationTests`, `NativeEndToEndTests`, `NativeProcessHardeningTests`. The
+  installed-library cases run wherever `%ProgramFiles%\HkdfGuard\v1\HkdfGuard.dll` is installed;
+  the round trips also need a provisioned KEK - `HKDFGUARD_TEST_SERVICE`, or
+  `com.hkdfguard.native.windows.test` (`scripts/provision-windows-test-key.ps1`), which the
+  installed library's `hkdfguard_kek_exists` confirms.
+- **Linux** - `LinuxNativeLibraryLoaderSystemTests` run against the real filesystem and dynamic
+  linker on any Linux host, with their installed-library cases needing the `libhkdfguard1`
+  package; `LinuxNativeIntegrationTests` also need `HKDFGUARD_TEST_SERVICE`, and some
+  `HKDFGUARD_TEST_SERVICE_OTHER`, the policy's `tpm.require_pinned_names`, or `/usr/bin/hkdfguard`
+  (see `scripts/provision-linux-test-key.sh` above).
+- **macOS** - `MacOsNativeIntegrationTests` run on macOS against the real filesystem and Security
+  framework, with their installed-library cases needing `libhkdfguard_v1.dylib` at
+  `/Library/Application Support/HkdfGuard/v1` (or `~/.hkdfguard/v1`) and `hkdfguard-v1-initialize`
+  beside it. The shared round trips run against `HKDFGUARD_TEST_SERVICE`, or
+  `com.hkdfguard.native.macos.test` when `hkdfguard-v1-initialize status` reports it present.
+
+`NativeProcessHardeningTests` harden the test host itself, so they also need
+`HKDFGUARD_TEST_PROCESS_HARDENING=1`, and are best run one at a time.
+
 Native release artifacts are never committed: `.gitignore` excludes every `runtimes/` folder.
 Where one is present locally, `.gitattributes` keeps it byte-exact and `NativeRuntimesTests` fails
 if any file stops matching its `SHA256SUMS`.

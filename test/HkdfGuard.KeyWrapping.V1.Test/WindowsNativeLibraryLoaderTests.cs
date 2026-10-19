@@ -479,6 +479,18 @@ public class WindowsNativeLibraryLoaderTests
         Assert.True(status < 0);
     }
 
+    [InstalledWindowsLibraryFact]
+    public void KekExists_AnswersForAnUnprovisionedService()
+    {
+        // hkdfguard_kek_exists, which the native tests use to tell "not provisioned yet" (skip)
+        // from a real failure: for a service nobody provisioned there is no KEK, and any status
+        // it reports instead is one the binding can describe.
+        var (status, exists) = WindowsKekProbe.Query(NativeTestEnvironment.UnprovisionedServiceName);
+
+        Assert.False(exists);
+        Assert.True(status == AbstractHkdfGuardKmsLibrary.Ok || new WindowsHkdfGuardKmsLibrary().DescribeStatus(status) is not null, $"undescribed status {status}");
+    }
+
     private static void VerifySignerIdentity(string[] leafEkuOids, string leafSubject = WindowsNativeLibraryLoader.ExpectedPublisher, string rootSha256 = WindowsNativeLibraryLoader.ExpectedRootSha256)
         => WindowsNativeLibraryLoader.VerifySignerIdentity("test", leafSubject, leafEkuOids, rootSha256, WindowsNativeLibraryLoader.ExpectedPublisher);
 

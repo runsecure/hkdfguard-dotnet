@@ -152,7 +152,8 @@ Your application reads the key file through the native library, which refuses on
 account could have written or replaced. Keep key files in a folder only administrators can write
 to, reached through real folders (no links, junctions or short names like `PROGRA~1`).
 
-> **TODO (maintainer):** say whether `wrap` must run elevated.
+Whether `wrap` needs elevation, and which accounts may use a service's KEK, is up to the native
+library on each platform; see `hkdfguard wrap --help` and the native library's documentation.
 
 Where does the DEK come from? In a deployment pipeline, use `AesGcmPipelineDataProtector`. It
 generates a key in memory and can encrypt your configuration secrets under it. At the end of the

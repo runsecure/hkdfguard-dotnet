@@ -98,6 +98,9 @@ public static class NativeTestEnvironment
         if (Read(ServiceVariable) is { } explicitName)
             return (explicitName, string.Empty);
 
+        if (OperatingSystem.IsMacOS())
+            return ResolveMacOs();
+
         if (!OperatingSystem.IsWindows())
             return (null, $"Set {ServiceVariable} to a service provisioned with hkdfguard to run native integration tests. On a Linux TPM host, sudo scripts/provision-linux-test-key.sh provisions com.hkdfguard.native.linux.test.");
 
@@ -127,6 +130,47 @@ public static class NativeTestEnvironment
             _ => (DefaultWindowsServiceName, string.Empty),
         };
     }
+
+    /// <summary>
+    /// The macOS default: <see cref="DefaultMacOsServiceName"/>, as the installed
+    /// hkdfguard-v1-initialize (beside the library the loader would choose) reports it. The tool
+    /// created the KEK, so it is on the keychain item's access list and never prompts; asking the
+    /// library from this process would. Skipped only when the library isn't installed or the tool
+    /// reports the KEK absent; any other answer runs the tests, so a real failure is reported.
+    /// </summary>
+    [System.Runtime.Versioning.SupportedOSPlatform("macos")]
+    internal static (string? Service, string SkipReason) ResolveMacOs()
+    {
+        if (MacOsTestEnvironment.InstalledLibrary is null)
+            return (null, $"The native KMS library is not installed at {Interop.MacOsNativeLibraryLoader.SystemPath} or {Interop.MacOsNativeLibraryLoader.UserPath(MacOsTestEnvironment.HomeDirectory)}.");
+
+        if (MacOsTestEnvironment.ProvisioningTool is not { } tool)
+            return (DefaultMacOsServiceName, string.Empty);
+
+        string output;
+        try
+        {
+            (var exitCode, output) = MacOsTestEnvironment.Run(tool, "status", "--service-name", DefaultMacOsServiceName);
+            if (exitCode != 0)
+                return (DefaultMacOsServiceName, string.Empty);
+        }
+        catch (Exception)
+        {
+            return (DefaultMacOsServiceName, string.Empty);
+        }
+
+        if (output.Contains("kek: absent", StringComparison.Ordinal))
+            return (null, $"The test KEK '{DefaultMacOsServiceName}' is not provisioned. Run {MacOsTestEnvironment.ProvisioningToolName} provision --service-name {DefaultMacOsServiceName}, or set {ServiceVariable} to a provisioned service.");
+
+        return (DefaultMacOsServiceName, string.Empty);
+    }
+
+    /// <summary>
+    /// The macOS test KEK (the one hkdfguard-go's scripts/provision-macos-test-key.sh provisions).
+    /// Used when <see cref="ServiceVariable"/> is unset and the installed provisioning tool reports
+    /// it present.
+    /// </summary>
+    public const string DefaultMacOsServiceName = "com.hkdfguard.native.macos.test";
 
     /// <summary>
     /// Optional second provisioned service, for the cross-service isolation test. When unset, that
@@ -170,6 +214,107 @@ public sealed class InstalledLinuxLibraryFactAttribute : FactAttribute
             {
                 return null; // no package for this architecture
             }
+        }
+    }
+}
+
+/// <summary>
+/// A test that only means anything on macOS; reported as skipped elsewhere, and when
+/// <see cref="NeedsFile"/> names a file that isn't there.
+/// </summary>
+public sealed class MacOsFactAttribute : FactAttribute
+{
+    /// <summary>A file the test needs, such as an installed tool.</summary>
+    public string? NeedsFile { get; set; }
+
+    public override string? Skip
+    {
+        get => base.Skip
+               ?? (!OperatingSystem.IsMacOS() ? "macOS only."
+                   : NeedsFile is { } file && !File.Exists(file) ? $"{file} is not installed."
+                   : null);
+        set => base.Skip = value;
+    }
+}
+
+/// <summary>
+/// A test that needs the real macOS native KMS library installed at one of its two supported
+/// locations (MacOsNativeLibraryLoader.SystemPath, or ~/.hkdfguard/v1); reported as skipped when
+/// it isn't. <see cref="NeedsProvisioningTool"/> also needs hkdfguard-v1-initialize beside it.
+/// </summary>
+public sealed class InstalledMacOsLibraryFactAttribute : FactAttribute
+{
+    public bool NeedsProvisioningTool { get; set; }
+
+    public override string? Skip
+    {
+        get => base.Skip ?? Reason(NeedsProvisioningTool);
+        set => base.Skip = value;
+    }
+
+    internal static string? Reason(bool needsProvisioningTool = false)
+    {
+        if (!OperatingSystem.IsMacOS())
+            return "macOS only.";
+        if (MacOsTestEnvironment.InstalledLibrary is null)
+            return $"The native KMS library is not installed at {MacOsNativeLibraryLoader.SystemPath} or {MacOsNativeLibraryLoader.UserPath(MacOsTestEnvironment.HomeDirectory)}.";
+        if (needsProvisioningTool && MacOsTestEnvironment.ProvisioningTool is null)
+            return $"{MacOsTestEnvironment.ProvisioningToolName} is not installed beside the native KMS library.";
+        return null;
+    }
+}
+
+/// <summary>
+/// A test that needs this platform's real native KMS library installed (Windows, Linux or macOS),
+/// but no provisioned service; reported as skipped when it isn't installed.
+/// </summary>
+public sealed class InstalledNativeLibraryFactAttribute : FactAttribute
+{
+    public InstalledNativeLibraryFactAttribute()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            if (!File.Exists(WindowsNativeLibraryLoader.InstalledPath))
+                Skip = $"The native KMS library is not installed at {WindowsNativeLibraryLoader.InstalledPath}.";
+        }
+        else if (OperatingSystem.IsLinux())
+        {
+            if (InstalledLinuxLibraryFactAttribute.InstalledPath is null)
+                Skip = "The libhkdfguard1 package is not installed.";
+        }
+        else if (OperatingSystem.IsMacOS())
+        {
+            Skip = InstalledMacOsLibraryFactAttribute.Reason();
+        }
+        else
+        {
+            Skip = "No native KMS library exists for this platform.";
+        }
+    }
+}
+
+/// <summary>
+/// A Linux test of what happens without the libhkdfguard1 package; reported as skipped elsewhere,
+/// and where the package is installed (or none is built for this architecture).
+/// </summary>
+public sealed class UninstalledLinuxLibraryFactAttribute : FactAttribute
+{
+    public UninstalledLinuxLibraryFactAttribute()
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            Skip = "Linux only.";
+            return;
+        }
+
+        try
+        {
+            if (LinuxNativeLibraryLoader.CandidatePaths(System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture).Any(File.Exists))
+                Skip = "The libhkdfguard1 package is installed.";
+        }
+        catch (PlatformNotSupportedException)
+        {
+            Skip = "No libhkdfguard1 package is built for this architecture.";
         }
     }
 }

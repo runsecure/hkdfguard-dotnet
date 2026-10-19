@@ -41,6 +41,20 @@ public sealed class NativeKeyFileTests : IDisposable
         return (Write("wrapped-dek.bin", wrapped), wrapped, dek);
     }
 
+    // --- The key file folder -------------------------------------------------------------------
+
+    [WindowsFact]
+    public void TheKeyFileFolder_IsInItsLongForm()
+    {
+        // hkdfguard_open_file refuses an 8.3 short name anywhere in a path, so every test here
+        // relies on TestDirectories expanding one (C:\Users\RUNNER~1\... on GitHub-hosted runners).
+        foreach (var part in _directory.Split(Path.DirectorySeparatorChar))
+        {
+            var tilde = part.IndexOf('~');
+            Assert.False(tilde >= 0 && tilde + 1 < part.Length && char.IsAsciiDigit(part[tilde + 1]), $"{_directory} still has the short name '{part}'.");
+        }
+    }
+
     // --- A real key file ------------------------------------------------------------------------
 
     [NativeIntegrationFact]
@@ -85,6 +99,20 @@ public sealed class NativeKeyFileTests : IDisposable
     }
 
     // --- Files the native library refuses, whatever the KEK --------------------------------------
+
+    [InstalledNativeLibraryFact]
+    public void TheInstalledLibrary_AnswersOpenFile_WithADescribedRefusal()
+    {
+        // hkdfguard_open_file needs no KEK, on any platform: a file that isn't there is refused
+        // with a status this platform describes - which proves the binding reached it. A library
+        // that can't be loaded or fails verification throws something else, and fails this test.
+        var path = Path.Combine(_directory, "missing", "dek.bin");
+
+        var thrown = Record.Exception(() => NativeHost.Library.OpenFile(path));
+
+        Assert.True(thrown is IOException or UnauthorizedAccessException or ArgumentException, $"OpenFile threw {thrown?.GetType().Name ?? "nothing"}: {thrown?.Message}");
+        Assert.DoesNotContain("unknown status", thrown!.Message);
+    }
 
     [InstalledWindowsLibraryFact]
     public async Task AMissingFile_IsNotFound()

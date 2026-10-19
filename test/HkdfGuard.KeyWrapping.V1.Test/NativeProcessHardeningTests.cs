@@ -135,6 +135,9 @@ public partial class NativeProcessHardeningTests
         Assert.NotEqual(IntPtr.Zero, queryable);
         CloseHandle(queryable);
 
+        // This thread existed when the hardening ran, so it is closed too.
+        Assert.Equal(errorAccessDenied, OpenThreadContext(GetCurrentThreadId()));
+
         // Idempotent: hardening an already hardened process succeeds.
         NativeProcessHardening.Apply();
     }
@@ -144,9 +147,10 @@ public partial class NativeProcessHardeningTests
     /// can meet RequireProtectedSignature, and threads started afterwards are closed too.
     /// </summary>
     [ProcessHardeningFact(ProcessHardeningFactAttribute.Windows)]
-    public void Apply_OnWindows_WithRequireProtectedSignature_Succeeds()
+    public void Apply_OnWindows_WithRequireProtectedSignature_Succeeds_AndClosesLaterThreadsToo()
     {
         const uint processVmRead = 0x0010;
+        const int errorAccessDenied = 5;
 
         NativeProcessHardening.Apply(ProcessHardeningOptions.RequireProtectedSignature);
 
@@ -154,6 +158,46 @@ public partial class NativeProcessHardeningTests
         if (readable != IntPtr.Zero)
             CloseHandle(readable);
         Assert.Equal(IntPtr.Zero, readable);
+
+        // A thread started after the hardening - certainly a new OS thread - is closed too.
+        Assert.Equal(errorAccessDenied, WithNewThread(OpenThreadContext));
+    }
+
+    /// <summary>OpenThread(THREAD_GET_CONTEXT) on <paramref name="threadId"/>: 0 if it opened (the handle is closed), else the error.</summary>
+    private static int OpenThreadContext(uint threadId)
+    {
+        const uint threadGetContext = 0x0008;
+
+        var handle = OpenThread(threadGetContext, false, threadId);
+        if (handle == IntPtr.Zero)
+            return Marshal.GetLastPInvokeError();
+        CloseHandle(handle);
+        return 0;
+    }
+
+    /// <summary>Starts a new thread and returns <paramref name="check"/> of its id, while it is still running.</summary>
+    private static int WithNewThread(Func<uint, int> check)
+    {
+        using var started = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        uint id = 0;
+        var thread = new Thread(() =>
+        {
+            id = GetCurrentThreadId();
+            started.Set();
+            release.Wait();
+        });
+        thread.Start();
+        try
+        {
+            started.Wait();
+            return check(id);
+        }
+        finally
+        {
+            release.Set();
+            thread.Join();
+        }
     }
 
     private const int PrGetDumpable = 3;
@@ -171,6 +215,12 @@ public partial class NativeProcessHardeningTests
     [LibraryImport("kernel32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool CloseHandle(IntPtr handle);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial IntPtr OpenThread(uint desiredAccess, [MarshalAs(UnmanagedType.Bool)] bool inheritHandle, uint threadId);
+
+    [LibraryImport("kernel32.dll")]
+    private static partial uint GetCurrentThreadId();
 }
 
 /// <summary>

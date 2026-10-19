@@ -155,6 +155,11 @@ public class NativeKeyWrappingIntegrationTests
 
         Assert.True(status < 0);
         Assert.True(requiredBytes > 1);
+
+        // The capacity it reports suffices.
+        var sufficient = new byte[requiredBytes];
+        Assert.Equal(AbstractHkdfGuardKmsLibrary.Ok, library.WrapDek(Service, dek.AsSpan(), sufficient, out var written));
+        Assert.InRange(written, 1, requiredBytes);
     }
 
     [NativeIntegrationFact]
@@ -201,5 +206,7 @@ public class NativeKeyWrappingIntegrationTests
         var unwrapStatus = library.UnwrapDek(Service, wrapped[..bytesWritten], recovered, out _);
 
         Assert.True(unwrapStatus < 0);
+        // The binding's own answer, without the wrapper's zeroing in between: nothing written.
+        Assert.True(recovered.IndexOfAnyExcept((byte)0) < 0, "the native library wrote into the destination of a failed unwrap");
     }
 }
