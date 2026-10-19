@@ -457,13 +457,13 @@ public class MacOsNativeLibraryLoaderTests
     }
 
     [Theory]
-    [InlineData("Windows", "HkdfGuardV1", 1)]   // Windows library on Windows: the Windows loader
+    [InlineData("Windows", "HkdfGuard.Kms.Windows.v1", 1)] // Windows library on Windows: the Windows loader
     [InlineData("OSX", "hkdfguard_v1", 2)]      // macOS library on macOS: the macOS loader
     [InlineData("Linux", "HkdfGuard.Kms.Linux.v1", 3)] // Linux library on Linux: the Linux loader
-    [InlineData("OSX", "HkdfGuardV1", 0)]       // a KMS library name on the wrong platform: default
+    [InlineData("OSX", "HkdfGuard.Kms.Windows.v1", 0)] // a KMS library name on the wrong platform: default
     [InlineData("Windows", "hkdfguard_v1", 0)]
     [InlineData("Linux", "hkdfguard_v1", 0)]
-    [InlineData("Linux", "HkdfGuardV1", 0)]
+    [InlineData("Linux", "HkdfGuard.Kms.Windows.v1", 0)]
     [InlineData("Windows", "HkdfGuard.Kms.Linux.v1", 0)]
     [InlineData("OSX", "HkdfGuard.Kms.Linux.v1", 0)]
     [InlineData("Windows", "wintrust.dll", 0)]  // any other import: default

@@ -76,6 +76,27 @@ internal sealed class FakeHkdfGuardKmsLibrary : AbstractHkdfGuardKmsLibrary
         return Ok;
     }
 
+    public int OpenFileStatus { get; set; } = Ok;
+    public byte[] OpenFilePayloadToEmit { get; set; } = new byte[132];
+    public string? LastOpenFilePath { get; private set; }
+    public int OpenFileCallCount { get; private set; }
+
+    protected override int OpenFile(string path, Span<byte> destination, out int bytesRead)
+    {
+        OpenFileCallCount++;
+        LastOpenFilePath = path;
+
+        if (OpenFileStatus != Ok)
+        {
+            bytesRead = 0;
+            return OpenFileStatus;
+        }
+
+        OpenFilePayloadToEmit.CopyTo(destination);
+        bytesRead = OpenFilePayloadToEmit.Length;
+        return Ok;
+    }
+
     public override int GenerateAndWrapDek(string service, Span<byte> destination, out int bytesWritten)
     {
         GenerateAndWrapCallCount++;

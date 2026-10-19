@@ -30,13 +30,13 @@ public class WindowsNativeLibraryLoaderTests
     {
         var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
 
-        Assert.Equal(Path.Combine(programFiles, "HkdfGuard", "v1", "HkdfGuardV1.dll"), WindowsNativeLibraryLoader.InstalledPath);
+        Assert.Equal(Path.Combine(programFiles, "HkdfGuard", "v1", "HkdfGuard.dll"), WindowsNativeLibraryLoader.InstalledPath);
     }
 
     [WindowsFact]
     public void Load_WhenTheFileIsMissing_ThrowsDllNotFound_NamingTheOnlySupportedPath()
     {
-        var missing = Path.Combine(Path.GetTempPath(), $"hkdfguard-missing-{Guid.NewGuid():N}", "HkdfGuardV1.dll");
+        var missing = Path.Combine(Path.GetTempPath(), $"hkdfguard-missing-{Guid.NewGuid():N}", "HkdfGuard.dll");
 
         var ex = Assert.Throws<DllNotFoundException>(() => WindowsNativeLibraryLoader.Load(missing, WindowsNativeLibraryLoader.ExpectedPublisher));
 
@@ -206,7 +206,7 @@ public class WindowsNativeLibraryLoaderTests
     [WindowsFact]
     public void VerifyImageKind_AnExecutable_IsRefused()
     {
-        // e.g. hkdfguard-v1-initialize.exe renamed into place: signed by the same profile.
+        // e.g. hkdfguard.exe renamed into place: signed by the same profile.
         var ex = Assert.Throws<SecurityException>(() =>
             WindowsNativeLibraryLoader.VerifyImageKind("test", Characteristics.ExecutableImage, Machine.Amd64, Architecture.X64));
 
@@ -251,7 +251,7 @@ public class WindowsNativeLibraryLoaderTests
     {
         // Installed beside the library and signed under the same profile: only the image check
         // tells them apart.
-        var tool = Path.Combine(Path.GetDirectoryName(WindowsNativeLibraryLoader.InstalledPath)!, "hkdfguard-v1-initialize.exe");
+        var tool = Path.Combine(Path.GetDirectoryName(WindowsNativeLibraryLoader.InstalledPath)!, "hkdfguard.exe");
         Assert.True(File.Exists(tool), $"{tool} is installed with the library.");
 
         WindowsNativeLibraryLoader.VerifySignature(tool, WindowsNativeLibraryLoader.ExpectedPublisher);

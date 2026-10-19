@@ -302,6 +302,81 @@ public class KeyRingBuilderTests
         }
     }
 
+    /// <summary>A key wrapper that reads its own key files - as the native one does - recording each path.</summary>
+    private sealed class ReadingKeyWrapper(byte[] key, byte[] fileContents) : IKeyWrapper
+    {
+        private readonly FakeKeyWrapper _inner = new(key);
+
+        public List<string> PathsRead { get; } = [];
+
+        public ValueTask<int> WrapAsync(ReadOnlyMemory<byte> plaintext, Memory<byte> result, CancellationToken cancellationToken = default)
+            => _inner.WrapAsync(plaintext, result, cancellationToken);
+
+        public ValueTask<int> UnwrapAsync(ReadOnlyMemory<byte> wrapped, Memory<byte> result, CancellationToken cancellationToken = default)
+            => _inner.UnwrapAsync(wrapped, result, cancellationToken);
+
+        public ValueTask<int> GenerateAndWrapAsync(Memory<byte> result, CancellationToken cancellationToken = default)
+            => _inner.GenerateAndWrapAsync(result, cancellationToken);
+
+        public ValueTask<byte[]> ReadKeyFileAsync(string path, CancellationToken cancellationToken = default)
+        {
+            PathsRead.Add(path);
+            return ValueTask.FromResult(fileContents);
+        }
+    }
+
+    [Fact]
+    public async Task Build_ReadsEveryKeyFileThroughItsKeyWrapper_NotItself()
+    {
+        // Neither path exists: only the key wrapper is asked to read them.
+        var wrapper = new ReadingKeyWrapper(RandomNumberGenerator.GetBytes(32), "wrapped"u8.ToArray());
+        var first = Path.Combine(Path.GetTempPath(), $"absent-{Guid.NewGuid():N}.bin");
+        var second = Path.Combine(Path.GetTempPath(), $"absent-{Guid.NewGuid():N}.bin");
+
+        await using var ring = await new KeyRingBuilder()
+            .WithKeyWrapper(wrapper)
+            .WithCryptoProviderFactory(CryptoProviderFactory)
+            .WithKeyRefreshInterval(60)
+            .WithKeyFile(2, second)
+            .WithKeyFile(1, first)
+            .BuildAsync();
+
+        Assert.Equal([first, second], wrapper.PathsRead);
+        Assert.Equal(2, ring.CurrentVersion);
+    }
+
+    [Fact]
+    public async Task Build_WhenTheKeyWrapperRefusesAKeyFile_FailsWithItsReason()
+    {
+        var wrapper = new ReadingKeyWrapper(RandomNumberGenerator.GetBytes(32), []);
+        var refusal = new UnauthorizedAccessException("another account could have replaced it");
+        var refusing = new RefusingKeyWrapper(wrapper, refusal);
+
+        var thrown = await Assert.ThrowsAsync<UnauthorizedAccessException>(() => new KeyRingBuilder()
+            .WithKeyWrapper(refusing)
+            .WithCryptoProviderFactory(CryptoProviderFactory)
+            .WithKeyRefreshInterval(60)
+            .WithKeyFile(1, "dek.bin")
+            .BuildAsync());
+
+        Assert.Same(refusal, thrown);
+    }
+
+    private sealed class RefusingKeyWrapper(IKeyWrapper inner, Exception refusal) : IKeyWrapper
+    {
+        public ValueTask<int> WrapAsync(ReadOnlyMemory<byte> plaintext, Memory<byte> result, CancellationToken cancellationToken = default)
+            => inner.WrapAsync(plaintext, result, cancellationToken);
+
+        public ValueTask<int> UnwrapAsync(ReadOnlyMemory<byte> wrapped, Memory<byte> result, CancellationToken cancellationToken = default)
+            => inner.UnwrapAsync(wrapped, result, cancellationToken);
+
+        public ValueTask<int> GenerateAndWrapAsync(Memory<byte> result, CancellationToken cancellationToken = default)
+            => inner.GenerateAndWrapAsync(result, cancellationToken);
+
+        public ValueTask<byte[]> ReadKeyFileAsync(string path, CancellationToken cancellationToken = default)
+            => ValueTask.FromException<byte[]>(refusal);
+    }
+
     [Fact]
     public async Task Build_TheBuiltRingOwnsItsProviders()
     {

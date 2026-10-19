@@ -21,24 +21,24 @@ public partial class NativeProcessHardeningTests
     {
         var library = new FakeHkdfGuardKmsLibrary
         {
-            Harden = () => LinuxHkdfGuardKmsLibrary.ErrProcessHardeningFailed,
-            Describe = s => s == LinuxHkdfGuardKmsLibrary.ErrProcessHardeningFailed ? "could not disable core dumps" : null,
+            Harden = () => AbstractHkdfGuardKmsLibrary.ErrProcessHardeningFailed,
+            Describe = s => s == AbstractHkdfGuardKmsLibrary.ErrProcessHardeningFailed ? "could not disable core dumps" : null,
         };
 
         var ex = Assert.Throws<InvalidOperationException>(() => NativeProcessHardening.Apply(library));
 
-        Assert.Contains("-17", ex.Message);
+        Assert.Contains("-20", ex.Message);
         Assert.Contains("could not disable core dumps", ex.Message);
     }
 
     [Fact]
     public void Apply_Throws_WithJustTheStatus_WhenItsMeaningIsUnknown()
     {
-        var library = new FakeHkdfGuardKmsLibrary { Harden = () => -99 };
+        var library = new FakeHkdfGuardKmsLibrary { Harden = () => -150 };
 
         var ex = Assert.Throws<InvalidOperationException>(() => NativeProcessHardening.Apply(library));
 
-        Assert.EndsWith("status -99.", ex.Message);
+        Assert.EndsWith("status -150.", ex.Message);
     }
 
     [Fact]

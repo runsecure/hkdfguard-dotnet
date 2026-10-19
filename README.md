@@ -305,7 +305,8 @@ await wrapper.UnwrapAsync(wrapped.AsMemory(0, written), dek);
 ABI has no concept of Additional Authenticated Data, so `IKeyWrapper` has no AAD parameter.
 
 No native library creates a KEK during wrap or unwrap. Provision each service once with
-`hkdfguard-v1-initialize provision --service-name <name>` (elevated on Windows), or every call fails.
+`hkdfguard provision --service-name <name>` (elevated on Windows; the macOS tool is still named
+`hkdfguard-v1-initialize`), or every call fails.
 A service name is 1-128 ASCII letters, digits or dots, never starts with a dot and never contains
 `..`, so `my.service` rather than `my-service`. `ServiceNames` holds the rule. `NativeHkdfKeyWrapperV1`,
 `KeyRingBuilder.WithServiceName` and the options validator all enforce it, so a bad name fails
@@ -315,12 +316,13 @@ Where each platform's library comes from:
 
 | Platform | Library | How it is found |
 |---|---|---|
-| Windows | `HkdfGuardV1.dll` | Installed to `%ProgramFiles%\HkdfGuard\v1` and loaded only from there. Not shipped in the package. |
+| Windows | `HkdfGuard.dll` | Installed to `%ProgramFiles%\HkdfGuard\v1` and loaded only from there. Not shipped in the package. |
 | macOS | `libhkdfguard_v1.dylib` | Installed system-wide to `/Library/Application Support/HkdfGuard/v1`, or per user to `~/.hkdfguard/v1`, and loaded only from there. Not shipped in the package. Requires Apple silicon and macOS 13 or later, with an arm64 .NET runtime (not an x64 one under Rosetta). |
 | Linux | `libhkdfguard.so.1` | Installed by the `libhkdfguard1` package (`hkdfguard-libs` on RPM distributions) to `/usr/lib/<multiarch>` or `/usr/lib64`, and loaded only from there. Not shipped in the package. x64 and arm64. |
 
 The NuGet package contains no native library. Each one is distributed and installed separately,
-together with its `hkdfguard-v1-initialize` provisioning tool.
+together with its provisioning tool: `hkdfguard` on Windows and Linux, `hkdfguard-v1-initialize` on
+macOS.
 
 The library sees every DEK, so it is never located by a search path.
 
@@ -340,7 +342,7 @@ On **Windows**, before mapping it, `WindowsNativeLibraryLoader` requires all of 
   pinned, because Artifact Signing reissues them often. No revocation check or certificate download
   is made, so loading never touches the network.
 - The signed PE header marks the file as a DLL for the process's architecture. The publisher's
-  other signed binaries, such as `hkdfguard-v1-initialize.exe`, pass the signature checks, so
+  other signed binaries, such as `hkdfguard.exe`, pass the signature checks, so
   this check is what refuses one renamed into place.
 
 Its dependencies are then loaded from System32 only. Any failed check throws, with no fallback, so
@@ -414,9 +416,16 @@ files - one per version - then reads each file, mints its own `ICryptoProvider` 
 `IKeyWrapper`/`ICryptoProviderFactory`, so no extra configuration is needed for it. Range checks
 happen in the setters (`WithServiceName`, `WithKeyRefreshInterval`, `WithMaxRefreshFailures`); `BuildAsync` checks that a key
 wrapper, a crypto provider factory, a key refresh interval (there's no default), and at least one key
-were configured. Each key file must hold 1 to `WrappedKeyLimits.MaxBytes` (512) bytes; `BuildAsync`
-never reads more than one byte past that, so pointing it at the wrong file can't make startup
-allocate an unbounded buffer. The limit leaves room for larger keys and extra fingerprinting
+were configured. `BuildAsync` reads every key file through the key wrapper
+(`IKeyWrapper.ReadKeyFileAsync`). `NativeHkdfKeyWrapperV1` reads it through the native library's
+`hkdfguard_open_file`, which refuses a key file another account could have written or replaced (a
+link, junction or short name in its path, or loose ownership or permissions), and one that holds
+what looks like an unwrapped key: a refusal is a `FileNotFoundException`,
+`UnauthorizedAccessException` or `InvalidDataException` naming the native status (see
+[the CLI reference](docs/reference/cli.md#status-codes)). Other key wrappers read with ordinary
+file I/O by default (`WrappedKeyFile.ReadAsync`): each key file must hold 1 to
+`WrappedKeyLimits.MaxBytes` (512) bytes, and no more than one byte past that is ever read, so
+pointing it at the wrong file can't make startup allocate an unbounded buffer. The limit leaves room for larger keys and extra fingerprinting
 beyond today's 156-byte macOS payload; raising that one constant also resizes the buffer an
 ephemeral key is generated into. If anything fails or is cancelled partway through, every provider
 it already created is disposed.
@@ -556,7 +565,8 @@ buffers can't be cleared:
 var start = new ProcessStartInfo(initializeToolPath) { RedirectStandardInput = true, UseShellExecute = false };
 foreach (var arg in new[] { "wrap", "--service-name", "my.service", "--key-file-path", keyFilePath, "--dek-stdin" })
     start.ArgumentList.Add(arg);
-// Windows also requires --group <the local group allowed to read the key file>.
+// Add --group <a local group> to let your application's account read the key file; without it,
+// only the file's owner can.
 
 using var tool = Process.Start(start)!;
 var base64Key = protector.GetKeyAsBase64();
@@ -576,7 +586,7 @@ tool.WaitForExit();
 protector.Dispose(); // zeroes the key and its base64 form
 ```
 
-The macOS tool also accepts `--dek-file <path>`. Prefer stdin: a file leaves the key on disk until
+Every platform's tool also accepts `--dek-file <path>`. Prefer stdin: a file leaves the key on disk until
 it is securely deleted. On macOS, pass `--fingerprint <hex>` as well, so the tool refuses to write a
 key file under any KEK other than the one recorded at provisioning.
 
@@ -646,7 +656,7 @@ reported as skipped, never passed, unless `HKDFGUARD_TEST_SERVICE` names one. Se
 against a different KEK:
 
 ```bash
-hkdfguard-v1-initialize provision --service-name hkdfguard.integrationtest   # elevated on Windows
+hkdfguard provision --service-name hkdfguard.integrationtest   # elevated on Windows
 HKDFGUARD_TEST_SERVICE=hkdfguard.integrationtest dotnet test test/HkdfGuard.KeyWrapping.V1.Test
 ```
 
@@ -659,7 +669,7 @@ policy it didn't write or an existing secret; `--remove` removes its policy agai
 `LinuxNativeIntegrationTests` also run: they check the exact Linux status codes, the native
 library's own service-name and length checks, that a failed unwrap zeroes the caller's buffer,
 that tampering anywhere in a payload is refused, and that a key file written by
-`hkdfguard-v1-initialize wrap` unwraps through `NativeHkdfKeyWrapperV1`.
+`hkdfguard wrap` unwraps through `NativeHkdfKeyWrapperV1`.
 
 ```bash
 sudo scripts/provision-linux-test-key.sh
@@ -679,7 +689,7 @@ if any file stops matching its `SHA256SUMS`.
 Every assembly built from this repository (`HkdfGuard.*.dll`, for every target framework) is
 Authenticode-signed through Azure Artifact Signing before it is packed. That is the same account
 and certificate profile (`RunSecureSigning` / `runsecure-release`) that signs the native
-`HkdfGuardV1.dll`, so the publisher is `CN=Torin Blair, O=Torin Blair, L=Littleton, S=co, C=US`.
+`HkdfGuard.dll`, so the publisher is `CN=Torin Blair, O=Torin Blair, L=Littleton, S=co, C=US`.
 Artifact Signing certificates are valid for about three days, so every signature is RFC 3161
 timestamped. That keeps it valid after the certificate expires.
 

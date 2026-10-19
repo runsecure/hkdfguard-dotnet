@@ -14,7 +14,7 @@ namespace HkdfGuard.KeyWrapping.V1.Test.TestHelpers;
 [SupportedOSPlatform("windows")]
 internal static unsafe class WindowsKekProbe
 {
-    /// <returns>The library's status (0 on success; see WindowsHkdfGuardKmsLibrary.Err*) and, when
+    /// <returns>The library's status (0 on success; see AbstractHkdfGuardKmsLibrary.Err*) and, when
     /// it succeeded, whether the KEK exists.</returns>
     public static (int Status, bool Exists) Query(string serviceName)
     {

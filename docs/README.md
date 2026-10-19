@@ -7,7 +7,7 @@ machine from nothing to encrypting and decrypting with a TPM-protected key, then
 file.
 
 **Running HkdfGuard in production** (installing, provisioning, creating key files): see the
-[`hkdfguard-v1-initialize` reference](reference/cli.md).
+[`hkdfguard` reference](reference/cli.md).
 
 ## Map
 
@@ -19,7 +19,7 @@ file.
 | How-to | Rotate keys | Planned (see the README's *Key rotation* section for now) |
 | How-to | Use HkdfGuard with dependency injection and `IConfiguration` | Planned |
 | How-to | Troubleshoot | Planned |
-| Reference | [`hkdfguard-v1-initialize`](reference/cli.md) | Draft (Windows complete; macOS pending) |
+| Reference | [`hkdfguard`](reference/cli.md) | Draft (Windows complete; macOS pending) |
 | Reference | Native status codes | Planned |
 | Reference | `HkdfGuardOptions` / configuration schema | Planned |
 | Reference | API | Planned (generated from XML doc comments) |
@@ -31,7 +31,7 @@ file.
 
 - Every code sample in these pages compiles against the current source. When you change one,
   build it before committing.
-- Facts about `hkdfguard-v1-initialize` come from its own `--help` output and observed behavior.
+- Facts about `hkdfguard` come from its own `--help` output and observed behavior.
   Anything not yet confirmed is marked **TODO (maintainer)**; search for that string before
   publishing.
 - Security rules are stated as rules, at the step where they apply, in a block that starts with

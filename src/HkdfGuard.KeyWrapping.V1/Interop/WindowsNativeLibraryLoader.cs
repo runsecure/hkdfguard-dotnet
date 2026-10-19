@@ -16,7 +16,7 @@ namespace HkdfGuard.KeyWrapping.V1.Interop;
 /// probe would search the application directory and then PATH; this loader replaces that with
 /// five checks, all of which must pass before the file is mapped:
 /// <list type="number">
-/// <item>The file exists at <c>%ProgramFiles%\HkdfGuard\v1\HkdfGuardV1.dll</c>. The Program Files
+/// <item>The file exists at <c>%ProgramFiles%\HkdfGuard\v1\HkdfGuard.dll</c>. The Program Files
 /// location comes from the Windows known-folder registry setting, which only an administrator can
 /// change, not from the <c>ProgramFiles</c> environment variable.</item>
 /// <item>No component of that path, from the file up to (not including) the drive root, is a
@@ -33,7 +33,7 @@ namespace HkdfGuard.KeyWrapping.V1.Interop;
 /// <see cref="ExpectedRootSha256"/>.</item>
 /// <item>Its PE header - covered by that signature - marks it a DLL for this process's
 /// architecture. Everything the HkdfGuard profile signs passes the signer checks, so this refuses
-/// its other binaries, such as hkdfguard-v1-initialize.exe renamed into place.</item>
+/// its other binaries, such as hkdfguard.exe renamed into place.</item>
 /// </list>
 /// The library's own dependencies are then resolved from System32 only. Any failed check throws;
 /// there is deliberately no fallback to the default search and no override of the path.
@@ -41,7 +41,7 @@ namespace HkdfGuard.KeyWrapping.V1.Interop;
 [SupportedOSPlatform("windows")]
 internal static class WindowsNativeLibraryLoader
 {
-    internal const string FileName = "HkdfGuardV1.dll";
+    internal const string FileName = "HkdfGuard.dll";
 
     /// <summary>
     /// The Authenticode signer subject the library must carry. The signing certificate is

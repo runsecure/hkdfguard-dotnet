@@ -17,7 +17,7 @@ namespace HkdfGuard.KeyWrapping.V1.Test;
 /// </code>
 /// NativeKeyWrappingIntegrationTests covers what every platform shares; these pin down the exact
 /// Linux status codes, the native library's own input checks (which .NET validation normally keeps
-/// it from seeing), its zeroing on failure, and the deployment path through hkdfguard-v1-initialize.
+/// it from seeing), its zeroing on failure, and the deployment path through hkdfguard.
 /// </summary>
 public class LinuxNativeIntegrationTests
 {
@@ -88,7 +88,7 @@ public class LinuxNativeIntegrationTests
 
         var status = Library.UnwrapDek(NativeTestEnvironment.OtherServiceName, wrapped, destination, out _);
 
-        AssertStatus(LinuxHkdfGuardKmsLibrary.ErrFingerprintMismatch, status);
+        AssertStatus(LinuxHkdfGuardKmsLibrary.ErrKekFingerprintMismatch, status);
         Assert.All(destination, b => Assert.Equal(0, b));
     }
 
@@ -121,8 +121,11 @@ public class LinuxNativeIntegrationTests
 
             var status = Library.UnwrapDek(Service, tampered, destination, out _);
 
+            // A changed header byte makes the payload malformed or of an unknown version; a changed
+            // fingerprint routes it to no KEK; anything else fails authentication.
             Assert.True(
-                status is LinuxHkdfGuardKmsLibrary.ErrCryptoError or LinuxHkdfGuardKmsLibrary.ErrFingerprintMismatch,
+                status is LinuxHkdfGuardKmsLibrary.ErrPayloadAuthFailed or LinuxHkdfGuardKmsLibrary.ErrPayloadMalformed
+                    or LinuxHkdfGuardKmsLibrary.ErrPayloadUnsupported or LinuxHkdfGuardKmsLibrary.ErrKekFingerprintMismatch,
                 $"byte {i} of {wrapped.Length}: status {status}");
             Assert.All(destination, b => Assert.Equal(0, b));
         }
@@ -134,9 +137,9 @@ public class LinuxNativeIntegrationTests
         var wrapped = Wrap(RandomNumberGenerator.GetBytes(DekLength));
         var destination = new byte[DekLength];
 
-        AssertStatus(LinuxHkdfGuardKmsLibrary.ErrCryptoError, Library.UnwrapDek(Service, wrapped[..^1], destination, out _));
-        AssertStatus(LinuxHkdfGuardKmsLibrary.ErrCryptoError, Library.UnwrapDek(Service, [.. wrapped, 0], destination, out _));
-        AssertStatus(LinuxHkdfGuardKmsLibrary.ErrCryptoError, Library.UnwrapDek(Service, wrapped[..8], destination, out _));
+        AssertStatus(LinuxHkdfGuardKmsLibrary.ErrPayloadMalformed, Library.UnwrapDek(Service, wrapped[..^1], destination, out _));
+        AssertStatus(LinuxHkdfGuardKmsLibrary.ErrPayloadMalformed, Library.UnwrapDek(Service, [.. wrapped, 0], destination, out _));
+        AssertStatus(LinuxHkdfGuardKmsLibrary.ErrPayloadMalformed, Library.UnwrapDek(Service, wrapped[..8], destination, out _));
     }
 
     [LinuxNativeIntegrationFact]
@@ -144,7 +147,7 @@ public class LinuxNativeIntegrationTests
     {
         var status = Library.UnwrapDek(Service, ReadOnlySpan<byte>.Empty, new byte[DekLength], out _);
 
-        Assert.True(status is LinuxHkdfGuardKmsLibrary.ErrInvalidArgument or LinuxHkdfGuardKmsLibrary.ErrCryptoError, $"status {status}");
+        Assert.True(status is LinuxHkdfGuardKmsLibrary.ErrInvalidArgument or LinuxHkdfGuardKmsLibrary.ErrPayloadMalformed, $"status {status}");
     }
 
     [LinuxNativeIntegrationFact]
@@ -235,7 +238,7 @@ public class LinuxNativeIntegrationTests
     [LinuxNativeIntegrationFact(NeedsCli = true)]
     public async Task AKeyFileWrappedByTheProvisioningTool_RevealsItsDekThroughTheWrapper()
     {
-        // The deployment path: hkdfguard-v1-initialize wraps a delivered DEK on the host, in its
+        // The deployment path: hkdfguard wraps a delivered DEK on the host, in its
         // own process, and the application unwraps the key file through this binding.
         var directory = Directory.CreateTempSubdirectory("hkdfguard-cli-");
         try
@@ -254,7 +257,7 @@ public class LinuxNativeIntegrationTests
             }
 
             var (exitCode, output) = await RunCliAsync("wrap", "--key-file-path", keyFile, "--service-name", Service, "--dek-file", dekFile);
-            Assert.True(exitCode == 0, $"hkdfguard-v1-initialize wrap exited {exitCode}: {output}");
+            Assert.True(exitCode == 0, $"hkdfguard wrap exited {exitCode}: {output}");
             Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(keyFile));
 
             var recovered = new byte[DekLength];
@@ -274,7 +277,7 @@ public class LinuxNativeIntegrationTests
     {
         var (exitCode, output) = await RunCliAsync("provision", "--service-name", Service);
 
-        Assert.True(exitCode == 0, $"hkdfguard-v1-initialize provision exited {exitCode}: {output}");
+        Assert.True(exitCode == 0, $"hkdfguard provision exited {exitCode}: {output}");
     }
 
     private static async Task<(int ExitCode, string Output)> RunCliAsync(params string[] arguments)

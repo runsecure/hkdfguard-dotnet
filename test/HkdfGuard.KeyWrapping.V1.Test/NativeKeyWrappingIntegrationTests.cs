@@ -9,7 +9,7 @@ namespace HkdfGuard.KeyWrapping.V1.Test;
 /// Crypto Provider / TPM, Linux TPM2/keyring/OpenSSL, macOS Secure Enclave). No native library
 /// creates a KEK during wrap/unwrap, so these run against an operator-provisioned service:
 /// <code>
-/// hkdfguard-v1-initialize provision --service-name hkdfguard.integrationtest   (elevated on Windows)
+/// hkdfguard provision --service-name hkdfguard.integrationtest   (elevated on Windows)
 /// HKDFGUARD_TEST_SERVICE=hkdfguard.integrationtest dotnet test
 /// </code>
 /// Without HKDFGUARD_TEST_SERVICE every test here is reported as skipped - never as passed. With it,

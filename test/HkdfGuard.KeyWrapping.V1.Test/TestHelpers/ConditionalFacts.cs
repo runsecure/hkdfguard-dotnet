@@ -24,11 +24,23 @@ public sealed class WindowsTheoryAttribute : TheoryAttribute
 
 /// <summary>
 /// A test that needs the real Windows native KMS library installed at its one supported location
-/// (%ProgramFiles%\HkdfGuard\v1\HkdfGuardV1.dll); reported as skipped when it isn't.
+/// (%ProgramFiles%\HkdfGuard\v1\HkdfGuard.dll); reported as skipped when it isn't.
 /// </summary>
 public sealed class InstalledWindowsLibraryFactAttribute : FactAttribute
 {
     public InstalledWindowsLibraryFactAttribute()
+    {
+        if (!OperatingSystem.IsWindows())
+            Skip = "Windows only.";
+        else if (!File.Exists(WindowsNativeLibraryLoader.InstalledPath))
+            Skip = $"The native KMS library is not installed at {WindowsNativeLibraryLoader.InstalledPath}.";
+    }
+}
+
+/// <summary>The theory form of <see cref="InstalledWindowsLibraryFactAttribute"/>.</summary>
+public sealed class InstalledWindowsLibraryTheoryAttribute : TheoryAttribute
+{
+    public InstalledWindowsLibraryTheoryAttribute()
     {
         if (!OperatingSystem.IsWindows())
             Skip = "Windows only.";
@@ -87,7 +99,7 @@ public static class NativeTestEnvironment
             return (explicitName, string.Empty);
 
         if (!OperatingSystem.IsWindows())
-            return (null, $"Set {ServiceVariable} to a service provisioned with hkdfguard-v1-initialize to run native integration tests. On a Linux TPM host, sudo scripts/provision-linux-test-key.sh provisions com.hkdfguard.native.linux.test.");
+            return (null, $"Set {ServiceVariable} to a service provisioned with hkdfguard to run native integration tests. On a Linux TPM host, sudo scripts/provision-linux-test-key.sh provisions com.hkdfguard.native.linux.test.");
 
         if (!File.Exists(Interop.WindowsNativeLibraryLoader.InstalledPath))
             return (null, $"The native KMS library is not installed at {Interop.WindowsNativeLibraryLoader.InstalledPath}.");
@@ -108,9 +120,9 @@ public static class NativeTestEnvironment
         return status switch
         {
             0 when exists => (DefaultWindowsServiceName, string.Empty),
-            0 or Interop.WindowsHkdfGuardKmsLibrary.ErrKekNotFound =>
+            0 or Interop.AbstractHkdfGuardKmsLibrary.ErrKekNotFound =>
                 (null, $"The test KEK '{DefaultWindowsServiceName}' is not provisioned. Run scripts/provision-windows-test-key.ps1 from an elevated PowerShell, or set {ServiceVariable} to a provisioned service."),
-            Interop.WindowsHkdfGuardKmsLibrary.ErrAccessDenied =>
+            Interop.AbstractHkdfGuardKmsLibrary.ErrKekAccessDenied =>
                 (null, $"The test KEK '{DefaultWindowsServiceName}' exists, but this account may not use it. Add it to the HkdfGuardUsers group (then sign out and in), or run the tests elevated."),
             _ => (DefaultWindowsServiceName, string.Empty),
         };
@@ -180,7 +192,7 @@ public sealed class LinuxFactAttribute : FactAttribute
 public sealed class LinuxNativeIntegrationFactAttribute : FactAttribute
 {
     public const string PolicyPath = "/etc/hkdfguard/policy.toml";
-    public const string Cli = "/usr/bin/hkdfguard-v1-initialize";
+    public const string Cli = "/usr/bin/hkdfguard";
 
     /// <summary>Needs <see cref="NativeTestEnvironment.OtherServiceVariable"/>: a second provisioned service, with its own KEK.</summary>
     public bool NeedsOtherService { get; set; }
@@ -188,7 +200,7 @@ public sealed class LinuxNativeIntegrationFactAttribute : FactAttribute
     /// <summary>Needs the policy's provisioning allowlist (tpm.require_pinned_names), so an unlisted service has no KEK.</summary>
     public bool NeedsPinnedNamesAllowlist { get; set; }
 
-    /// <summary>Needs the hkdfguard package's hkdfguard-v1-initialize.</summary>
+    /// <summary>Needs the hkdfguard package's hkdfguard.</summary>
     public bool NeedsCli { get; set; }
 
     public override string? Skip
