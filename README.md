@@ -435,6 +435,14 @@ debug or inject into this one.
   use it. Without it, a weak signature is only logged.
 - **Linux:** it adds nothing; the plain call already guarantees it.
 
+**.NET on Windows:** the plain call closes the threads that exist when it runs, and threads started
+later keep the default access, which lets other processes of the same user read and change their
+registers. A .NET application can't call it "before starting threads": the runtime starts threads of
+its own before `Main` runs (the finalizer thread, for one), and keeps adding more whenever it needs
+them - thread-pool workers for `async` I/O, timers and `Task.Run`. Calling it first thing in `Main`
+covers the threads that exist then, not the ones the runtime adds later, so **use
+`RequireProtectedSignature` for a Windows service**: it closes later threads too.
+
 ### 2. Build a `KeyRing`
 
 `KeyRingBuilder` fluently collects a service name/cache-expiry/rotation
