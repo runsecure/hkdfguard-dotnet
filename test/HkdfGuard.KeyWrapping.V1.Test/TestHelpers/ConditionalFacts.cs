@@ -78,7 +78,7 @@ public static class NativeTestEnvironment
     /// The Windows test KEK that scripts/provision-windows-test-key.ps1 provisions. Used when
     /// <see cref="ServiceVariable"/> is unset and the installed library reports it exists.
     /// </summary>
-    public const string DefaultWindowsServiceName = "com.hkdfguard.native.windows.test";
+    public const string DefaultWindowsServiceName = "com.hkdfguard.integration.test.221";
 
     private static readonly Lazy<(string? Service, string SkipReason)> Resolved = new(Resolve);
 
@@ -102,7 +102,7 @@ public static class NativeTestEnvironment
             return ResolveMacOs();
 
         if (!OperatingSystem.IsWindows())
-            return (null, $"Set {ServiceVariable} to a service provisioned with hkdfguard to run native integration tests. On a Linux TPM host, sudo scripts/provision-linux-test-key.sh provisions com.hkdfguard.native.linux.test.");
+            return (null, $"Set {ServiceVariable} to a service provisioned with hkdfguard to run native integration tests. On a Linux TPM host, sudo scripts/provision-linux-test-key.sh provisions com.hkdfguard.integration.test.221.");
 
         if (!File.Exists(Interop.WindowsNativeLibraryLoader.InstalledPath))
             return (null, $"The native KMS library is not installed at {Interop.WindowsNativeLibraryLoader.InstalledPath}.");
@@ -170,7 +170,7 @@ public static class NativeTestEnvironment
     /// Used when <see cref="ServiceVariable"/> is unset and the installed provisioning tool reports
     /// it present.
     /// </summary>
-    public const string DefaultMacOsServiceName = "com.hkdfguard.native.macos.test";
+    public const string DefaultMacOsServiceName = "com.hkdfguard.integration.test.221";
 
     /// <summary>
     /// Optional second provisioned service, for the cross-service isolation test. When unset, that

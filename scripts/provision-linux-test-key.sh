@@ -22,8 +22,8 @@
 #
 # Then run the native tests:
 #
-#   HKDFGUARD_TEST_SERVICE=com.hkdfguard.native.linux.test \
-#   HKDFGUARD_TEST_SERVICE_OTHER=com.hkdfguard.native.linux.test.other \
+#   HKDFGUARD_TEST_SERVICE=com.hkdfguard.integration.test.221 \
+#   HKDFGUARD_TEST_SERVICE_OTHER=com.hkdfguard.integration.test.221.other \
 #   dotnet test test/HkdfGuard.KeyWrapping.V1.Test
 #
 # Usage:
@@ -35,7 +35,7 @@
 
 set -euo pipefail
 
-readonly SERVICE="com.hkdfguard.native.linux.test"
+readonly SERVICE="com.hkdfguard.integration.test.221"
 readonly OTHER_SERVICE="${SERVICE}.other"
 readonly TOOL="/usr/bin/hkdfguard"
 readonly TPM_DEVICE="/dev/tpmrm0"

@@ -712,8 +712,8 @@ that tampering anywhere in a payload is refused, and that a key file written by
 
 ```bash
 sudo scripts/provision-linux-test-key.sh
-HKDFGUARD_TEST_SERVICE=com.hkdfguard.native.linux.test \
-HKDFGUARD_TEST_SERVICE_OTHER=com.hkdfguard.native.linux.test.other \
+HKDFGUARD_TEST_SERVICE=com.hkdfguard.integration.test.221 \
+HKDFGUARD_TEST_SERVICE_OTHER=com.hkdfguard.integration.test.221.other \
 dotnet test test/HkdfGuard.KeyWrapping.V1.Test
 ```
 
@@ -727,7 +727,7 @@ passed - where its platform, library or service isn't there:
   `NativeKeyWrappingIntegrationTests`, `NativeEndToEndTests`, `NativeProcessHardeningTests`. The
   installed-library cases run wherever `%ProgramFiles%\HkdfGuard\v1\HkdfGuard.dll` is installed;
   the round trips also need a provisioned KEK - `HKDFGUARD_TEST_SERVICE`, or
-  `com.hkdfguard.native.windows.test` (`scripts/provision-windows-test-key.ps1`), which the
+  `com.hkdfguard.integration.test.221` (`scripts/provision-windows-test-key.ps1`), which the
   installed library's `hkdfguard_kek_exists` confirms.
 - **Linux** - `LinuxNativeLibraryLoaderSystemTests` run against the real filesystem and dynamic
   linker on any Linux host, with their installed-library cases needing the `libhkdfguard1`
@@ -738,7 +738,7 @@ passed - where its platform, library or service isn't there:
   framework, with their installed-library cases needing `libhkdfguard_v1.dylib` at
   `/Library/Application Support/HkdfGuard/v1` (or `~/.hkdfguard/v1`) and `hkdfguard-v1-initialize`
   beside it. The shared round trips run against `HKDFGUARD_TEST_SERVICE`, or
-  `com.hkdfguard.native.macos.test` when `hkdfguard-v1-initialize status` reports it present.
+  `com.hkdfguard.integration.test.221` when `hkdfguard-v1-initialize status` reports it present.
 
 `NativeProcessHardeningTests` harden the test host itself, so they also need
 `HKDFGUARD_TEST_PROCESS_HARDENING=1`, and are best run one at a time.
