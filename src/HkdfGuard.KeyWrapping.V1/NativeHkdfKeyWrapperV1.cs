@@ -71,6 +71,35 @@ public class NativeHkdfKeyWrapperV1 : IKeyWrapper
         return Complete(status, bytesWritten, "generate-and-wrap");
     }
 
+    /// <summary>
+    /// Reads a key file through the native library's hkdfguard_open_file rather than .NET file
+    /// I/O. Besides the size and format checks, the native library refuses a file another account
+    /// could have written or replaced - its path, owner and permissions are checked the way only
+    /// the platform can - and one holding what looks like an unwrapped key. The bytes come back
+    /// still wrapped, ready for <see cref="UnwrapAsync"/>.
+    /// </summary>
+    /// <param name="path">The key file's path</param>
+    /// <param name="cancellationToken">Cancels the operation</param>
+    /// <returns>The wrapped key the file holds</returns>
+    /// <exception cref="FileNotFoundException">The file, or a folder in its path, does not exist</exception>
+    /// <exception cref="UnauthorizedAccessException">This account may not read the file, or its path is not trusted</exception>
+    /// <exception cref="InvalidDataException">The file is the wrong size, holds what looks like an unwrapped key, or isn't a valid wrapped DEK</exception>
+    /// <exception cref="IOException">The file could not be read for another reason</exception>
+    public ValueTask<byte[]> ReadKeyFileAsync(string path, CancellationToken cancellationToken = default)
+    {
+        if (cancellationToken.IsCancellationRequested)
+            return ValueTask.FromCanceled<byte[]>(cancellationToken);
+
+        try
+        {
+            return ValueTask.FromResult(_library.OpenFile(path));
+        }
+        catch (Exception e)
+        {
+            return ValueTask.FromException<byte[]>(e);
+        }
+    }
+
     private ValueTask<int> Complete(int status, int bytesWritten, string operation)
     {
         if (status == AbstractHkdfGuardKmsLibrary.Ok)

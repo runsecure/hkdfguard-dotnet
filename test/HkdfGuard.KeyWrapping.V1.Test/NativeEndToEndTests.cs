@@ -21,11 +21,19 @@ public sealed class NativeEndToEndTests : IDisposable
 {
     private const int KeyFileVersion = 3;
 
-    private readonly string _directory = Directory.CreateTempSubdirectory("hkdfguard-e2e-").FullName;
+    // Created on first use: only the tests that write a key file need it, and on Linux that is a
+    // private folder the native library trusts (NeedsKeyFileDirectory), never /tmp.
+    private string? _directory;
 
-    private static string Service => NativeTestEnvironment.ServiceName!;
+    private string KeyFileDirectory => _directory ??= TestDirectories.CreateKeyFileDirectory("hkdfguard-e2e-");
 
-    public void Dispose() => Directory.Delete(_directory, recursive: true);
+    private static string Service => NativeTestEnvironment.ProvisionedService;
+
+    public void Dispose()
+    {
+        if (_directory is not null)
+            Directory.Delete(_directory, recursive: true);
+    }
 
     private static KeyRingBuilder RingBuilder(string service) => new KeyRingBuilder()
         .WithServiceName(service)
@@ -50,7 +58,7 @@ public sealed class NativeEndToEndTests : IDisposable
             var wrapped = new byte[WrappedKeyLimits.MaxBytes];
             var wrappedLength = await new NativeHkdfKeyWrapperV1(Service).WrapAsync(dek, wrapped);
 
-            var path = Path.Combine(_directory, $"wrapped-dek-v{KeyFileVersion}.bin");
+            var path = Path.Combine(KeyFileDirectory, $"wrapped-dek-v{KeyFileVersion}.bin");
             await File.WriteAllBytesAsync(path, wrapped.AsMemory(0, wrappedLength).ToArray());
             return (path, configuration);
         }
@@ -67,7 +75,7 @@ public sealed class NativeEndToEndTests : IDisposable
         return new string(result, 0, source.Decrypt(name, result.AsSpan()));
     }
 
-    [NativeIntegrationFact]
+    [NativeIntegrationFact(NeedsKeyFileDirectory = true)]
     public async Task ADeployment_PipelineEncryptedConfiguration_DecryptsThroughItsNativelyWrappedKeyFile()
     {
         var (keyFile, values) = await RunPipelineAsync(
@@ -81,7 +89,7 @@ public sealed class NativeEndToEndTests : IDisposable
         Assert.Equal("k-0123456789abcdef", Reveal(root, "Api:Key"));
     }
 
-    [NativeIntegrationFact]
+    [NativeIntegrationFact(NeedsKeyFileDirectory = true)]
     public async Task ADeployment_ValuesMovedToAnotherKey_FailAuthentication()
     {
         var (keyFile, values) = await RunPipelineAsync(("ConnectionStrings:Admin", "admin-only"), ("ConnectionStrings:Reports", "reports"));
@@ -93,7 +101,7 @@ public sealed class NativeEndToEndTests : IDisposable
         Assert.Throws<AuthenticationTagMismatchException>(() => Reveal(root, "ConnectionStrings:Reports"));
     }
 
-    [NativeIntegrationFact]
+    [NativeIntegrationFact(NeedsKeyFileDirectory = true)]
     public async Task ARestart_ReadingTheSameKeyFile_RevealsTheSameKey()
     {
         var (keyFile, values) = await RunPipelineAsync(("Secret", "survives a restart"));
@@ -106,7 +114,7 @@ public sealed class NativeEndToEndTests : IDisposable
         Assert.Equal("survives a restart", Reveal(new ProtectedConfigurationRoot(configuration, second), "Secret"));
     }
 
-    [NativeIntegrationFact]
+    [NativeIntegrationFact(NeedsKeyFileDirectory = true)]
     public async Task AKeyFile_WrappedUnderAnotherService_RefusesToBuild()
     {
         var (keyFile, _) = await RunPipelineAsync(("Secret", "value"));
@@ -115,7 +123,7 @@ public sealed class NativeEndToEndTests : IDisposable
             RingBuilder(NativeTestEnvironment.OtherServiceName).WithKeyFile(KeyFileVersion, keyFile).BuildAsync());
     }
 
-    [NativeIntegrationFact]
+    [NativeIntegrationFact(NeedsKeyFileDirectory = true)]
     public async Task ATamperedKeyFile_RefusesToBuild()
     {
         var (keyFile, _) = await RunPipelineAsync(("Secret", "value"));
@@ -143,7 +151,7 @@ public sealed class NativeEndToEndTests : IDisposable
         Assert.Equal("cached secret", Reveal(cache, "token"));
     }
 
-    [NativeIntegrationFact]
+    [NativeIntegrationFact(NeedsKeyFileDirectory = true)]
     public async Task ADeployedAndARuntimeKey_TogetherInOneRing_EachDoTheirJob()
     {
         var (keyFile, values) = await RunPipelineAsync(("Secret", "from the release"));

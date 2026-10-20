@@ -29,15 +29,18 @@ internal sealed class FakeHkdfGuardKmsLibrary : AbstractHkdfGuardKmsLibrary
 
     public override string? DescribeStatus(int status) => Describe is null ? base.DescribeStatus(status) : Describe(status);
 
-    /// <summary>When set, answers HardenProcess; otherwise the base class (not supported).</summary>
+    /// <summary>When set, answers HardenProcess; otherwise it succeeds.</summary>
     public Func<int>? Harden { get; set; }
 
     public int HardenCallCount { get; private set; }
 
-    public override int HardenProcess()
+    public uint? LastHardenFlags { get; private set; }
+
+    public override int HardenProcess(uint flags)
     {
         HardenCallCount++;
-        return Harden is null ? base.HardenProcess() : Harden();
+        LastHardenFlags = flags;
+        return Harden is null ? Ok : Harden();
     }
 
     public override int WrapDek(string service, ReadOnlySpan<byte> dek, Span<byte> destination, out int bytesWritten)
@@ -73,6 +76,27 @@ internal sealed class FakeHkdfGuardKmsLibrary : AbstractHkdfGuardKmsLibrary
         var payload = UnwrapPayloadToEmit ?? wrapped.ToArray();
         payload.CopyTo(destination);
         bytesWritten = UnwrapDekBytesWrittenOverride ?? payload.Length;
+        return Ok;
+    }
+
+    public int OpenFileStatus { get; set; } = Ok;
+    public byte[] OpenFilePayloadToEmit { get; set; } = new byte[132];
+    public string? LastOpenFilePath { get; private set; }
+    public int OpenFileCallCount { get; private set; }
+
+    protected override int OpenFile(string path, Span<byte> destination, out int bytesRead)
+    {
+        OpenFileCallCount++;
+        LastOpenFilePath = path;
+
+        if (OpenFileStatus != Ok)
+        {
+            bytesRead = 0;
+            return OpenFileStatus;
+        }
+
+        OpenFilePayloadToEmit.CopyTo(destination);
+        bytesRead = OpenFilePayloadToEmit.Length;
         return Ok;
     }
 

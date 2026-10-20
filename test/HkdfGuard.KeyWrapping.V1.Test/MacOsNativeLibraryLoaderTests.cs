@@ -104,9 +104,9 @@ public class MacOsNativeLibraryLoaderTests
     [Fact]
     public void TheTwoLocations_AreTheAgreedPaths()
     {
-        Assert.Equal("/Library/Application Support/HkdfGuard/v1/libhkdfguard_v1.dylib", MacOsNativeLibraryLoader.SystemPath);
-        Assert.Equal("/Users/dev/.hkdfguard/v1/libhkdfguard_v1.dylib", MacOsNativeLibraryLoader.UserPath("/Users/dev"));
-        Assert.Equal("/Users/dev/.hkdfguard/v1/libhkdfguard_v1.dylib", MacOsNativeLibraryLoader.UserPath("/Users/dev/"));
+        Assert.Equal("/Library/Application Support/HkdfGuard/v1/libhkdfguard.dylib", MacOsNativeLibraryLoader.SystemPath);
+        Assert.Equal("/Users/dev/.hkdfguard/v1/libhkdfguard.dylib", MacOsNativeLibraryLoader.UserPath("/Users/dev"));
+        Assert.Equal("/Users/dev/.hkdfguard/v1/libhkdfguard.dylib", MacOsNativeLibraryLoader.UserPath("/Users/dev/"));
     }
 
     // lstat results for ChoosePath's probe.
@@ -172,7 +172,7 @@ public class MacOsNativeLibraryLoaderTests
             MacOsNativeLibraryLoader.ChoosePath(p => !p.StartsWith('/') && p.EndsWith(".dylib") ? Present : ENOENT, home));
 
         Assert.Contains(MacOsNativeLibraryLoader.SystemPath, ex.Message);
-        Assert.Contains(".hkdfguard/v1/libhkdfguard_v1.dylib", ex.Message);
+        Assert.Contains(".hkdfguard/v1/libhkdfguard.dylib", ex.Message);
     }
 
     [Theory]
@@ -358,7 +358,7 @@ public class MacOsNativeLibraryLoaderTests
     {
         Assert.Equal("MFW3T8R8J3", MacOsNativeLibraryLoader.TeamId);
         Assert.Equal(
-            "identifier \"libhkdfguard_v1\" and anchor apple generic"
+            "identifier \"libhkdfguard\" and anchor apple generic"
             + " and certificate 1[field.1.2.840.113635.100.6.2.6] exists"
             + " and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
             + " and certificate leaf[subject.OU] = \"MFW3T8R8J3\"",
@@ -396,15 +396,15 @@ public class MacOsNativeLibraryLoaderTests
     [Theory]
     [InlineData(null)]
     [InlineData("")]
-    [InlineData("/opt/lib:/usr/local/lib")] // set, but no libhkdfguard_v1.dylib in either
+    [InlineData("/opt/lib:/usr/local/lib")] // set, but no libhkdfguard.dylib in either
     public void RefuseShadowing_AllowsLoading_WhenNothingOnDyldLibraryPathHasTheLibrarysName(string? searchPath)
     {
         MacOsNativeLibraryLoader.RefuseShadowing(_ => searchPath, _ => false);
     }
 
     [Theory]
-    [InlineData("/tmp/decoy", "/tmp/decoy/libhkdfguard_v1.dylib")]
-    [InlineData("/opt/lib:/tmp/decoy/:/usr/local/lib", "/tmp/decoy/libhkdfguard_v1.dylib")] // any entry; a trailing slash is fine
+    [InlineData("/tmp/decoy", "/tmp/decoy/libhkdfguard.dylib")]
+    [InlineData("/opt/lib:/tmp/decoy/:/usr/local/lib", "/tmp/decoy/libhkdfguard.dylib")] // any entry; a trailing slash is fine
     public void RefuseShadowing_Refuses_WhenADyldLibraryPathDirectoryHoldsALibraryOfTheSameName(string searchPath, string decoy)
     {
         var ex = Assert.Throws<SecurityException>(() =>
@@ -434,9 +434,9 @@ public class MacOsNativeLibraryLoaderTests
     public void VerifyLoadedImage_Refuses_WhenDyldLoadedAnotherFile()
     {
         var ex = Assert.Throws<SecurityException>(() =>
-            MacOsNativeLibraryLoader.VerifyLoadedImage(MacOsNativeLibraryLoader.SystemPath, "/tmp/decoy/libhkdfguard_v1.dylib"));
+            MacOsNativeLibraryLoader.VerifyLoadedImage(MacOsNativeLibraryLoader.SystemPath, "/tmp/decoy/libhkdfguard.dylib"));
 
-        Assert.Contains("/tmp/decoy/libhkdfguard_v1.dylib", ex.Message);
+        Assert.Contains("/tmp/decoy/libhkdfguard.dylib", ex.Message);
         Assert.Contains(MacOsNativeLibraryLoader.SystemPath, ex.Message);
         Assert.Contains("unloaded", ex.Message);
     }
@@ -457,13 +457,13 @@ public class MacOsNativeLibraryLoaderTests
     }
 
     [Theory]
-    [InlineData("Windows", "HkdfGuardV1", 1)]   // Windows library on Windows: the Windows loader
+    [InlineData("Windows", "HkdfGuard.Kms.Windows.v1", 1)] // Windows library on Windows: the Windows loader
     [InlineData("OSX", "hkdfguard_v1", 2)]      // macOS library on macOS: the macOS loader
     [InlineData("Linux", "HkdfGuard.Kms.Linux.v1", 3)] // Linux library on Linux: the Linux loader
-    [InlineData("OSX", "HkdfGuardV1", 0)]       // a KMS library name on the wrong platform: default
+    [InlineData("OSX", "HkdfGuard.Kms.Windows.v1", 0)] // a KMS library name on the wrong platform: default
     [InlineData("Windows", "hkdfguard_v1", 0)]
     [InlineData("Linux", "hkdfguard_v1", 0)]
-    [InlineData("Linux", "HkdfGuardV1", 0)]
+    [InlineData("Linux", "HkdfGuard.Kms.Windows.v1", 0)]
     [InlineData("Windows", "HkdfGuard.Kms.Linux.v1", 0)]
     [InlineData("OSX", "HkdfGuard.Kms.Linux.v1", 0)]
     [InlineData("Windows", "wintrust.dll", 0)]  // any other import: default

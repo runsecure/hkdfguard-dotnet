@@ -29,9 +29,9 @@ Two separate things are installed:
 | Part | Where it comes from | What it does |
 |---|---|---|
 | The .NET libraries | NuGet, or a project reference | Everything your code calls |
-| `HkdfGuardV1.dll` and `hkdfguard-v1-initialize.exe` | The HkdfGuard native package, installed to `%ProgramFiles%\HkdfGuard\v1` | Hold and use the KEK |
+| `HkdfGuard.dll` and `hkdfguard.exe` | The HkdfGuard native package, installed to `%ProgramFiles%\HkdfGuard\v1` | Hold and use the KEK |
 
-The .NET library loads `HkdfGuardV1.dll` only from that folder, and only after checking its
+The .NET library loads `HkdfGuard.dll` only from that folder, and only after checking its
 folder permissions and its signature. It never searches `PATH` or your application folder.
 
 ## 1. Install the native package
@@ -44,7 +44,7 @@ Run the HkdfGuard installer as an administrator.
 Check that it installed:
 
 ```powershell
-Get-AuthenticodeSignature "$env:ProgramFiles\HkdfGuard\v1\HkdfGuardV1.dll" | Select-Object Status, SignerCertificate
+Get-AuthenticodeSignature "$env:ProgramFiles\HkdfGuard\v1\HkdfGuard.dll" | Select-Object Status, SignerCertificate
 ```
 
 `Status` must be `Valid`.
@@ -58,7 +58,7 @@ allowed.
 Open PowerShell **as administrator** and run:
 
 ```powershell
-& "$env:ProgramFiles\HkdfGuard\v1\hkdfguard-v1-initialize.exe" provision --service-name com.example.myapp
+& "$env:ProgramFiles\HkdfGuard\v1\hkdfguard.exe" provision --service-name com.example.myapp
 ```
 
 This creates the KEK in the TPM. Running it again is safe: if the KEK already exists, the command
@@ -143,13 +143,17 @@ A **key file** holds one wrapped DEK. It is useless without the KEK, so it is no
 usual sense, but its permissions still matter. Anyone who can replace it controls the key your
 application encrypts new data with.
 
-You create a key file once per release, or per key rotation, with `hkdfguard-v1-initialize wrap`.
-The tool reads the DEK on standard input, wraps it under the service's KEK, and writes the file
-with restricted permissions. Its `--group` option names the local group whose members can read
-the file.
+You create a key file once per release, or per key rotation, with `hkdfguard wrap`. The tool
+reads the DEK on standard input, wraps it under the service's KEK, and writes the file so that
+only its owner can read and write it. Its `--group` option adds a local group whose members can
+read the file too: the group your application's account is in.
 
-> **TODO (maintainer):** describe the exact permissions `wrap` puts on the key file, and whether
-> `wrap` must run elevated.
+Your application reads the key file through the native library, which refuses one that another
+account could have written or replaced. Keep key files in a folder only administrators can write
+to, reached through real folders (no links, junctions or short names like `PROGRA~1`).
+
+Whether `wrap` needs elevation, and which accounts may use a service's KEK, is up to the native
+library on each platform; see `hkdfguard wrap --help` and the native library's documentation.
 
 Where does the DEK come from? In a deployment pipeline, use `AesGcmPipelineDataProtector`. It
 generates a key in memory and can encrypt your configuration secrets under it. At the end of the
@@ -191,7 +195,7 @@ static void CreateKeyFile(string toolPath, string serviceName, string keyFilePat
     tool.StandardInput.Close();
     tool.WaitForExit();
     if (tool.ExitCode != 0)
-        throw new InvalidOperationException($"hkdfguard-v1-initialize wrap failed with exit code {tool.ExitCode}.");
+        throw new InvalidOperationException($"hkdfguard wrap failed with exit code {tool.ExitCode}.");
 }
 ```
 
@@ -199,7 +203,7 @@ Call it once:
 
 ```csharp
 CreateKeyFile(
-    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), @"HkdfGuard\v1\hkdfguard-v1-initialize.exe"),
+    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), @"HkdfGuard\v1\hkdfguard.exe"),
     serviceName: "com.example.myapp",
     keyFilePath: @"C:\ProgramData\MyApp\keys\v1.key",
     group: "HkdfGuardUsers");
@@ -236,16 +240,19 @@ still decrypt as long as their key file stays registered.
 |---|---|---|
 | `DllNotFoundException` naming `%ProgramFiles%\HkdfGuard\v1` | The native package isn't installed | Step 1 |
 | `SecurityException` | The installed DLL, or a folder above it, failed verification: wrong signature, or writable by non-administrators | Reinstall the native package; don't change that folder's permissions |
-| `CryptographicException` ... `status -12` | No KEK is provisioned for this service name | Step 2, with the same service name |
-| `CryptographicException` ... `status -13` | The KEK exists, but this account may not use it | Add the account to `HkdfGuardUsers`, then sign out and in |
-| `CryptographicException` ... `status -11` | The key file was wrapped under a different service's KEK | Use the service name the file was created with |
-| `CryptographicException` ... `status -5` | The key file was altered | Restore it from your deployment artifacts |
+| `CryptographicException` ... `status -17` | No KEK is provisioned for this service name | Step 2, with the same service name |
+| `CryptographicException` ... `status -18` | The KEK exists, but this account may not use it | Add the account to `HkdfGuardUsers`, then sign out and in |
+| `CryptographicException` ... `status -16` | The key file was wrapped under a different service's KEK | Use the service name the file was created with |
+| `CryptographicException` ... `status -11` | The key file was altered | Restore it from your deployment artifacts |
+| `UnauthorizedAccessException` ... `status -39` | The key file's path isn't trusted: a link, junction or short name in it, or a file or folder another account can write | Move the file to a folder only administrators can write to, and use its full path |
+| `InvalidDataException` ... `status -37` | The "key file" holds what looks like an **unwrapped** key | Treat the key as exposed: replace it, and create the file with `wrap` |
+| `InvalidDataException` ... `status -35`, `-36` or `-38` | The file isn't a key file: wrong size, or not a valid wrapped key | Check the path; recreate it with `wrap` |
 | `ArgumentException` about the service name | The name breaks the rule in step 2 | Use letters, digits and dots only |
 
 Every native error message includes the status code and its meaning.
 
 ## Next steps
 
-- [`hkdfguard-v1-initialize` reference](reference/cli.md): every command and option.
+- [`hkdfguard` reference](reference/cli.md): every command and option.
 - The README's *Key rotation*, *Pipeline protection* and *Diagnostics* sections, until their how-to
   pages are written.

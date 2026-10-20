@@ -1,3 +1,4 @@
+using HkdfGuard.Abstractions;
 using System.Security.Cryptography;
 using HkdfGuard.KeyWrapping.V1.Interop;
 using HkdfGuard.KeyWrapping.V1.Test.TestHelpers;
@@ -36,9 +37,9 @@ public class NativeHkdfKeyWrapperV1Tests
     }
 
     [Theory]
-    [InlineData(-1)]
-    [InlineData(-2)]
-    [InlineData(-7)]
+    [InlineData(-7)]  // reserved codes: no platform returns them, so there is no meaning to add
+    [InlineData(-13)]
+    [InlineData(-40)]
     public async Task WrapAsync_WhenLibraryFails_ThrowsCryptographicException(int errorCode)
     {
         var fakeLibrary = new FakeHkdfGuardKmsLibrary
@@ -95,9 +96,9 @@ public class NativeHkdfKeyWrapperV1Tests
     }
 
     [Theory]
-    [InlineData(-1)]
-    [InlineData(-2)]
-    [InlineData(-6)]
+    [InlineData(-7)]  // reserved codes: no platform returns them, so there is no meaning to add
+    [InlineData(-13)]
+    [InlineData(-40)]
     public async Task UnwrapAsync_WhenLibraryFails_ThrowsCryptographicException(int errorCode)
     {
         var fakeLibrary = new FakeHkdfGuardKmsLibrary
@@ -138,9 +139,9 @@ public class NativeHkdfKeyWrapperV1Tests
     }
 
     [Theory]
-    [InlineData(-1)]
-    [InlineData(-3)]
-    [InlineData(-7)]
+    [InlineData(-7)]  // reserved codes: no platform returns them, so there is no meaning to add
+    [InlineData(-13)]
+    [InlineData(-40)]
     public async Task GenerateAndWrapAsync_WhenLibraryFails_ThrowsCryptographicException(int errorCode)
     {
         var fakeLibrary = new FakeHkdfGuardKmsLibrary
@@ -192,5 +193,69 @@ public class NativeHkdfKeyWrapperV1Tests
             await wrapper.GenerateAndWrapAsync(new byte[64], new CancellationToken(true)));
 
         Assert.Equal(0, fakeLibrary.GenerateAndWrapCallCount);
+    }
+
+    [Fact]
+    public async Task AFailure_NamesTheStatusAndItsSharedMeaning()
+    {
+        var fakeLibrary = new FakeHkdfGuardKmsLibrary { UnwrapDekStatus = AbstractHkdfGuardKmsLibrary.ErrKekNotFound };
+        var wrapper = new NativeHkdfKeyWrapperV1("service.d", fakeLibrary);
+
+        var exception = await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await wrapper.UnwrapAsync(new byte[] { 1 }, new byte[32]));
+
+        Assert.Equal("Native KMS unwrap failed for service 'service.d' with status -17 "
+            + "(no KEK is provisioned for this service; run hkdfguard provision).", exception.Message);
+    }
+
+    [Fact]
+    public async Task ReadKeyFileAsync_ReadsThroughTheNativeLibrary_NotDotNetFileIo()
+    {
+        var payload = Enumerable.Range(0, 132).Select(i => (byte)i).ToArray();
+        var fakeLibrary = new FakeHkdfGuardKmsLibrary { OpenFilePayloadToEmit = payload };
+        var wrapper = new NativeHkdfKeyWrapperV1("service.h", fakeLibrary);
+
+        // The path doesn't exist: only the native library is asked about it.
+        var read = await wrapper.ReadKeyFileAsync(@"C:\no\such\dek.bin");
+
+        Assert.Equal(payload, read);
+        Assert.Equal(1, fakeLibrary.OpenFileCallCount);
+        Assert.Equal(@"C:\no\such\dek.bin", fakeLibrary.LastOpenFilePath);
+    }
+
+    [Fact]
+    public async Task ReadKeyFileAsync_ThroughTheInterface_ReachesTheNativeLibrary()
+    {
+        var fakeLibrary = new FakeHkdfGuardKmsLibrary();
+        IKeyWrapper wrapper = new NativeHkdfKeyWrapperV1("service.h", fakeLibrary);
+
+        await wrapper.ReadKeyFileAsync("dek.bin");
+
+        Assert.Equal(1, fakeLibrary.OpenFileCallCount);
+    }
+
+    [Fact]
+    public async Task ReadKeyFileAsync_SurfacesARefusalThroughTheReturnedTask()
+    {
+        var fakeLibrary = new FakeHkdfGuardKmsLibrary { OpenFileStatus = AbstractHkdfGuardKmsLibrary.ErrFilePlaintextKey };
+        var wrapper = new NativeHkdfKeyWrapperV1("service.h", fakeLibrary);
+
+        var read = wrapper.ReadKeyFileAsync("dek.bin");
+
+        Assert.True(read.IsFaulted);
+        var thrown = await Assert.ThrowsAsync<InvalidDataException>(async () => await read);
+        Assert.Contains("key exposure", thrown.Message);
+    }
+
+    [Fact]
+    public async Task ReadKeyFileAsync_WhenCancelled_DoesNotCallLibrary()
+    {
+        var fakeLibrary = new FakeHkdfGuardKmsLibrary();
+        var wrapper = new NativeHkdfKeyWrapperV1("service.h", fakeLibrary);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await wrapper.ReadKeyFileAsync("dek.bin", new CancellationToken(true)));
+
+        Assert.Equal(0, fakeLibrary.OpenFileCallCount);
     }
 }

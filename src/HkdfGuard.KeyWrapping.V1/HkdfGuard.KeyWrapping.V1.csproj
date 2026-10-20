@@ -16,14 +16,11 @@
   <!--
     No native library is packed into this package. Each platform's native KMS library is installed
     separately, to a fixed location, and loaded only from there after verification:
-      Windows: %ProgramFiles%\HkdfGuard\v1\HkdfGuardV1.dll        (WindowsNativeLibraryLoader)
-      macOS:   /Library/Application Support/HkdfGuard/v1/libhkdfguard_v1.dylib, or
-               ~/.hkdfguard/v1/libhkdfguard_v1.dylib               (MacOsNativeLibraryLoader)
+      Windows: %ProgramFiles%\HkdfGuard\v1\HkdfGuard.dll        (WindowsNativeLibraryLoader)
+      macOS:   /Library/Application Support/HkdfGuard/v1/libhkdfguard.dylib, or
+               ~/.hkdfguard/v1/libhkdfguard.dylib               (MacOsNativeLibraryLoader)
       Linux:   /usr/lib/<multiarch>/libhkdfguard.so.1, or
                /usr/lib64/libhkdfguard.so.1 (libhkdfguard1 package) (LinuxNativeLibraryLoader)
-    A local, git-ignored runtimes/ folder may hold native release artifacts and their SHA256SUMS
-    for reference; when present, NativeRuntimesTests keeps them byte-exact, but nothing here ships
-    or loads them.
   -->
 
 </Project>
