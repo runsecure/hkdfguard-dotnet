@@ -703,7 +703,7 @@ On a Linux host with a TPM, the package installs no policy or TPM derivation sec
 can be provisioned until root adds them. `scripts/provision-linux-test-key.sh` does that for a test
 host: run it once with `sudo` from the account that runs the tests (which must be in the `tss`
 group). It creates the derivation secret if there is none, writes a policy that requires the TPM
-and pins the two test services' TPM Names, and confirms both as that account. It never replaces a
+and pins the test service's TPM Name, and confirms it as that account. It never replaces a
 policy it didn't write or an existing secret; `--remove` removes its policy again. With it in place,
 `LinuxNativeIntegrationTests` also run: they check the exact Linux status codes, the native
 library's own service-name and length checks, that a failed unwrap zeroes the caller's buffer,
@@ -713,7 +713,6 @@ that tampering anywhere in a payload is refused, and that a key file written by
 ```bash
 sudo scripts/provision-linux-test-key.sh
 HKDFGUARD_TEST_SERVICE=com.hkdfguard.integration.test.221 \
-HKDFGUARD_TEST_SERVICE_OTHER=com.hkdfguard.integration.test.221.other \
 dotnet test test/HkdfGuard.KeyWrapping.V1.Test
 ```
 

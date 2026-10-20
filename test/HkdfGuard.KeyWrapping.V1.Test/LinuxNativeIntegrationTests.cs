@@ -12,7 +12,6 @@ namespace HkdfGuard.KeyWrapping.V1.Test;
 /// <code>
 /// sudo scripts/provision-linux-test-key.sh
 /// HKDFGUARD_TEST_SERVICE=com.hkdfguard.integration.test.221 \
-/// HKDFGUARD_TEST_SERVICE_OTHER=com.hkdfguard.integration.test.221.other \
 /// dotnet test test/HkdfGuard.KeyWrapping.V1.Test
 /// </code>
 /// NativeKeyWrappingIntegrationTests covers what every platform shares; these pin down the exact
