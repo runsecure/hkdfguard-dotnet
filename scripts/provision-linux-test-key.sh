@@ -3,7 +3,7 @@
 # Provisions the TPM-backed KEKs the native integration tests use on Linux.
 #
 # The libhkdfguard1 package installs no policy and no TPM derivation secret, so on a fresh host
-# every wrap fails with "no KEK is provisioned" (-9). This script, run once with sudo from the
+# every wrap fails with "no KEK is provisioned" (-17). This script, run once with sudo from the
 # account that runs the tests:
 #
 #   1. checks the installed hkdfguard packages against dpkg's checksums, and that the test
@@ -26,6 +26,10 @@
 #   HKDFGUARD_TEST_SERVICE_OTHER=com.hkdfguard.integration.test.221.other \
 #   dotnet test test/HkdfGuard.KeyWrapping.V1.Test
 #
+# Every HkdfGuard port's copy of this script (.NET, Go, Java, Node, Python) writes the same
+# policy under its own marker, and each accepts the others', so one host can run every port's
+# native tests.
+#
 # Usage:
 #   sudo scripts/provision-linux-test-key.sh            # provision
 #   sudo scripts/provision-linux-test-key.sh --remove   # remove the policy this script wrote
@@ -43,6 +47,15 @@ readonly ETC_DIR="/etc/hkdfguard"
 readonly POLICY="${ETC_DIR}/policy.toml"
 readonly SECRET="${ETC_DIR}/tpm.derivation-secret"
 readonly MARKER="# Written by hkdfguard-dotnet scripts/provision-linux-test-key.sh - test hosts only."
+# Every port's copy of this script writes the same policy under its own marker; any of them
+# counts as ours.
+readonly KNOWN_MARKERS=(
+    "# Written by hkdfguard-dotnet scripts/provision-linux-test-key.sh - test hosts only."
+    "# Written by hkdfguard-go keywrapping/nativev1/scripts/provision-linux-test-key.sh - test hosts only."
+    "# Written by hkdfguard-java scripts/provision-linux-test-key.sh - test hosts only."
+    "# Written by hkdfguard-node packages/keywrapping-native-v1/scripts/provision-linux-test-key.sh - test hosts only."
+    "# Written by hkdfguard-python scripts/provision-linux-test-key.sh - test hosts only."
+)
 
 die() { echo "error: $*" >&2; exit 1; }
 note() { echo "==> $*"; }
@@ -57,7 +70,15 @@ case "${1-}" in
     *) die "unknown argument '$1' (expected --remove or nothing)" ;;
 esac
 
-policy_is_ours() { [[ -f ${POLICY} ]] && head -n 1 "${POLICY}" | grep -qxF "${MARKER}"; }
+policy_is_ours() {
+    [[ -f ${POLICY} ]] || return 1
+    local first marker
+    first="$(head -n 1 "${POLICY}")"
+    for marker in "${KNOWN_MARKERS[@]}"; do
+        [[ ${first} == "${marker}" ]] && return 0
+    done
+    return 1
+}
 
 if ${remove}; then
     if [[ ! -e ${POLICY} ]]; then

@@ -728,7 +728,10 @@ passed - where its platform, library or service isn't there:
   installed-library cases run wherever `%ProgramFiles%\HkdfGuard\v1\HkdfGuard.dll` is installed;
   the round trips also need a provisioned KEK - `HKDFGUARD_TEST_SERVICE`, or
   `com.hkdfguard.integration.test.221` (`scripts/provision-windows-test-key.ps1`), which the
-  installed library's `hkdfguard_kek_exists` confirms.
+  installed library's `hkdfguard_kek_exists` confirms. The script also retires the legacy
+  per-platform test KEK `com.hkdfguard.native.windows.test`, after asking (`-KeepLegacyKey` keeps
+  it), and `-Remove` retires the test KEKs instead - each only after `hkdfguard status` confirms its
+  fingerprint (`-WhatIf` shows what would be deleted).
 - **Linux** - `LinuxNativeLibraryLoaderSystemTests` run against the real filesystem and dynamic
   linker on any Linux host, with their installed-library cases needing the `libhkdfguard1`
   package; `LinuxNativeIntegrationTests` also need `HKDFGUARD_TEST_SERVICE`, and some
