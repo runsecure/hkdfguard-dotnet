@@ -88,7 +88,7 @@ public static class NativeTestEnvironment
     /// <summary>
     /// The test KEK every platform's tests use, in every HkdfGuard port: on Windows
     /// scripts/provision-windows-test-key.ps1 provisions it, on Linux
-    /// scripts/provision-linux-test-key.sh, on macOS hkdfguard-v1-initialize provision (or
+    /// scripts/provision-linux-test-key.sh, on macOS hkdfguard provision (or
     /// hkdfguard-go's scripts/provision-macos-test-key.sh). Used when <see cref="ServiceVariable"/>
     /// is unset and, on Windows and macOS, the installed library or provisioning tool reports it
     /// exists.
@@ -247,7 +247,7 @@ public static class NativeTestEnvironment
 
     /// <summary>
     /// The macOS default: <see cref="DefaultServiceName"/>, as the installed
-    /// hkdfguard-v1-initialize (beside the library the loader would choose) reports it. The tool
+    /// hkdfguard (beside the library the loader would choose) reports it. The tool
     /// created the KEK, so it is on the keychain item's access list and never prompts; asking the
     /// library from this process would. Skipped only when the library isn't installed or the tool
     /// reports the KEK absent; any other answer runs the tests, so a real failure is reported.
@@ -347,7 +347,7 @@ public sealed class MacOsFactAttribute : FactAttribute
 /// <summary>
 /// A test that needs the real macOS native KMS library installed at one of its two supported
 /// locations (MacOsNativeLibraryLoader.SystemPath, or ~/.hkdfguard/v1); reported as skipped when
-/// it isn't. <see cref="NeedsProvisioningTool"/> also needs hkdfguard-v1-initialize beside it.
+/// it isn't. <see cref="NeedsProvisioningTool"/> also needs hkdfguard beside it.
 /// </summary>
 public sealed class InstalledMacOsLibraryFactAttribute : FactAttribute
 {

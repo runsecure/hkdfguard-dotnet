@@ -7,12 +7,12 @@ namespace HkdfGuard.KeyWrapping.V1.Test.TestHelpers;
 
 /// <summary>
 /// The macOS install the native tests run against: the library MacOsNativeLibraryLoader would
-/// choose, and the hkdfguard-v1-initialize provisioning tool installed beside it.
+/// choose, and the hkdfguard provisioning tool installed beside it.
 /// </summary>
 [SupportedOSPlatform("macos")]
 internal static class MacOsTestEnvironment
 {
-    public const string ProvisioningToolName = "hkdfguard-v1-initialize";
+    public const string ProvisioningToolName = "hkdfguard";
 
     private static readonly TimeSpan ToolTimeout = TimeSpan.FromSeconds(60);
 

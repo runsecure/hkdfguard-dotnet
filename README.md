@@ -306,8 +306,7 @@ await wrapper.UnwrapAsync(wrapped.AsMemory(0, written), dek);
 ABI has no concept of Additional Authenticated Data, so `IKeyWrapper` has no AAD parameter.
 
 No native library creates a KEK during wrap or unwrap. Provision each service once with
-`hkdfguard provision --service-name <name>` (elevated on Windows; the macOS tool is still named
-`hkdfguard-v1-initialize`), or every call fails.
+`hkdfguard provision --service-name <name>` (elevated on Windows), or every call fails.
 A service name is 1-128 ASCII letters, digits or dots, never starts with a dot and never contains
 `..`, so `my.service` rather than `my-service`. `ServiceNames` holds the rule. `NativeHkdfKeyWrapperV1`,
 `KeyRingBuilder.WithServiceName` and the options validator all enforce it, so a bad name fails
@@ -318,12 +317,11 @@ Where each platform's library comes from:
 | Platform | Library | How it is found |
 |---|---|---|
 | Windows | `HkdfGuard.dll` | Installed to `%ProgramFiles%\HkdfGuard\v1` and loaded only from there. Not shipped in the package. |
-| macOS | `libhkdfguard_v1.dylib` | Installed system-wide to `/Library/Application Support/HkdfGuard/v1`, or per user to `~/.hkdfguard/v1`, and loaded only from there. Not shipped in the package. Requires Apple silicon and macOS 13 or later, with an arm64 .NET runtime (not an x64 one under Rosetta). |
+| macOS | `libhkdfguard.dylib` | Installed system-wide to `/Library/Application Support/HkdfGuard/v1`, or per user to `~/.hkdfguard/v1`, and loaded only from there. Not shipped in the package. Requires Apple silicon and macOS 13 or later, with an arm64 .NET runtime (not an x64 one under Rosetta). |
 | Linux | `libhkdfguard.so.1` | Installed by the `libhkdfguard1` package (`hkdfguard-libs` on RPM distributions) to `/usr/lib/<multiarch>` or `/usr/lib64`, and loaded only from there. Not shipped in the package. x64 and arm64. |
 
 The NuGet package contains no native library. Each one is distributed and installed separately,
-together with its provisioning tool: `hkdfguard` on Windows and Linux, `hkdfguard-v1-initialize` on
-macOS.
+together with its provisioning tool, `hkdfguard`.
 
 The library sees every DEK, so it is never located by a search path.
 
@@ -362,14 +360,14 @@ system install that merely can't be examined (say, a directory this process may 
   above an install (`/`, `/Library`, `/Library/Application Support`, `/Users`), which may also be
   writable by the `wheel` or `admin` group when root owns them, as `/Library/Application Support`
   often is. The install's own directories and the library file never are.
-- The file's code signature is valid, carries the identifier `libhkdfguard_v1`, and was made with
+- The file's code signature is valid, carries the identifier `libhkdfguard`, and was made with
   a Developer ID Application certificate issued through Apple's CA to the HkdfGuard team
   (`MFW3T8R8J3`). A development-signed build, or any other binary the team signs, is refused.
 
 `dlopen` of an absolute path does not load exactly that path: dyld first looks for the file's
 name in every `DYLD_LIBRARY_PATH` directory, and the `dotnet` host honours `DYLD_*` variables
 despite its hardened runtime. So the loader refuses, before loading, if a `DYLD_LIBRARY_PATH`
-directory contains a `libhkdfguard_v1.dylib`; and after loading it asks dyld which file it really
+directory contains a `libhkdfguard.dylib`; and after loading it asks dyld which file it really
 mapped, unloading and refusing anything but the verified path. The library's own dependencies are
 absolute system paths and need no such check.
 
@@ -782,10 +780,10 @@ passed - where its platform, library or service isn't there:
   (0700) folder under `$XDG_RUNTIME_DIR` or `~/.cache/hkdfguard-tests` - never `/tmp` - and are
   reported as skipped, with the reason, where neither is trusted.
 - **macOS** - `MacOsNativeIntegrationTests` run on macOS against the real filesystem and Security
-  framework, with their installed-library cases needing `libhkdfguard_v1.dylib` at
-  `/Library/Application Support/HkdfGuard/v1` (or `~/.hkdfguard/v1`) and `hkdfguard-v1-initialize`
+  framework, with their installed-library cases needing `libhkdfguard.dylib` at
+  `/Library/Application Support/HkdfGuard/v1` (or `~/.hkdfguard/v1`) and `hkdfguard`
   beside it. The shared round trips run against `HKDFGUARD_TEST_SERVICE`, or
-  `com.hkdfguard.integration.test.221` when `hkdfguard-v1-initialize status` reports it present.
+  `com.hkdfguard.integration.test.221` when `hkdfguard status` reports it present.
   The first call under that service from a freshly built test host can raise a keychain dialog
   ("Always Allow"); if nobody answers it within 60 seconds the tests fail and say so, rather than
   hang.
