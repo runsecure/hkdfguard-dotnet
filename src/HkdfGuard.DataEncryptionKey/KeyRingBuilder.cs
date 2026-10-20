@@ -299,7 +299,9 @@ public sealed class KeyRingBuilder
         {
             foreach (var (version, path) in _keyFiles)
             {
-                var wrapped = await ReadKeyFileAsync(path, cancellationToken).ConfigureAwait(false);
+                // Read through the key wrapper: a native KMS reads its own key files, with its own
+                // checks on who could have written them.
+                var wrapped = await _keyWrapper.ReadKeyFileAsync(path, cancellationToken).ConfigureAwait(false);
                 var provider = await _cryptoProviderFactory
                     .CreateAsync(_keyWrapper, wrapped, KeyRefreshInterval.Value, MaxRefreshFailures, cancellationToken)
                     .ConfigureAwait(false);
@@ -334,38 +336,6 @@ public sealed class KeyRingBuilder
             await ring.DisposeAsync().ConfigureAwait(false);
             throw;
         }
-    }
-
-    /// <summary>
-    /// Reads a wrapped DEK, refusing an empty file or one over WrappedKeyLimits.MaxBytes. Never
-    /// reads more than one byte past the limit, whatever the file's size - so a wrong path (a log,
-    /// a device) or a file still growing can't make startup allocate an unbounded buffer.
-    /// </summary>
-    /// <exception cref="InvalidDataException">The file is empty or larger than the limit</exception>
-    private static async Task<byte[]> ReadKeyFileAsync(string path, CancellationToken cancellationToken)
-    {
-        await using var stream = new FileStream(path, new FileStreamOptions
-        {
-            Mode = FileMode.Open,
-            Access = FileAccess.Read,
-            Share = FileShare.Read,
-            Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
-        });
-
-        var buffer = new byte[WrappedKeyLimits.MaxBytes + 1];
-        var total = 0;
-        int read;
-        while (total < buffer.Length
-               && (read = await stream.ReadAsync(buffer.AsMemory(total), cancellationToken).ConfigureAwait(false)) > 0)
-            total += read;
-
-        if (total == 0)
-            throw new InvalidDataException($"Key file '{path}' is empty.");
-        if (total > WrappedKeyLimits.MaxBytes)
-            throw new InvalidDataException(
-                $"Key file '{path}' is larger than {WrappedKeyLimits.MaxBytes} bytes (WrappedKeyLimits.MaxBytes); a wrapped key never is.");
-
-        return buffer[..total];
     }
 
     private static async Task AddOwnedAsync(KeyRing ring, int version, ICryptoProvider provider)

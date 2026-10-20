@@ -305,7 +305,7 @@ await wrapper.UnwrapAsync(wrapped.AsMemory(0, written), dek);
 ABI has no concept of Additional Authenticated Data, so `IKeyWrapper` has no AAD parameter.
 
 No native library creates a KEK during wrap or unwrap. Provision each service once with
-`hkdfguard-v1-initialize provision --service-name <name>` (elevated on Windows), or every call fails.
+`hkdfguard provision --service-name <name>` (elevated on Windows), or every call fails.
 A service name is 1-128 ASCII letters, digits or dots, never starts with a dot and never contains
 `..`, so `my.service` rather than `my-service`. `ServiceNames` holds the rule. `NativeHkdfKeyWrapperV1`,
 `KeyRingBuilder.WithServiceName` and the options validator all enforce it, so a bad name fails
@@ -315,12 +315,12 @@ Where each platform's library comes from:
 
 | Platform | Library | How it is found |
 |---|---|---|
-| Windows | `HkdfGuardV1.dll` | Installed to `%ProgramFiles%\HkdfGuard\v1` and loaded only from there. Not shipped in the package. |
-| macOS | `libhkdfguard_v1.dylib` | Installed system-wide to `/Library/Application Support/HkdfGuard/v1`, or per user to `~/.hkdfguard/v1`, and loaded only from there. Not shipped in the package. Requires Apple silicon and macOS 13 or later, with an arm64 .NET runtime (not an x64 one under Rosetta). |
+| Windows | `HkdfGuard.dll` | Installed to `%ProgramFiles%\HkdfGuard\v1` and loaded only from there. Not shipped in the package. |
+| macOS | `libhkdfguard.dylib` | Installed system-wide to `/Library/Application Support/HkdfGuard/v1`, or per user to `~/.hkdfguard/v1`, and loaded only from there. Not shipped in the package. Requires Apple silicon and macOS 13 or later, with an arm64 .NET runtime (not an x64 one under Rosetta). |
 | Linux | `libhkdfguard.so.1` | Installed by the `libhkdfguard1` package (`hkdfguard-libs` on RPM distributions) to `/usr/lib/<multiarch>` or `/usr/lib64`, and loaded only from there. Not shipped in the package. x64 and arm64. |
 
 The NuGet package contains no native library. Each one is distributed and installed separately,
-together with its `hkdfguard-v1-initialize` provisioning tool.
+together with its provisioning tool, `hkdfguard`.
 
 The library sees every DEK, so it is never located by a search path.
 
@@ -340,7 +340,7 @@ On **Windows**, before mapping it, `WindowsNativeLibraryLoader` requires all of 
   pinned, because Artifact Signing reissues them often. No revocation check or certificate download
   is made, so loading never touches the network.
 - The signed PE header marks the file as a DLL for the process's architecture. The publisher's
-  other signed binaries, such as `hkdfguard-v1-initialize.exe`, pass the signature checks, so
+  other signed binaries, such as `hkdfguard.exe`, pass the signature checks, so
   this check is what refuses one renamed into place.
 
 Its dependencies are then loaded from System32 only. Any failed check throws, with no fallback, so
@@ -359,14 +359,14 @@ system install that merely can't be examined (say, a directory this process may 
   above an install (`/`, `/Library`, `/Library/Application Support`, `/Users`), which may also be
   writable by the `wheel` or `admin` group when root owns them, as `/Library/Application Support`
   often is. The install's own directories and the library file never are.
-- The file's code signature is valid, carries the identifier `libhkdfguard_v1`, and was made with
+- The file's code signature is valid, carries the identifier `libhkdfguard`, and was made with
   a Developer ID Application certificate issued through Apple's CA to the HkdfGuard team
   (`MFW3T8R8J3`). A development-signed build, or any other binary the team signs, is refused.
 
 `dlopen` of an absolute path does not load exactly that path: dyld first looks for the file's
 name in every `DYLD_LIBRARY_PATH` directory, and the `dotnet` host honours `DYLD_*` variables
 despite its hardened runtime. So the loader refuses, before loading, if a `DYLD_LIBRARY_PATH`
-directory contains a `libhkdfguard_v1.dylib`; and after loading it asks dyld which file it really
+directory contains a `libhkdfguard.dylib`; and after loading it asks dyld which file it really
 mapped, unloading and refusing anything but the verified path. The library's own dependencies are
 absolute system paths and need no such check.
 
@@ -378,9 +378,6 @@ Before loading, it requires all of the following:
   and no directory or file is writable by its group or by others. Links are followed one component
   at a time and each target is checked where it lies, so `/lib -> usr/lib` passes and a link into a
   user's directory does not.
-- The file's SHA-256 is a release this version of `HkdfGuard.KeyWrapping.V1` lists. Linux has no
-  platform code signature, so this pin is the content check. Each distribution and architecture
-  has its own build, and a release that isn't listed is refused until the package lists it.
 - The dynamic linker's environment can't substitute anything. `dlopen` of an absolute path is
   never searched for, but the library's dependencies are found by name - and `libtss2-esys`
   receives every ECDH shared secret. So every `LD_LIBRARY_PATH` directory, and every path-named
@@ -396,12 +393,54 @@ the loader's reach: the TPM transport module tpm2-tss loads at the first TPM cal
 environment check covers, and the .NET runtime's own injection points (startup hooks, CLR
 profilers), which need a protected service environment on every platform.
 
-On Linux, `NativeProcessHardening.Apply()` also exposes the library's opt-in process hardening:
-core dumps off (hard limit included) and the process marked non-dumpable, so other unprivileged
-processes of the same user can't attach a debugger or read its memory. It is process-wide, so
-debuggers and `dotnet-dump` stop working; call it once, early, after any privilege drop. It does not
-stop root or `CAP_SYS_PTRACE`, nor keep memory out of swap. Other platforms throw
-`PlatformNotSupportedException`.
+Linux has no platform code signature, and the loader does not pin the file's content. Verify a
+native Linux release's Sigstore build-provenance attestation (with `cosign` or
+`gh attestation verify`) before installing its package; the loader then relies on path integrity.
+
+### Process hardening
+
+DEKs pass through your process's memory, so a crash dump, or another process of the same user
+attaching a debugger or reading that memory, could recover them. `NativeProcessHardening.Apply()`
+calls the native library's `hkdfguard_harden_process_with_flags` to close that off, on every
+platform:
+
+| Platform | What it does |
+|---|---|
+| Windows | Crash reports leave out the heap, and the process's and its threads' access lists are replaced so only SYSTEM can read or write its memory, inject threads or duplicate its handles. Its own account keeps only query, synchronize and terminate. |
+| Linux | Core dumps off (hard limit included), and the process marked non-dumpable, which also stops ptrace and `/proc/<pid>/mem` access by the same user. |
+| macOS | Core dumps off and debugger attachment denied. Whether code can be injected depends on the host executable's code signature, which the library checks but can't change. |
+
+Neither the native library nor any machine policy does this for you: it changes process-wide
+state your application owns, so it is opt-in. Call it once, early in startup - before starting
+worker threads on Windows, and after any privilege drop on Linux:
+
+```csharp
+NativeProcessHardening.Apply();   // throws InvalidOperationException if it fails: don't start
+```
+
+Debuggers, `dotnet-dump` and crash dumps stop working for the process. It is a same-user barrier:
+it does not stop administrators, root, SYSTEM, `SeDebugPrivilege`, `CAP_SYS_PTRACE` or the kernel,
+and it does not keep memory out of swap, the page file or hibernation files.
+
+`NativeProcessHardening.Apply(ProcessHardeningOptions.RequireProtectedSignature)` is the strict
+form the native command-line tools use: it fails unless no other process of the same user can
+debug or inject into this one.
+
+- **Windows:** it also closes threads started later, and everything else the process creates
+  afterwards without its own security descriptor (child processes, named pipes, named events), to
+  its own account. Use it in a service that shares no objects with other processes by name.
+- **macOS:** it fails unless the host executable is signed with the Hardened Runtime and without
+  the `get-task-allow` or `DYLD_*` entitlements, so unsigned hosts such as `dotnet` itself can't
+  use it. Without it, a weak signature is only logged.
+- **Linux:** it adds nothing; the plain call already guarantees it.
+
+**.NET on Windows:** the plain call closes the threads that exist when it runs, and threads started
+later keep the default access, which lets other processes of the same user read and change their
+registers. A .NET application can't call it "before starting threads": the runtime starts threads of
+its own before `Main` runs (the finalizer thread, for one), and keeps adding more whenever it needs
+them - thread-pool workers for `async` I/O, timers and `Task.Run`. Calling it first thing in `Main`
+covers the threads that exist then, not the ones the runtime adds later, so **use
+`RequireProtectedSignature` for a Windows service**: it closes later threads too.
 
 ### 2. Build a `KeyRing`
 
@@ -414,9 +453,16 @@ files - one per version - then reads each file, mints its own `ICryptoProvider` 
 `IKeyWrapper`/`ICryptoProviderFactory`, so no extra configuration is needed for it. Range checks
 happen in the setters (`WithServiceName`, `WithKeyRefreshInterval`, `WithMaxRefreshFailures`); `BuildAsync` checks that a key
 wrapper, a crypto provider factory, a key refresh interval (there's no default), and at least one key
-were configured. Each key file must hold 1 to `WrappedKeyLimits.MaxBytes` (512) bytes; `BuildAsync`
-never reads more than one byte past that, so pointing it at the wrong file can't make startup
-allocate an unbounded buffer. The limit leaves room for larger keys and extra fingerprinting
+were configured. `BuildAsync` reads every key file through the key wrapper
+(`IKeyWrapper.ReadKeyFileAsync`). `NativeHkdfKeyWrapperV1` reads it through the native library's
+`hkdfguard_open_file`, which refuses a key file another account could have written or replaced (a
+link, junction or short name in its path, or loose ownership or permissions), and one that holds
+what looks like an unwrapped key: a refusal is a `FileNotFoundException`,
+`UnauthorizedAccessException` or `InvalidDataException` naming the native status (see
+[the CLI reference](docs/reference/cli.md#status-codes)). Other key wrappers read with ordinary
+file I/O by default (`WrappedKeyFile.ReadAsync`): each key file must hold 1 to
+`WrappedKeyLimits.MaxBytes` (512) bytes, and no more than one byte past that is ever read, so
+pointing it at the wrong file can't make startup allocate an unbounded buffer. The limit leaves room for larger keys and extra fingerprinting
 beyond today's 156-byte macOS payload; raising that one constant also resizes the buffer an
 ephemeral key is generated into. If anything fails or is cancelled partway through, every provider
 it already created is disposed.
@@ -556,7 +602,8 @@ buffers can't be cleared:
 var start = new ProcessStartInfo(initializeToolPath) { RedirectStandardInput = true, UseShellExecute = false };
 foreach (var arg in new[] { "wrap", "--service-name", "my.service", "--key-file-path", keyFilePath, "--dek-stdin" })
     start.ArgumentList.Add(arg);
-// Windows also requires --group <the local group allowed to read the key file>.
+// Add --group <a local group> to let your application's account read the key file; without it,
+// only the file's owner can.
 
 using var tool = Process.Start(start)!;
 var base64Key = protector.GetKeyAsBase64();
@@ -576,7 +623,7 @@ tool.WaitForExit();
 protector.Dispose(); // zeroes the key and its base64 form
 ```
 
-The macOS tool also accepts `--dek-file <path>`. Prefer stdin: a file leaves the key on disk until
+Every platform's tool also accepts `--dek-file <path>`. Prefer stdin: a file leaves the key on disk until
 it is securely deleted. On macOS, pass `--fingerprint <hex>` as well, so the tool refuses to write a
 key file under any KEK other than the one recorded at provisioning.
 
@@ -634,7 +681,8 @@ Every library is at 100% line and branch coverage, with two documented exception
   everywhere: the Windows checks run against the real installed DLL on Windows, the macOS and
   Linux checks run against simulated filesystems on every platform, and the Linux checks also run
   against the real filesystem and the installed package on Linux. `NativeProcessHardening.Apply()`
-  hardens the whole test host, so its test runs only with `HKDFGUARD_TEST_PROCESS_HARDENING=1`.
+  hardens the whole test host, so its tests (Windows and Linux) run only with
+  `HKDFGUARD_TEST_PROCESS_HARDENING=1`.
 - **`AesGcmCryptoProvider`'s refresh loop and `KeyRing`'s ephemeral rotation loop** each have one
   unreachable branch: the loop's exit when its `PeriodicTimer` reports it has been disposed. Each
   timer is local to its loop and disposed only after it, so this never happens; the check stays as
@@ -646,7 +694,7 @@ reported as skipped, never passed, unless `HKDFGUARD_TEST_SERVICE` names one. Se
 against a different KEK:
 
 ```bash
-hkdfguard-v1-initialize provision --service-name hkdfguard.integrationtest   # elevated on Windows
+hkdfguard provision --service-name hkdfguard.integrationtest   # elevated on Windows
 HKDFGUARD_TEST_SERVICE=hkdfguard.integrationtest dotnet test test/HkdfGuard.KeyWrapping.V1.Test
 ```
 
@@ -654,23 +702,55 @@ On a Linux host with a TPM, the package installs no policy or TPM derivation sec
 can be provisioned until root adds them. `scripts/provision-linux-test-key.sh` does that for a test
 host: run it once with `sudo` from the account that runs the tests (which must be in the `tss`
 group). It creates the derivation secret if there is none, writes a policy that requires the TPM
-and pins the two test services' TPM Names, and confirms both as that account. It never replaces a
+and pins the test service's TPM Name, and confirms it as that account. It never replaces a
 policy it didn't write or an existing secret; `--remove` removes its policy again. With it in place,
 `LinuxNativeIntegrationTests` also run: they check the exact Linux status codes, the native
 library's own service-name and length checks, that a failed unwrap zeroes the caller's buffer,
 that tampering anywhere in a payload is refused, and that a key file written by
-`hkdfguard-v1-initialize wrap` unwraps through `NativeHkdfKeyWrapperV1`.
+`hkdfguard wrap` unwraps through `NativeHkdfKeyWrapperV1`.
 
 ```bash
 sudo scripts/provision-linux-test-key.sh
-HKDFGUARD_TEST_SERVICE=com.hkdfguard.native.linux.test \
-HKDFGUARD_TEST_SERVICE_OTHER=com.hkdfguard.native.linux.test.other \
+HKDFGUARD_TEST_SERVICE=com.hkdfguard.integration.test.221 \
 dotnet test test/HkdfGuard.KeyWrapping.V1.Test
 ```
 
+### Native integration test coverage
+
+The same platform native integration cases exist in every HkdfGuard port (.NET, Java, Python, Go,
+Node). In `HkdfGuard.KeyWrapping.V1.Test` each platform's suite is reported as skipped - never
+passed - where its platform, library or service isn't there:
+
+- **Windows** - `WindowsNativeLibraryLoaderTests` (installed-library cases), `NativeKeyFileTests`,
+  `NativeKeyWrappingIntegrationTests`, `NativeEndToEndTests`, `NativeProcessHardeningTests`. The
+  installed-library cases run wherever `%ProgramFiles%\HkdfGuard\v1\HkdfGuard.dll` is installed;
+  the round trips also need a provisioned KEK - `HKDFGUARD_TEST_SERVICE`, or
+  `com.hkdfguard.integration.test.221` (`scripts/provision-windows-test-key.ps1`), which the
+  installed library's `hkdfguard_kek_exists` confirms. The script also retires the legacy
+  per-platform test KEK `com.hkdfguard.native.windows.test`, after asking (`-KeepLegacyKey` keeps
+  it), and `-Remove` retires the test KEKs instead - each only after `hkdfguard status` confirms its
+  fingerprint (`-WhatIf` shows what would be deleted).
+- **Linux** - `LinuxNativeLibraryLoaderSystemTests` run against the real filesystem and dynamic
+  linker on any Linux host, with their installed-library cases needing the `libhkdfguard1`
+  package; `LinuxNativeIntegrationTests` also need `HKDFGUARD_TEST_SERVICE`, and some
+  `HKDFGUARD_TEST_SERVICE_OTHER`, the policy's `tpm.require_pinned_names`, or `/usr/bin/hkdfguard`
+  (see `scripts/provision-linux-test-key.sh` above). The Linux library refuses a key file below
+  any group- or other-writable directory, sticky or not, so the tests that write one use a private
+  (0700) folder under `$XDG_RUNTIME_DIR` or `~/.cache/hkdfguard-tests` - never `/tmp` - and are
+  reported as skipped, with the reason, where neither is trusted.
+- **macOS** - `MacOsNativeIntegrationTests` run on macOS against the real filesystem and Security
+  framework, with their installed-library cases needing `libhkdfguard.dylib` at
+  `/Library/Application Support/HkdfGuard/v1` (or `~/.hkdfguard/v1`) and `hkdfguard`
+  beside it. The shared round trips run against `HKDFGUARD_TEST_SERVICE`, or
+  `com.hkdfguard.integration.test.221` when `hkdfguard status` reports it present.
+  The first call under that service from a freshly built test host can raise a keychain dialog
+  ("Always Allow"); if nobody answers it within 60 seconds the tests fail and say so, rather than
+  hang.
+
+`NativeProcessHardeningTests` harden the test host itself, so they also need
+`HKDFGUARD_TEST_PROCESS_HARDENING=1`, and are best run one at a time.
+
 Native release artifacts are never committed: `.gitignore` excludes every `runtimes/` folder.
-Where one is present locally, `.gitattributes` keeps it byte-exact and `NativeRuntimesTests` fails
-if any file stops matching its `SHA256SUMS`.
 
 ## Signing and releases
 
@@ -679,7 +759,7 @@ if any file stops matching its `SHA256SUMS`.
 Every assembly built from this repository (`HkdfGuard.*.dll`, for every target framework) is
 Authenticode-signed through Azure Artifact Signing before it is packed. That is the same account
 and certificate profile (`RunSecureSigning` / `runsecure-release`) that signs the native
-`HkdfGuardV1.dll`, so the publisher is `CN=Torin Blair, O=Torin Blair, L=Littleton, S=co, C=US`.
+`HkdfGuard.dll`, so the publisher is `CN=Torin Blair, O=Torin Blair, L=Littleton, S=co, C=US`.
 Artifact Signing certificates are valid for about three days, so every signature is RFC 3161
 timestamped. That keeps it valid after the certificate expires.
 

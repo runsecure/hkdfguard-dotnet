@@ -9,7 +9,7 @@ namespace HkdfGuard.KeyWrapping.V1.Test;
 /// Crypto Provider / TPM, Linux TPM2/keyring/OpenSSL, macOS Secure Enclave). No native library
 /// creates a KEK during wrap/unwrap, so these run against an operator-provisioned service:
 /// <code>
-/// hkdfguard-v1-initialize provision --service-name hkdfguard.integrationtest   (elevated on Windows)
+/// hkdfguard provision --service-name hkdfguard.integrationtest   (elevated on Windows)
 /// HKDFGUARD_TEST_SERVICE=hkdfguard.integrationtest dotnet test
 /// </code>
 /// Without HKDFGUARD_TEST_SERVICE every test here is reported as skipped - never as passed. With it,
@@ -18,7 +18,7 @@ namespace HkdfGuard.KeyWrapping.V1.Test;
 /// </summary>
 public class NativeKeyWrappingIntegrationTests
 {
-    private static string Service => NativeTestEnvironment.ServiceName!;
+    private static string Service => NativeTestEnvironment.ProvisionedService;
 
     [NativeIntegrationFact]
     public async Task NativeHkdfKeyWrapperV1_EncryptAndDecrypt_RoundTrips32ByteDek()
@@ -155,6 +155,11 @@ public class NativeKeyWrappingIntegrationTests
 
         Assert.True(status < 0);
         Assert.True(requiredBytes > 1);
+
+        // The capacity it reports suffices.
+        var sufficient = new byte[requiredBytes];
+        Assert.Equal(AbstractHkdfGuardKmsLibrary.Ok, library.WrapDek(Service, dek.AsSpan(), sufficient, out var written));
+        Assert.InRange(written, 1, requiredBytes);
     }
 
     [NativeIntegrationFact]
@@ -201,5 +206,7 @@ public class NativeKeyWrappingIntegrationTests
         var unwrapStatus = library.UnwrapDek(Service, wrapped[..bytesWritten], recovered, out _);
 
         Assert.True(unwrapStatus < 0);
+        // The binding's own answer, without the wrapper's zeroing in between: nothing written.
+        Assert.True(recovered.IndexOfAnyExcept((byte)0) < 0, "the native library wrote into the destination of a failed unwrap");
     }
 }

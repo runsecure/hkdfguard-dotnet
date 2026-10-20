@@ -8,7 +8,7 @@ namespace HkdfGuard.KeyWrapping.V1.Test;
 
 /// <summary>
 /// The Linux loader's decisions - where the library is, whether every path to it and to its
-/// dependencies can be trusted, whether it is a known release, and whether the dynamic linker's
+/// dependencies can be trusted, and whether the dynamic linker's
 /// environment could substitute anything - checked against simulated filesystems, so they run on
 /// every platform. LinuxNativeLibraryLoaderSystemTests runs the same checks against the real
 /// filesystem and the installed package.
@@ -308,35 +308,6 @@ public class LinuxNativeLibraryLoaderTests
     [InlineData("/usr/lib", "/usr")]
     public void ParentOf_WalksUpToRoot(string path, string parent)
         => Assert.Equal(parent, LinuxNativeLibraryLoader.ParentOf(path));
-
-    // --- Content --------------------------------------------------------------------------------
-
-    private static readonly Dictionary<string, string> Releases = new() { [new string('a', 64)] = "test release" };
-
-    [Fact]
-    public void VerifyContent_AcceptsAKnownRelease()
-        => LinuxNativeLibraryLoader.VerifyContent(Library, _ => new string('a', 64), Releases);
-
-    [Fact]
-    public void VerifyContent_RefusesAnythingElse_NamingItsHash()
-    {
-        var other = new string('b', 64);
-        var ex = Assert.Throws<SecurityException>(() => LinuxNativeLibraryLoader.VerifyContent(Library, _ => other, Releases));
-
-        Assert.Contains(other, ex.Message);
-        Assert.Contains(Library, ex.Message);
-    }
-
-    [Fact]
-    public void EveryKnownRelease_IsALowercaseSha256()
-    {
-        Assert.NotEmpty(LinuxNativeLibraryLoader.KnownReleases);
-        foreach (var (hash, description) in LinuxNativeLibraryLoader.KnownReleases)
-        {
-            Assert.Matches("^[0-9a-f]{64}$", hash);
-            Assert.False(string.IsNullOrWhiteSpace(description));
-        }
-    }
 
     // --- Environment ----------------------------------------------------------------------------
 
