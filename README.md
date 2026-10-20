@@ -751,8 +751,6 @@ passed - where its platform, library or service isn't there:
 `HKDFGUARD_TEST_PROCESS_HARDENING=1`, and are best run one at a time.
 
 Native release artifacts are never committed: `.gitignore` excludes every `runtimes/` folder.
-Where one is present locally, `.gitattributes` keeps it byte-exact and `NativeRuntimesTests` fails
-if any file stops matching its `SHA256SUMS`.
 
 ## Signing and releases
 
