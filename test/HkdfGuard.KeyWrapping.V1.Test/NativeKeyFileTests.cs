@@ -101,7 +101,9 @@ public sealed class NativeKeyFileTests : IDisposable
     public async Task AKeyFileOfTheRightSizeWithAnUnknownVersion_IsMalformed()
     {
         var (path, wrapped, _) = await WrapToFileAsync();
-        wrapped[0] ^= 0xFF; // the version byte
+        // The version byte: first on Linux and Windows; on macOS the suite id, after the 32-byte
+        // KEK fingerprint (which hkdfguard_open_file doesn't check - unwrap does).
+        wrapped[OperatingSystem.IsMacOS() ? 32 : 0] ^= 0xFF;
         await File.WriteAllBytesAsync(path, wrapped);
 
         var thrown = await Assert.ThrowsAsync<InvalidDataException>(async () => await Reader.ReadKeyFileAsync(path));
