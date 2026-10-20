@@ -35,6 +35,28 @@ internal static partial class TestDirectories
     /// </summary>
     public static string? KeyFileDirectorySkipReason => OperatingSystem.IsLinux() ? LinuxRoot.Value.SkipReason : null;
 
+    /// <summary>
+    /// Writes a key file the way hkdfguard wrap does: readable and writable by its owner only
+    /// (0600), whatever the process's umask, replacing any existing file's contents and mode. The
+    /// Linux library refuses (-39) a key file another account could rewrite, and an Ubuntu desktop
+    /// session's umask of 002 would otherwise leave a .NET-written file group-writable.
+    /// </summary>
+    public static async Task WriteKeyFileAsync(string path, ReadOnlyMemory<byte> contents)
+    {
+        var options = new FileStreamOptions { Mode = FileMode.Create, Access = FileAccess.Write };
+        if (!OperatingSystem.IsWindows())
+            options.UnixCreateMode = OwnerOnlyFileMode;
+
+        await using (var stream = new FileStream(path, options))
+            await stream.WriteAsync(contents);
+
+        // UnixCreateMode applies only when the file is created; an existing one keeps its mode.
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(path, OwnerOnlyFileMode);
+    }
+
+    private const UnixFileMode OwnerOnlyFileMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+
     /// <summary>A new, empty folder the native library will read key files from on this platform.</summary>
     public static string CreateKeyFileDirectory(string prefix)
     {
