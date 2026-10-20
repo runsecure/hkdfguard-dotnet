@@ -234,6 +234,182 @@ public class LinuxNativeIntegrationTests
         });
     }
 
+    // --- Key files, read through hkdfguard_open_file -------------------------------------------
+
+    /// <summary>Runs <paramref name="test"/> with a fresh private key file folder and one real wrapped payload.</summary>
+    private static async Task WithKeyFileFolderAsync(Func<string, byte[], Task> test)
+    {
+        var directory = TestDirectories.CreateKeyFileDirectory("hkdfguard-open-");
+        try
+        {
+            await test(directory, Wrap(RandomNumberGenerator.GetBytes(DekLength)));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static async Task<string> WriteAsync(string directory, string name, byte[] contents)
+    {
+        var path = Path.Combine(directory, name);
+        await TestDirectories.WriteKeyFileAsync(path, contents);
+        return path;
+    }
+
+    private static readonly NativeHkdfKeyWrapperV1 Reader = new("hkdfguard.keyfile.reader");
+
+    private static async Task<T> RefusedAsync<T>(string path, int status) where T : Exception
+    {
+        var thrown = await Assert.ThrowsAsync<T>(async () => await Reader.ReadKeyFileAsync(path));
+        Assert.Contains($"status {status} (", thrown.Message);
+        return thrown;
+    }
+
+    [LinuxNativeIntegrationFact(NeedsKeyFileDirectory = true)]
+    public Task AKeyFile_ReadsBackExactlyAsWritten()
+        => WithKeyFileFolderAsync(async (directory, wrapped) =>
+            Assert.Equal(wrapped, await Reader.ReadKeyFileAsync(await WriteAsync(directory, "key.bin", wrapped))));
+
+    [LinuxNativeIntegrationFact(NeedsKeyFileDirectory = true)]
+    public Task AKeyFileOfTheWrongSize_IsRefused_AsTooShortOrTooLong()
+        => WithKeyFileFolderAsync(async (directory, wrapped) =>
+        {
+            foreach (var (size, status) in new[]
+                     {
+                         (0, AbstractHkdfGuardKmsLibrary.ErrFileTooShort),
+                         (100, AbstractHkdfGuardKmsLibrary.ErrFileTooShort),
+                         (wrapped.Length - 1, AbstractHkdfGuardKmsLibrary.ErrFileTooShort),
+                         (wrapped.Length + 1, AbstractHkdfGuardKmsLibrary.ErrFileTooLong),
+                         (4096, AbstractHkdfGuardKmsLibrary.ErrFileTooLong),
+                     })
+            {
+                var contents = new byte[size];
+                wrapped.AsSpan(0, Math.Min(size, wrapped.Length)).CopyTo(contents);
+                await RefusedAsync<InvalidDataException>(await WriteAsync(directory, $"size-{size}.bin", contents), status);
+            }
+        });
+
+    public static TheoryData<string> PlaintextKeyForms => new() { "raw", "hex", "lower-hex", "base64", "base64-with-newline" };
+
+    [LinuxNativeIntegrationTheory(NeedsKeyFileDirectory = true)]
+    [MemberData(nameof(PlaintextKeyForms))]
+    public async Task AFileHoldingWhatLooksLikeAnUnwrappedDek_IsRefusedAsAKeyExposure(string form)
+    {
+        var dek = RandomNumberGenerator.GetBytes(DekLength);
+        var contents = form switch
+        {
+            "raw" => dek,
+            "hex" => System.Text.Encoding.ASCII.GetBytes(Convert.ToHexString(dek)),
+            "lower-hex" => System.Text.Encoding.ASCII.GetBytes(Convert.ToHexStringLower(dek)),
+            "base64" => System.Text.Encoding.ASCII.GetBytes(Convert.ToBase64String(dek)),
+            _ => System.Text.Encoding.ASCII.GetBytes(Convert.ToBase64String(dek) + "\n"),
+        };
+
+        await WithKeyFileFolderAsync(async (directory, _) =>
+            await RefusedAsync<InvalidDataException>(await WriteAsync(directory, $"plaintext-{form}.bin", contents), AbstractHkdfGuardKmsLibrary.ErrFilePlaintextKey));
+    }
+
+    [LinuxNativeIntegrationFact(NeedsKeyFileDirectory = true)]
+    public Task AChangeToThePayloadsStructure_IsRefusedWhenRead_ButAChangedTagOnlyAtUnwrap()
+        => WithKeyFileFolderAsync(async (directory, wrapped) =>
+        {
+            // The version byte and a byte mid-payload are checked when the file is read; the AEAD
+            // tag can only be checked with the KEK, so a changed tag reads fine and fails unwrap.
+            foreach (var position in new[] { 0, wrapped.Length / 2 })
+            {
+                var tampered = (byte[])wrapped.Clone();
+                tampered[position] ^= 0x01;
+                await RefusedAsync<InvalidDataException>(await WriteAsync(directory, $"structure-{position}.bin", tampered), AbstractHkdfGuardKmsLibrary.ErrFileMalformed);
+            }
+
+            var tag = (byte[])wrapped.Clone();
+            tag[^1] ^= 0x01;
+            var read = await Reader.ReadKeyFileAsync(await WriteAsync(directory, "tag.bin", tag));
+            var destination = new byte[DekLength];
+            await Assert.ThrowsAsync<CryptographicException>(async () => await new NativeHkdfKeyWrapperV1(Service).UnwrapAsync(read, destination));
+            Assert.All(destination, b => Assert.Equal(0, b));
+        });
+
+    [LinuxNativeIntegrationFact(NeedsKeyFileDirectory = true)]
+    public Task AMissingFileOrFolder_IsNotFound_AndAFolderIsNotAKeyFile()
+        => WithKeyFileFolderAsync(async (directory, _) =>
+        {
+            await RefusedAsync<FileNotFoundException>(Path.Combine(directory, "missing.bin"), AbstractHkdfGuardKmsLibrary.ErrFileNotFound);
+            await RefusedAsync<FileNotFoundException>(Path.Combine(directory, "missing", "key.bin"), AbstractHkdfGuardKmsLibrary.ErrFileNotFound);
+            var thrown = await Assert.ThrowsAsync<IOException>(async () => await Reader.ReadKeyFileAsync(directory));
+            Assert.Contains($"status {AbstractHkdfGuardKmsLibrary.ErrFileIo} (", thrown.Message);
+        });
+
+    [LinuxNativeIntegrationFact(NeedsKeyFileDirectory = true)]
+    public Task ALink_IsFollowed_OnlyWhereItLeadsIsTrustedToo()
+        => WithKeyFileFolderAsync(async (directory, wrapped) =>
+        {
+            // The library judges where a link leads, not the link: within private folders it is
+            // followed; into /tmp (sticky, world-writable) it is refused, as is /tmp itself.
+            var key = await WriteAsync(directory, "key.bin", wrapped);
+            var fileLink = Path.Combine(directory, "file-link.bin");
+            File.CreateSymbolicLink(fileLink, key);
+            var folderLink = Path.Combine(directory, "folder-link");
+            Directory.CreateSymbolicLink(folderLink, directory);
+
+            Assert.Equal(wrapped, await Reader.ReadKeyFileAsync(fileLink));
+            Assert.Equal(wrapped, await Reader.ReadKeyFileAsync(Path.Combine(folderLink, "key.bin")));
+
+            var shared = Directory.CreateTempSubdirectory("hkdfguard-shared-");
+            try
+            {
+                Assert.StartsWith("/tmp/", shared.FullName + "/");
+                var exposed = await WriteAsync(shared.FullName, "key.bin", wrapped);
+                var intoShared = Path.Combine(directory, "into-tmp.bin");
+                File.CreateSymbolicLink(intoShared, exposed);
+                var sharedFolderLink = Path.Combine(directory, "tmp-folder");
+                Directory.CreateSymbolicLink(sharedFolderLink, shared.FullName);
+
+                await RefusedAsync<UnauthorizedAccessException>(exposed, AbstractHkdfGuardKmsLibrary.ErrFileUntrusted);
+                await RefusedAsync<UnauthorizedAccessException>(intoShared, AbstractHkdfGuardKmsLibrary.ErrFileUntrusted);
+                await RefusedAsync<UnauthorizedAccessException>(Path.Combine(sharedFolderLink, "key.bin"), AbstractHkdfGuardKmsLibrary.ErrFileUntrusted);
+            }
+            finally
+            {
+                shared.Delete(recursive: true);
+            }
+        });
+
+    [LinuxNativeIntegrationFact(NeedsKeyFileDirectory = true)]
+    public async Task AKeyFileAnotherAccountCouldRewrite_IsRefused_WhileOwnerOnlyAndGroupReadAreNot()
+    {
+        // A group- or other-writable key file could be replaced by another account, so the library
+        // refuses it (-39) whatever the folders above it. Group read is fine: hkdfguard wrap
+        // --group hands a key file to a service's group as 0640. This is also why tests write key
+        // files 0600 explicitly: an Ubuntu desktop session's umask of 002 makes .NET write 0664.
+        var directory = TestDirectories.CreateKeyFileDirectory("hkdfguard-mode-");
+        try
+        {
+            var path = Path.Combine(directory, "key.bin");
+            await TestDirectories.WriteKeyFileAsync(path, Wrap(RandomNumberGenerator.GetBytes(DekLength)));
+            var reader = new NativeHkdfKeyWrapperV1(Service);
+
+            foreach (var mode in new[] { UnixFileMode.GroupWrite, UnixFileMode.OtherWrite })
+            {
+                File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.OtherRead | mode);
+
+                var refused = await Assert.ThrowsAsync<UnauthorizedAccessException>(async () => await reader.ReadKeyFileAsync(path));
+                Assert.Contains($"status {AbstractHkdfGuardKmsLibrary.ErrFileUntrusted}", refused.Message);
+            }
+
+            foreach (var readable in new[] { UnixFileMode.None, UnixFileMode.GroupRead, UnixFileMode.GroupRead | UnixFileMode.OtherRead })
+            {
+                File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | readable);
+                Assert.NotEmpty(await reader.ReadKeyFileAsync(path));
+            }
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     [LinuxNativeIntegrationFact(NeedsCli = true, NeedsKeyFileDirectory = true)]
     public async Task AKeyFileWrappedByTheProvisioningTool_RevealsItsDekThroughTheWrapper()
     {
