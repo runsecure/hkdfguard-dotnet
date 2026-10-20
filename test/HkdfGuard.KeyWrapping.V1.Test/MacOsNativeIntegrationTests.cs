@@ -8,7 +8,7 @@ namespace HkdfGuard.KeyWrapping.V1.Test;
 
 /// <summary>
 /// The macOS loader's system-call layer (MacOsNative) against the real filesystem and Security
-/// framework, and the installed libhkdfguard_v1.dylib and hkdfguard-v1-initialize where they are
+/// framework, and the installed libhkdfguard.dylib and hkdfguard where they are
 /// present. Skipped off macOS; the installed-library tests are skipped without the library.
 /// MacOsNativeLibraryLoaderTests check the same decisions against a simulated filesystem on every
 /// platform.

@@ -4,7 +4,7 @@ using System.Runtime.InteropServices;
 namespace HkdfGuard.KeyWrapping.V1.Interop;
 
 /// <summary>
-/// Binds libhkdfguard_v1.dylib (see the hkdfguard.h installed beside it), which holds the per-service KEK
+/// Binds libhkdfguard.dylib (see the hkdfguard.h installed beside it), which holds the per-service KEK
 /// as a Secure Enclave key. Each distinct service string gets its own, independent Secure Enclave
 /// key - wrapping under one service's identifier and unwrapping under a different one fails by
 /// design (<see cref="AbstractHkdfGuardKmsLibrary.ErrKekFingerprintMismatch"/>). The library is installed separately - system-wide
@@ -12,7 +12,7 @@ namespace HkdfGuard.KeyWrapping.V1.Interop;
 /// from there, after the checks in <see cref="MacOsNativeLibraryLoader"/>.
 /// <para>
 /// No call here creates a KEK: a service must be provisioned first with
-/// <c>hkdfguard-v1-initialize provision --service-name &lt;name&gt;</c>, or every wrap/unwrap fails
+/// <c>hkdfguard provision --service-name &lt;name&gt;</c>, or every wrap/unwrap fails
 /// with <see cref="AbstractHkdfGuardKmsLibrary.ErrKekNotFound"/>. A service name is 1-128 ASCII letters, digits or '.', and is
 /// matched case-insensitively.
 /// </para>
@@ -30,7 +30,7 @@ internal sealed partial class MacOsHkdfGuardKmsLibrary : AbstractHkdfGuardKmsLib
     {
         ErrProviderUnavailable => "this Mac has no Secure Enclave",
         ErrPayloadAuthFailed => "AES-GCM authentication failed: the payload was altered, or wrapped for another service under this KEK",
-        ErrKekNotFound => "no KEK is provisioned for this service in this keychain mode; run hkdfguard-v1-initialize provision",
+        ErrKekNotFound => "no KEK is provisioned for this service in this keychain mode; run hkdfguard provision",
         ErrKekAccessDenied => "the keychain denied access: it is locked, there is no session to prompt in, or this process isn't allowed",
         ErrKekInvalid => "the keychain item for this service can't be reconstructed into a key",
         ErrProcessHardeningFailed => "process hardening failed: core dumps or debugger attachment could not be denied, or (with RequireProtectedSignature) the host executable's code signature still allows it - it needs the Hardened Runtime, without get-task-allow or DYLD_* entitlements",

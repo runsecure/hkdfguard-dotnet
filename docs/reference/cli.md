@@ -1,7 +1,6 @@
 # `hkdfguard` command-line tool reference
 
-`hkdfguard` is installed with each platform's native HkdfGuard package. (On macOS it is still
-named `hkdfguard-v1-initialize`.) It does the jobs the .NET library deliberately can't:
+`hkdfguard` is installed with each platform's native HkdfGuard package. It does the jobs the .NET library deliberately can't:
 
 - **`provision`** creates a service's KEK. Wrapping and unwrapping never create one.
 - **`wrap`** turns a DEK into a key file.
@@ -188,7 +187,7 @@ Reading a key file (`hkdfguard_open_file`) can fail with:
 ## macOS
 
 Installed system-wide at `/Library/Application Support/HkdfGuard/v1`, or per user at
-`~/.hkdfguard/v1`, beside `libhkdfguard_v1.dylib`, and still named `hkdfguard-v1-initialize`. The
+`~/.hkdfguard/v1`, beside `libhkdfguard.dylib`. The
 KEK is a Secure Enclave key, so it needs Apple silicon and macOS 13 or later.
 
 - `provision --service-name <name>` creates the service's KEK, as on Windows.
@@ -200,7 +199,7 @@ KEK is a Secure Enclave key, so it needs Apple silicon and macOS 13 or later.
 - Service names are matched case-insensitively on macOS.
 
 For the full options, exit codes, keychain modes (system and per-user) and key file permissions,
-run `hkdfguard-v1-initialize --help` and see the macOS native library's documentation.
+run `hkdfguard --help` and see the macOS native library's documentation.
 
 ## Linux
 
