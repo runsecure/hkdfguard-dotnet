@@ -195,7 +195,7 @@ public class LinuxNativeIntegrationTests
     [LinuxNativeIntegrationFact]
     public void ATooSmallBuffer_ReportsACapacityThatSuffices()
     {
-        // The reported capacity is an upper bound for any payload (276 bytes on 0.1.0, for a
+        // The reported capacity is an upper bound for any payload (276 bytes on 0.9.0, for a
         // 164-byte payload), not the exact size of this one; it must fit a key file and be enough.
         var dek = RandomNumberGenerator.GetBytes(DekLength);
 
