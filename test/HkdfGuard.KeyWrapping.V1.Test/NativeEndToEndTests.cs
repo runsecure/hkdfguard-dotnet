@@ -59,7 +59,7 @@ public sealed class NativeEndToEndTests : IDisposable
             var wrappedLength = await new NativeHkdfKeyWrapperV1(Service).WrapAsync(dek, wrapped);
 
             var path = Path.Combine(KeyFileDirectory, $"wrapped-dek-v{KeyFileVersion}.bin");
-            await File.WriteAllBytesAsync(path, wrapped.AsMemory(0, wrappedLength).ToArray());
+            await TestDirectories.WriteKeyFileAsync(path, wrapped.AsMemory(0, wrappedLength));
             return (path, configuration);
         }
         finally
@@ -126,10 +126,13 @@ public sealed class NativeEndToEndTests : IDisposable
     [NativeIntegrationFact(NeedsKeyFileDirectory = true)]
     public async Task ATamperedKeyFile_RefusesToBuild()
     {
+        // The last byte is part of the AEAD tag, which no platform's library can check without the
+        // KEK, so the file reads back fine and the build fails at unwrap. (A change to the payload's
+        // structure is refused earlier, when the file is read - see LinuxNativeIntegrationTests.)
         var (keyFile, _) = await RunPipelineAsync(("Secret", "value"));
         var bytes = await File.ReadAllBytesAsync(keyFile);
-        bytes[bytes.Length / 2] ^= 0x01;
-        await File.WriteAllBytesAsync(keyFile, bytes);
+        bytes[^1] ^= 0x01;
+        await TestDirectories.WriteKeyFileAsync(keyFile, bytes);
 
         await Assert.ThrowsAsync<CryptographicException>(() =>
             RingBuilder(Service).WithKeyFile(KeyFileVersion, keyFile).BuildAsync());

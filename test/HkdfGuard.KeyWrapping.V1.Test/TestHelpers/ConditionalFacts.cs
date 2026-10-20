@@ -511,12 +511,15 @@ public sealed class LinuxNativeIntegrationFactAttribute : FactAttribute
     }
 }
 
-/// <summary>The theory form of <see cref="LinuxNativeIntegrationFactAttribute"/>, with no extra requirements.</summary>
+/// <summary>The theory form of <see cref="LinuxNativeIntegrationFactAttribute"/>.</summary>
 public sealed class LinuxNativeIntegrationTheoryAttribute : TheoryAttribute
 {
+    /// <summary>Needs a trusted folder for key files (see TestDirectories.KeyFileDirectorySkipReason).</summary>
+    public bool NeedsKeyFileDirectory { get; set; }
+
     public override string? Skip
     {
-        get => base.Skip ?? LinuxNativeIntegrationFactAttribute.Reason();
+        get => base.Skip ?? LinuxNativeIntegrationFactAttribute.Reason(needsKeyFileDirectory: NeedsKeyFileDirectory);
         set => base.Skip = value;
     }
 }
