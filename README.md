@@ -380,9 +380,6 @@ Before loading, it requires all of the following:
   and no directory or file is writable by its group or by others. Links are followed one component
   at a time and each target is checked where it lies, so `/lib -> usr/lib` passes and a link into a
   user's directory does not.
-- The file's SHA-256 is a release this version of `HkdfGuard.KeyWrapping.V1` lists. Linux has no
-  platform code signature, so this pin is the content check. Each distribution and architecture
-  has its own build, and a release that isn't listed is refused until the package lists it.
 - The dynamic linker's environment can't substitute anything. `dlopen` of an absolute path is
   never searched for, but the library's dependencies are found by name - and `libtss2-esys`
   receives every ECDH shared secret. So every `LD_LIBRARY_PATH` directory, and every path-named
@@ -397,6 +394,10 @@ else under the same name; the library is then unloaded and the load refused. Two
 the loader's reach: the TPM transport module tpm2-tss loads at the first TPM call, which only the
 environment check covers, and the .NET runtime's own injection points (startup hooks, CLR
 profilers), which need a protected service environment on every platform.
+
+Linux has no platform code signature, and the loader does not pin the file's content. Verify a
+native Linux release's Sigstore build-provenance attestation (with `cosign` or
+`gh attestation verify`) before installing its package; the loader then relies on path integrity.
 
 ### Process hardening
 

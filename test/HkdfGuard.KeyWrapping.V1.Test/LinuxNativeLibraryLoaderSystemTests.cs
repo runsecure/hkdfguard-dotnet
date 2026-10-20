@@ -153,12 +153,11 @@ public partial class LinuxNativeLibraryLoaderSystemTests
     }
 
     [InstalledLinuxLibraryFact]
-    public void TheInstalledLibrary_IsAKnownReleaseInATrustedLocation()
+    public void TheInstalledLibrary_IsInATrustedLocation()
     {
         var path = InstalledLinuxLibraryFactAttribute.InstalledPath!;
 
         Assert.Equal(path, Resolve(path));
-        LinuxNativeLibraryLoader.VerifyContent(path, p => Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(p))), LinuxNativeLibraryLoader.KnownReleases);
     }
 
     [InstalledLinuxLibraryFact]

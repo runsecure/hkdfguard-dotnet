@@ -1,9 +1,7 @@
-using System.Collections.Frozen;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Security;
-using System.Security.Cryptography;
 using System.Text;
 
 namespace HkdfGuard.KeyWrapping.V1.Interop;
@@ -22,10 +20,10 @@ namespace HkdfGuard.KeyWrapping.V1.Interop;
 /// <item><b>Path integrity.</b> Every directory walked through, every symbolic link followed, and
 /// the file itself must be owned by root, and no directory or file may be writable by its group
 /// or by others. Symbolic links are followed component by component, each one checked where it
-/// lies, so a link can only lead somewhere root chose (/lib to usr/lib, say).</item>
-/// <item><b>Content.</b> The file's SHA-256 must be one of <see cref="KnownReleases"/>. Linux has
-/// no platform code signature to check, so this pin is what tells a genuine release from any
-/// other ELF file root may have put at that path.</item>
+/// lies, so a link can only lead somewhere root chose (/lib to usr/lib, say). Linux has no
+/// platform code signature and the file is not content-pinned: a release's authenticity is
+/// verified with Sigstore/cosign when the package is installed, so path integrity is what this
+/// loader enforces.</item>
 /// <item><b>Environment.</b> An absolute path is never searched for, but the library's
 /// dependencies are found by name: through LD_LIBRARY_PATH, and after LD_PRELOAD and LD_AUDIT
 /// objects that can interpose on any symbol. So every directory on LD_LIBRARY_PATH and every
@@ -59,16 +57,6 @@ internal static class LinuxNativeLibraryLoader
     /// <summary>An export every genuine build has; its address tells dladdr which file was loaded.</summary>
     internal const string ProbeExport = "hkdfguard_wrap_dek";
 
-    /// <summary>
-    /// The SHA-256 of every native release this assembly accepts, with what it is. Each distribution
-    /// and architecture gets its own build, so each needs its own entry; a release whose hash is
-    /// not here is refused until this assembly is updated to list it.
-    /// </summary>
-    internal static readonly FrozenDictionary<string, string> KnownReleases = new Dictionary<string, string>
-    {
-        ["a3a9312fd2d603a62e6a5b1ed46ba5e4a51adcba321aa5a1014a762ff07ca064"] = "libhkdfguard1 0.1.0-1~ubuntu24.04.1 (amd64)",
-    }.ToFrozenDictionary(StringComparer.Ordinal);
-
     // The dynamic-linker variables that decide where, or what, it loads.
     internal const string LibraryPathVariable = "LD_LIBRARY_PATH";
     internal const string PreloadVariable = "LD_PRELOAD";
@@ -101,7 +89,6 @@ internal static class LinuxNativeLibraryLoader
 
             var candidates = CandidatePaths(RuntimeInformation.ProcessArchitecture);
             var path = ResolveTrusted(ChoosePath(candidates, LinuxNative.Probe), UnixFileType.RegularFile, LinuxNative.GetStatusOrNull, LinuxNative.ReadLink)!;
-            VerifyContent(path, HashFile, KnownReleases);
 
             var environment = ReadEnvironment(Environment.GetEnvironmentVariable, LinuxNative.ReadInitialEnvironment());
             VerifyEnvironment(environment, (p, type) => ResolveTrusted(p, type, LinuxNative.GetStatusOrNull, LinuxNative.ReadLink, allowMissing: true));
@@ -260,23 +247,6 @@ internal static class LinuxNativeLibraryLoader
     {
         var slash = path.LastIndexOf('/');
         return slash <= 0 ? "/" : path[..slash];
-    }
-
-    /// <summary>Requires the file's SHA-256 to be a known release.</summary>
-    /// <exception cref="SecurityException">It isn't.</exception>
-    internal static void VerifyContent(string path, Func<string, string> sha256Hex, IReadOnlyDictionary<string, string> knownReleases)
-    {
-        var hash = sha256Hex(path);
-        if (!knownReleases.ContainsKey(hash))
-            throw new SecurityException(
-                $"'{path}' has SHA-256 {hash}, which is not a HkdfGuard native release this version of HkdfGuard.KeyWrapping.V1 recognizes; refusing to load it. If it is a newer genuine release, update HkdfGuard.KeyWrapping.V1.");
-    }
-
-    [ExcludeFromCodeCoverage(Justification = "One-line adapter over SHA256.HashData; the decision is VerifyContent's.")]
-    private static string HashFile(string path)
-    {
-        using var stream = File.OpenRead(path);
-        return Convert.ToHexStringLower(SHA256.HashData(stream));
     }
 
     /// <summary>
