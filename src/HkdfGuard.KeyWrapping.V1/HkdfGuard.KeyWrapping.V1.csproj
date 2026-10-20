@@ -21,9 +21,6 @@
                ~/.hkdfguard/v1/libhkdfguard.dylib               (MacOsNativeLibraryLoader)
       Linux:   /usr/lib/<multiarch>/libhkdfguard.so.1, or
                /usr/lib64/libhkdfguard.so.1 (libhkdfguard1 package) (LinuxNativeLibraryLoader)
-    A local, git-ignored runtimes/ folder may hold native release artifacts and their SHA256SUMS
-    for reference; when present, NativeRuntimesTests keeps them byte-exact, but nothing here ships
-    or loads them.
   -->
 
 </Project>
