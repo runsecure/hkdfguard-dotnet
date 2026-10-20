@@ -23,7 +23,7 @@ public class LinuxNativeIntegrationTests
 {
     private const int DekLength = AbstractHkdfGuardKmsLibrary.DekLength;
 
-    private static string Service => NativeTestEnvironment.ServiceName!;
+    private static string Service => NativeTestEnvironment.ProvisionedService;
 
     private static readonly LinuxHkdfGuardKmsLibrary Library = new();
 
@@ -235,17 +235,19 @@ public class LinuxNativeIntegrationTests
         });
     }
 
-    [LinuxNativeIntegrationFact(NeedsCli = true)]
+    [LinuxNativeIntegrationFact(NeedsCli = true, NeedsKeyFileDirectory = true)]
     public async Task AKeyFileWrappedByTheProvisioningTool_RevealsItsDekThroughTheWrapper()
     {
-        // The deployment path: hkdfguard wraps a delivered DEK on the host, in its
-        // own process, and the application unwraps the key file through this binding.
-        var directory = Directory.CreateTempSubdirectory("hkdfguard-cli-");
+        // The deployment path: hkdfguard wraps a delivered DEK on the host, in its own process,
+        // and the application reads the key file through the native library (which refuses one
+        // below a group- or other-writable directory, so this is a private folder, not /tmp) and
+        // unwraps it through this binding.
+        var directory = TestDirectories.CreateKeyFileDirectory("hkdfguard-cli-");
         try
         {
             var dek = RandomNumberGenerator.GetBytes(DekLength);
-            var dekFile = Path.Combine(directory.FullName, "dek");
-            var keyFile = Path.Combine(directory.FullName, "key.bin");
+            var dekFile = Path.Combine(directory, "dek");
+            var keyFile = Path.Combine(directory, "key.bin");
             await using (var stream = new FileStream(dekFile, new FileStreamOptions
             {
                 Mode = FileMode.CreateNew,
@@ -260,15 +262,16 @@ public class LinuxNativeIntegrationTests
             Assert.True(exitCode == 0, $"hkdfguard wrap exited {exitCode}: {output}");
             Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(keyFile));
 
+            var wrapper = new NativeHkdfKeyWrapperV1(Service);
             var recovered = new byte[DekLength];
-            var written = await new NativeHkdfKeyWrapperV1(Service).UnwrapAsync(await File.ReadAllBytesAsync(keyFile), recovered);
+            var written = await wrapper.UnwrapAsync(await wrapper.ReadKeyFileAsync(keyFile), recovered);
 
             Assert.Equal(DekLength, written);
             Assert.Equal(dek, recovered);
         }
         finally
         {
-            directory.Delete(recursive: true);
+            Directory.Delete(directory, recursive: true);
         }
     }
 

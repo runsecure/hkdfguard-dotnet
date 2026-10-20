@@ -18,7 +18,7 @@ namespace HkdfGuard.KeyWrapping.V1.Test;
 /// </summary>
 public class NativeKeyWrappingIntegrationTests
 {
-    private static string Service => NativeTestEnvironment.ServiceName!;
+    private static string Service => NativeTestEnvironment.ProvisionedService;
 
     [NativeIntegrationFact]
     public async Task NativeHkdfKeyWrapperV1_EncryptAndDecrypt_RoundTrips32ByteDek()

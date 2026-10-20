@@ -98,9 +98,12 @@ public partial class MacOsNativeIntegrationTests
         Assert.Equal(first, MacOsNativeLibraryLoader.Load());
 
         // Through the binding (and so the resolver). No KEK is provisioned for this name, so the
-        // library answers with an error status - which proves it loaded and ran.
+        // library answers with an error status - which proves it loaded and ran. Bounded, like
+        // every first native call here, so an unanswered keychain dialog fails rather than hangs.
         var library = new MacOsHkdfGuardKmsLibrary();
-        var status = library.WrapDek(NativeTestEnvironment.UnprovisionedServiceName, new byte[AbstractHkdfGuardKmsLibrary.DekLength], new byte[512], out _);
+        var service = NativeTestEnvironment.UnprovisionedServiceName;
+        var status = NativeTestEnvironment.WithinNativeCallTimeout(service, () =>
+            library.WrapDek(service, new byte[AbstractHkdfGuardKmsLibrary.DekLength], new byte[512], out _));
 
         Assert.True(status < 0, $"wrap under an unprovisioned service returned status {status}");
         Assert.NotNull(library.DescribeStatus(status));
@@ -119,7 +122,7 @@ public partial class MacOsNativeIntegrationTests
     [InstalledMacOsLibraryFact(NeedsProvisioningTool = true)]
     public void TheDefaultTestService_IsFoundOnlyWhenProvisioned()
     {
-        var (exitCode, output) = MacOsTestEnvironment.Run(MacOsTestEnvironment.ProvisioningTool!, "status", "--service-name", NativeTestEnvironment.DefaultMacOsServiceName);
+        var (exitCode, output) = MacOsTestEnvironment.Run(MacOsTestEnvironment.ProvisioningTool!, "status", "--service-name", NativeTestEnvironment.DefaultServiceName);
         Assert.True(exitCode == 0, $"status exited {exitCode}: {output}");
 
         var (service, skipReason) = NativeTestEnvironment.ResolveMacOs();

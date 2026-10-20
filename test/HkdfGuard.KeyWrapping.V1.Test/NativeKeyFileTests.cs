@@ -12,22 +12,33 @@ namespace HkdfGuard.KeyWrapping.V1.Test;
 /// <summary>
 /// Reading key files through the real native library's hkdfguard_open_file. Refusals of a file's
 /// size, contents or location need no KEK, so they run wherever the Windows library is installed;
-/// reading back a real wrapped key needs a provisioned service (see NativeTestEnvironment).
+/// reading back a real wrapped key needs a provisioned service (see NativeTestEnvironment). Key files
+/// are written to TestDirectories.CreateKeyFileDirectory: on Linux the library refuses any key file
+/// below a group- or other-writable directory, so never under /tmp.
 /// </summary>
 public sealed class NativeKeyFileTests : IDisposable
 {
-    private readonly string _directory = TestDirectories.CreateTemp("hkdfguard-keyfile-");
+    // Created on first use, as a folder the native library trusts for key files: in its long form
+    // on Windows, and on Linux a private one outside /tmp (tests that use it there are gated with
+    // NeedsKeyFileDirectory).
+    private string? _created;
 
-    public void Dispose() => Directory.Delete(_directory, recursive: true);
+    private string KeyFileDirectory => _created ??= TestDirectories.CreateKeyFileDirectory("hkdfguard-keyfile-");
 
-    private static string Service => NativeTestEnvironment.ServiceName!;
+    public void Dispose()
+    {
+        if (_created is not null)
+            Directory.Delete(_created, recursive: true);
+    }
+
+    private static string Service => NativeTestEnvironment.ProvisionedService;
 
     // Any valid name: reading a file never touches a KEK.
     private static NativeHkdfKeyWrapperV1 Reader => new("hkdfguard.keyfile.reader");
 
     private string Write(string name, byte[] contents)
     {
-        var path = Path.Combine(_directory, name);
+        var path = Path.Combine(KeyFileDirectory, name);
         File.WriteAllBytes(path, contents);
         return path;
     }
@@ -48,16 +59,16 @@ public sealed class NativeKeyFileTests : IDisposable
     {
         // hkdfguard_open_file refuses an 8.3 short name anywhere in a path, so every test here
         // relies on TestDirectories expanding one (C:\Users\RUNNER~1\... on GitHub-hosted runners).
-        foreach (var part in _directory.Split(Path.DirectorySeparatorChar))
+        foreach (var part in KeyFileDirectory.Split(Path.DirectorySeparatorChar))
         {
             var tilde = part.IndexOf('~');
-            Assert.False(tilde >= 0 && tilde + 1 < part.Length && char.IsAsciiDigit(part[tilde + 1]), $"{_directory} still has the short name '{part}'.");
+            Assert.False(tilde >= 0 && tilde + 1 < part.Length && char.IsAsciiDigit(part[tilde + 1]), $"{KeyFileDirectory} still has the short name '{part}'.");
         }
     }
 
     // --- A real key file ------------------------------------------------------------------------
 
-    [NativeIntegrationFact]
+    [NativeIntegrationFact(NeedsKeyFileDirectory = true)]
     public async Task AKeyFileTheWrapperWrote_ReadsBackStillWrapped_AndUnwrapsToItsDek()
     {
         var (path, wrapped, dek) = await WrapToFileAsync();
@@ -71,7 +82,7 @@ public sealed class NativeKeyFileTests : IDisposable
         Assert.Equal(dek, recovered);
     }
 
-    [NativeIntegrationFact]
+    [NativeIntegrationFact(NeedsKeyFileDirectory = true)]
     public async Task AKeyRing_BuiltFromAKeyFile_ReadsItThroughTheNativeLibrary()
     {
         var (path, _, _) = await WrapToFileAsync();
@@ -86,7 +97,7 @@ public sealed class NativeKeyFileTests : IDisposable
         Assert.Equal(4, ring.CurrentVersion);
     }
 
-    [NativeIntegrationFact]
+    [NativeIntegrationFact(NeedsKeyFileDirectory = true)]
     public async Task AKeyFileOfTheRightSizeWithAnUnknownVersion_IsMalformed()
     {
         var (path, wrapped, _) = await WrapToFileAsync();
@@ -100,13 +111,13 @@ public sealed class NativeKeyFileTests : IDisposable
 
     // --- Files the native library refuses, whatever the KEK --------------------------------------
 
-    [InstalledNativeLibraryFact]
+    [InstalledNativeLibraryFact(NeedsKeyFileDirectory = true)]
     public void TheInstalledLibrary_AnswersOpenFile_WithADescribedRefusal()
     {
         // hkdfguard_open_file needs no KEK, on any platform: a file that isn't there is refused
         // with a status this platform describes - which proves the binding reached it. A library
         // that can't be loaded or fails verification throws something else, and fails this test.
-        var path = Path.Combine(_directory, "missing", "dek.bin");
+        var path = Path.Combine(KeyFileDirectory, "missing", "dek.bin");
 
         var thrown = Record.Exception(() => NativeHost.Library.OpenFile(path));
 
@@ -117,7 +128,7 @@ public sealed class NativeKeyFileTests : IDisposable
     [InstalledWindowsLibraryFact]
     public async Task AMissingFile_IsNotFound()
     {
-        var path = Path.Combine(_directory, "missing.bin");
+        var path = Path.Combine(KeyFileDirectory, "missing.bin");
 
         var thrown = await Assert.ThrowsAsync<FileNotFoundException>(async () => await Reader.ReadKeyFileAsync(path));
 
@@ -127,7 +138,7 @@ public sealed class NativeKeyFileTests : IDisposable
     [InstalledWindowsLibraryFact]
     public async Task AFileInAMissingFolder_IsNotFound()
         => await Assert.ThrowsAsync<FileNotFoundException>(async () =>
-            await Reader.ReadKeyFileAsync(Path.Combine(_directory, "no-such-folder", "dek.bin")));
+            await Reader.ReadKeyFileAsync(Path.Combine(KeyFileDirectory, "no-such-folder", "dek.bin")));
 
     public static TheoryData<string, byte[]> PlaintextKeys
     {
@@ -177,14 +188,14 @@ public sealed class NativeKeyFileTests : IDisposable
 
     [InstalledWindowsLibraryFact]
     public async Task AFolder_IsNotAKeyFile()
-        => await Assert.ThrowsAnyAsync<IOException>(async () => await Reader.ReadKeyFileAsync(_directory));
+        => await Assert.ThrowsAnyAsync<IOException>(async () => await Reader.ReadKeyFileAsync(KeyFileDirectory));
 
     [InstalledWindowsLibraryFact]
     public async Task AFileReachedThroughAJunction_IsUntrusted()
     {
-        var target = Directory.CreateDirectory(Path.Combine(_directory, "real")).FullName;
+        var target = Directory.CreateDirectory(Path.Combine(KeyFileDirectory, "real")).FullName;
         File.WriteAllBytes(Path.Combine(target, "dek.bin"), new byte[132]);
-        var junction = Path.Combine(_directory, "junction");
+        var junction = Path.Combine(KeyFileDirectory, "junction");
 
         // mklink /J needs no elevation, unlike a symbolic link.
         using (var mklink = Process.Start(new ProcessStartInfo("cmd.exe", ["/c", "mklink", "/J", junction, target])

@@ -736,12 +736,18 @@ passed - where its platform, library or service isn't there:
   linker on any Linux host, with their installed-library cases needing the `libhkdfguard1`
   package; `LinuxNativeIntegrationTests` also need `HKDFGUARD_TEST_SERVICE`, and some
   `HKDFGUARD_TEST_SERVICE_OTHER`, the policy's `tpm.require_pinned_names`, or `/usr/bin/hkdfguard`
-  (see `scripts/provision-linux-test-key.sh` above).
+  (see `scripts/provision-linux-test-key.sh` above). The Linux library refuses a key file below
+  any group- or other-writable directory, sticky or not, so the tests that write one use a private
+  (0700) folder under `$XDG_RUNTIME_DIR` or `~/.cache/hkdfguard-tests` - never `/tmp` - and are
+  reported as skipped, with the reason, where neither is trusted.
 - **macOS** - `MacOsNativeIntegrationTests` run on macOS against the real filesystem and Security
   framework, with their installed-library cases needing `libhkdfguard_v1.dylib` at
   `/Library/Application Support/HkdfGuard/v1` (or `~/.hkdfguard/v1`) and `hkdfguard-v1-initialize`
   beside it. The shared round trips run against `HKDFGUARD_TEST_SERVICE`, or
   `com.hkdfguard.integration.test.221` when `hkdfguard-v1-initialize status` reports it present.
+  The first call under that service from a freshly built test host can raise a keychain dialog
+  ("Always Allow"); if nobody answers it within 60 seconds the tests fail and say so, rather than
+  hang.
 
 `NativeProcessHardeningTests` harden the test host itself, so they also need
 `HKDFGUARD_TEST_PROCESS_HARDENING=1`, and are best run one at a time.
