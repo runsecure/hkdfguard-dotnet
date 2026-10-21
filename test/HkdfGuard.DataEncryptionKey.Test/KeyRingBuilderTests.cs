@@ -346,6 +346,43 @@ public class KeyRingBuilderTests
     }
 
     [Fact]
+    public async Task Build_WithAKeyFileAboveEveryEphemeralVersionAndRotationOn_ThrowsBeforeReadingAnyKeyFile()
+    {
+        var wrapper = new ReadingKeyWrapper(RandomNumberGenerator.GetBytes(32), "wrapped"u8.ToArray());
+        var factory = new RecordingCryptoProviderFactory();
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => new KeyRingBuilder()
+            .WithKeyWrapper(wrapper)
+            .WithCryptoProviderFactory(factory)
+            .WithKeyRefreshInterval(60)
+            .WithKeyFile(10, "dek.bin")
+            .WithEphemeralKey(1)
+            .BuildAsync());
+
+        Assert.StartsWith("Key file version 10 is above every ephemeral version", exception.Message);
+        Assert.Empty(wrapper.PathsRead);
+        Assert.Empty(factory.CreatedProviders);
+    }
+
+    [Fact]
+    public async Task Build_WithAKeyFileAboveEveryEphemeralVersionAndRotationOff_KeepsTheKeyFileCurrent()
+    {
+        var wrapper = new ReadingKeyWrapper(RandomNumberGenerator.GetBytes(32), "wrapped"u8.ToArray());
+
+        await using var ring = await new KeyRingBuilder()
+            .WithKeyWrapper(wrapper)
+            .WithCryptoProviderFactory(new RecordingCryptoProviderFactory())
+            .WithKeyRefreshInterval(60)
+            .WithKeyFile(10, "dek.bin")
+            .WithEphemeralKey(1)
+            .WithoutEphemeralKeyRotation()
+            .BuildAsync();
+
+        Assert.Equal(10, ring.CurrentVersion);
+        Assert.Null(ring.EphemeralKeyRotationInterval);
+    }
+
+    [Fact]
     public async Task Build_WhenTheKeyWrapperRefusesAKeyFile_FailsWithItsReason()
     {
         var wrapper = new ReadingKeyWrapper(RandomNumberGenerator.GetBytes(32), []);

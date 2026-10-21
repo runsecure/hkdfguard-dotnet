@@ -195,6 +195,81 @@ public class NativeHkdfKeyWrapperV1Tests
         Assert.Equal(0, fakeLibrary.GenerateAndWrapCallCount);
     }
 
+    // A successful call reporting a count outside the buffer broke the native contract: the
+    // result is refused and whatever the call left in the buffer is zeroed.
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(17)]
+    public async Task WrapAsync_WhenTheLibraryReportsACountOutsideTheBuffer_ThrowsAndZeroesIt(int reported)
+    {
+        var fakeLibrary = new FakeHkdfGuardKmsLibrary { WrapDekBytesWrittenOverride = reported };
+        var wrapper = new NativeHkdfKeyWrapperV1("service.g", fakeLibrary);
+        var resultBuffer = new byte[16];
+
+        var exception = await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await wrapper.WrapAsync(new byte[] { 1, 2, 3 }, resultBuffer));
+
+        Assert.Equal($"Native KMS wrap for service 'service.g' reported {reported} bytes written into a 16-byte buffer; the result was discarded.", exception.Message);
+        Assert.All(resultBuffer, b => Assert.Equal(0, b));
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(int.MinValue)]
+    [InlineData(33)]
+    public async Task UnwrapAsync_WhenTheLibraryReportsACountOutsideTheBuffer_ThrowsAndZeroesIt(int reported)
+    {
+        var fakeLibrary = new FakeHkdfGuardKmsLibrary
+        {
+            UnwrapPayloadToEmit = Enumerable.Repeat((byte)0xFF, 32).ToArray(),
+            UnwrapDekBytesWrittenOverride = reported,
+        };
+        var wrapper = new NativeHkdfKeyWrapperV1("service.g", fakeLibrary);
+        var resultBuffer = new byte[32];
+
+        var exception = await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await wrapper.UnwrapAsync(new byte[] { 1 }, resultBuffer));
+
+        Assert.Contains($"reported {reported} bytes written into a 32-byte buffer", exception.Message);
+        Assert.All(resultBuffer, b => Assert.Equal(0, b));
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(17)]
+    public async Task GenerateAndWrapAsync_WhenTheLibraryReportsACountOutsideTheBuffer_ThrowsAndZeroesIt(int reported)
+    {
+        var fakeLibrary = new FakeHkdfGuardKmsLibrary
+        {
+            GenerateAndWrapPayloadToEmit = Enumerable.Repeat((byte)0xFF, 16).ToArray(),
+            GenerateAndWrapDekBytesWrittenOverride = reported,
+        };
+        var wrapper = new NativeHkdfKeyWrapperV1("service.g", fakeLibrary);
+        var resultBuffer = new byte[16];
+
+        var exception = await Assert.ThrowsAsync<CryptographicException>(async () =>
+            await wrapper.GenerateAndWrapAsync(resultBuffer));
+
+        Assert.Contains($"generate-and-wrap for service 'service.g' reported {reported} bytes", exception.Message);
+        Assert.All(resultBuffer, b => Assert.Equal(0, b));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(32)]
+    public async Task UnwrapAsync_ACountAtEitherEndOfTheBuffer_IsAccepted(int reported)
+    {
+        var fakeLibrary = new FakeHkdfGuardKmsLibrary
+        {
+            UnwrapPayloadToEmit = new byte[32],
+            UnwrapDekBytesWrittenOverride = reported,
+        };
+        var wrapper = new NativeHkdfKeyWrapperV1("service.g", fakeLibrary);
+
+        Assert.Equal(reported, await wrapper.UnwrapAsync(new byte[] { 1 }, new byte[32]));
+    }
+
     [Fact]
     public async Task AFailure_NamesTheStatusAndItsSharedMeaning()
     {

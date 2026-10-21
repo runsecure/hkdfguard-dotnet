@@ -43,13 +43,16 @@ public sealed class HkdfGuardOptions
     /// How many hours between scheduled ephemeral key rotations - each adds a fresh ephemeral key
     /// as the ring's new current version. 1 to <see cref="MaxEphemeralKeyRotationHours"/>. Unset keeps
     /// KeyRingBuilder's default of 24 hours. Applies only when EphemeralKeys is not empty. Can't be
-    /// combined with DisableEphemeralKeyRotation.
+    /// combined with DisableEphemeralKeyRotation. While rotation is on, the highest EphemeralKeys
+    /// version must be above every KeyFiles version, or the first rotation would replace the key
+    /// file as the current version.
     /// </summary>
     public int? EphemeralKeyRotationHours { get; set; }
 
     /// <summary>
     /// True turns scheduled ephemeral key rotation off: the ephemeral key built at startup stays
-    /// current until the process restarts.
+    /// current until the process restarts. Required when a KeyFiles version is above every
+    /// EphemeralKeys version.
     /// </summary>
     public bool DisableEphemeralKeyRotation { get; set; }
 
