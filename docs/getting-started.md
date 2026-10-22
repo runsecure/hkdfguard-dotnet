@@ -10,8 +10,8 @@ It takes about 20 minutes. You need:
 - The .NET 10 SDK.
 - The HkdfGuard native package for Windows.
 
-macOS works the same way with different install paths and tool options; see the
-[CLI reference](reference/cli.md#macos). Linux support is not released yet.
+macOS and Linux work the same way with different install paths and tool options; see the
+[CLI reference](reference/cli.md#macos) for macOS and its [Linux section](reference/cli.md#linux).
 
 ## How the pieces fit
 
@@ -149,8 +149,9 @@ only its owner can read and write it. Its `--group` option adds a local group wh
 read the file too: the group your application's account is in.
 
 Your application reads the key file through the native library, which refuses one that another
-account could have written or replaced. Keep key files in a folder only administrators can write
-to, reached through real folders (no links, junctions or short names like `PROGRA~1`).
+account could have written or replaced. Keep key files in a folder only administrators and
+deployers can write to, reached through real folders (no links, junctions or short names like
+`PROGRA~1`), and never under `C:\ProgramData`.
 
 Whether `wrap` needs elevation, and which accounts may use a service's KEK, is up to the native
 library on each platform; see `hkdfguard wrap --help` and the native library's documentation.
@@ -199,13 +200,30 @@ static void CreateKeyFile(string toolPath, string serviceName, string keyFilePat
 }
 ```
 
+Before you call it on Windows, prepare the folder it writes to. The native library refuses a key
+file anywhere under `C:\ProgramData`, where every user may create entries, and in a folder created
+directly under `C:\` with its default permissions. From an elevated PowerShell, give the key files
+a folder of their own, with inherited permissions removed:
+
+```powershell
+New-Item -ItemType Directory -Force C:\HkdfGuardKeys\myapp | Out-Null
+icacls C:\HkdfGuardKeys /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-32-545:(OI)(CI)RX" "HkdfGuardDeployers:(OI)(CI)M"
+icacls C:\HkdfGuardKeys /setowner "*S-1-5-32-544" /T
+```
+
+Then make the call from an elevated prompt, or as a member of `HkdfGuardDeployers`. Under the
+production security model, the Windows default, `wrap` refuses any other account, and the library
+doesn't trust a key file that the application's own account wrote. The native library's
+[administration guide](https://github.com/runsecure/hkdfguard-native-windows/blob/main/docs/admin-guide.md#where-to-keep-key-files)
+explains both rules.
+
 Call it once:
 
 ```csharp
 CreateKeyFile(
     Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), @"HkdfGuard\v1\hkdfguard.exe"),
     serviceName: "com.example.myapp",
-    keyFilePath: @"C:\ProgramData\MyApp\keys\v1.key",
+    keyFilePath: @"C:\HkdfGuardKeys\myapp\v1.key",
     group: "HkdfGuardUsers");
 ```
 
@@ -224,7 +242,7 @@ await using var ring = await new KeyRingBuilder()
     .WithKeyWrapper(new NativeHkdfKeyWrapperV1("com.example.myapp"))
     .WithCryptoProviderFactory(new AesGcmCryptoProviderFactory())
     .WithKeyRefreshInterval(60)
-    .WithKeyFile(version: 1, pathToFile: @"C:\ProgramData\MyApp\keys\v1.key")
+    .WithKeyFile(version: 1, pathToFile: @"C:\HkdfGuardKeys\myapp\v1.key")
     .BuildAsync();
 ```
 
