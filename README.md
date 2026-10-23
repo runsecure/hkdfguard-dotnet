@@ -281,12 +281,13 @@ Node/Python mirror this layering, adding their own consumer branches as they cat
 | `HkdfGuard.KeyWrapping.V1` | `NativeHkdfKeyWrapperV1` (an `IKeyWrapper`, whose async methods complete synchronously) and `NativeHost`, which resolve and bind the current OS's native KMS library (Linux/.so, macOS/.dylib, Windows/.dll - see `Interop/`) to wrap and unwrap a 32-byte DEK under a service-identified KEK held entirely outside this process. |
 | `HkdfGuard.SecureFile` | `TrustedKeyFile.ReadAsync` and `KeyFileTrust` - the managed equivalent of the native library's `hkdfguard_open_file`, for key wrappers with no native library to read key files through (network KMS providers). Refuses a key file unless it, and every folder above it, is owned and modifiable only by the operating system's administrators and the principals a `KeyFileTrust` adds (Windows ACLs and final-path check; Linux/macOS ownership and mode bits, following only trusted symbolic links), and refuses contents that look like an unwrapped key. Depends on `HkdfGuard.Abstractions`. |
 | `HkdfGuard.KeyWrapping.AwsKms` | `AwsKmsKeyWrapper` - an `IKeyWrapper` over one symmetric AWS KMS key (`Encrypt`/`Decrypt`/`GenerateDataKeyWithoutPlaintext`, the key pinned on every `Decrypt`, an optional encryption context bound as AAD), reading key files through `HkdfGuard.SecureFile`. Depends on `HkdfGuard.Abstractions`, `HkdfGuard.SecureFile` and `AWSSDK.KeyManagementService`. |
+| `HkdfGuard.KeyWrapping.AzureKeyVault` | `AzureKeyVaultKeyWrapper` - an `IKeyWrapper` over two Azure Key Vault keys: an RSA key wraps each DEK (RSA-OAEP-256) and a separate EC P-256 key signs each wrapped DEK (ES256), verified before every unwrap, so only principals allowed to sign can create a key file it accepts. Both keys pinned by name, rotation-safe by version; an optional context bound into the signature; key files read through `HkdfGuard.SecureFile`. Depends on `HkdfGuard.Abstractions`, `HkdfGuard.SecureFile` and `Azure.Security.KeyVault.Keys`. |
 | `HkdfGuard.DataEncryptionKey` | The application-facing API: `KeyRing`/`KeyRingBuilder`, `IDataProtector`/`DataProtector`, `DataEncryptionKey` (the `IDataEncryptionKey` over an `ICryptoProvider` - output sizing and telemetry; disposing it disposes its provider), and the default `enc::v{version}::{base64}` wire format. Depends on `HkdfGuard.Abstractions`/`HkdfGuard.Diagnostics`. |
 | `HkdfGuard.Cache` | `ProtectedCache` (an `IProtectedCache` backed by an `IKeyRing` - encrypts under the ring's current key on Add/AddOrUpdate and records its version, reveals under that version on Decrypt, so it follows key rotation; nothing held as plaintext beyond a single call; each value is bound to its name as AAD, so a ciphertext under any other name fails authentication, and names match ignoring ASCII case only) and `ProtectedCacheCollection` (aggregates multiple `IProtectedReadOnlyCache` sources behind one read-only surface, checked in registration order). |
 | `HkdfGuard.EncryptedConfiguration` | `ProtectedConfigurationRoot` (an `IProtectedConfigurationRoot`) - wraps an `IConfigurationRoot`, revealing values formatted as protected secrets via a `KeyRing`; configuration itself only ever holds ciphertext, and `Decrypt` reads fresh from the underlying root every time so `Reload` takes effect immediately. Each value is bound to its own configuration key (`ProtectedConfigurationPurpose`), so a value copied to another key fails to decrypt. |
 | `HkdfGuard.DependencyInjection` | `AddKeyRingAsync` - builds a `KeyRing` asynchronously at registration and registers it as a singleton in an `IServiceCollection`. |
 | `HkdfGuard.Options` | `HkdfGuardOptions`/`HkdfGuardOptionsValidator`/`HkdfGuardOptionsExtensions.ApplyTo` - a plain-data mirror of `KeyRingBuilder`'s configuration surface (`ServiceName`, `KeyRefreshInterval`, `MaxRefreshFailures`/`FailOpenOnRefreshFailure`, key files, ephemeral keys), for binding a `KeyRing`'s identity/policy/key files from configuration. |
-| `HkdfGuard.Diagnostics.Test`, `HkdfGuard.Abstractions.Test`, `HkdfGuard.CryptoProvider.AesGcm256.Test`, `HkdfGuard.KeyWrapping.V1.Test`, `HkdfGuard.SecureFile.Test`, `HkdfGuard.KeyWrapping.AwsKms.Test`, `HkdfGuard.DataEncryptionKey.Test`, `HkdfGuard.Cache.Test`, `HkdfGuard.EncryptedConfiguration.Test`, `HkdfGuard.DependencyInjection.Test`, `HkdfGuard.Options.Test` | xUnit test suites, maintained at full line/branch coverage for their respective projects. |
+| `HkdfGuard.Diagnostics.Test`, `HkdfGuard.Abstractions.Test`, `HkdfGuard.CryptoProvider.AesGcm256.Test`, `HkdfGuard.KeyWrapping.V1.Test`, `HkdfGuard.SecureFile.Test`, `HkdfGuard.KeyWrapping.AwsKms.Test`, `HkdfGuard.KeyWrapping.AzureKeyVault.Test`, `HkdfGuard.DataEncryptionKey.Test`, `HkdfGuard.Cache.Test`, `HkdfGuard.EncryptedConfiguration.Test`, `HkdfGuard.DependencyInjection.Test`, `HkdfGuard.Options.Test` | xUnit test suites, maintained at full line/branch coverage for their respective projects. |
 
 Requires **.NET 10** (`net10.0`).
 
@@ -504,6 +505,24 @@ var wrapper = new AwsKmsKeyWrapper(kms,
 
 [Wrap keys with AWS KMS](docs/how-to/use-aws-kms.md) walks through creating the key, the IAM
 permissions for each role, credentials, and creating key files.
+
+### Wrapping under Azure Key Vault instead
+
+`AzureKeyVaultKeyWrapper` (package `HkdfGuard.KeyWrapping.AzureKeyVault`) wraps each DEK under an
+RSA key in Key Vault and signs it with a separate EC P-256 key; unwrap verifies the signature
+first. RSA wrapping needs only the public key, so without the signature anyone could create a key
+file holding a DEK they chose; with it, only principals allowed to sign can:
+
+```csharp
+var wrapper = new AzureKeyVaultKeyWrapper(
+    new Uri("https://myvault.vault.azure.net/keys/myapp-wrap"),
+    new Uri("https://myvault.vault.azure.net/keys/myapp-sign"),
+    new DefaultAzureCredential(),
+    context: "my.service");
+```
+
+[Wrap keys with Azure Key Vault](docs/how-to/use-azure-key-vault.md) covers creating both keys,
+the role for each identity, and rotation.
 
 ### 2. Build a `KeyRing`
 
@@ -790,6 +809,18 @@ dotnet test test/HkdfGuard.KeyWrapping.AwsKms.Test
 [Run the AWS KMS integration tests](docs/how-to/run-aws-kms-integration-tests.md) sets up a test
 key and a low-privilege IAM user, and keeps the key ARN in a git-ignored runsettings file instead
 of the environment.
+
+`AzureKeyVaultIntegrationTests` make real calls against an RSA wrapping key and an EC P-256
+signing key. They are reported as skipped, never passed, unless `HKDFGUARD_TEST_AZURE_WRAP_KEY_ID`
+and `HKDFGUARD_TEST_AZURE_SIGN_KEY_ID` both name one, which the git-ignored `azure.runsettings`
+does. Credentials come from `DefaultAzureCredential` (for example `az login`):
+
+```powershell
+dotnet test test/HkdfGuard.KeyWrapping.AzureKeyVault.Test --settings azure.runsettings
+```
+
+[Run the Azure Key Vault integration tests](docs/how-to/run-azure-key-vault-integration-tests.md)
+sets up a test vault, both keys and your role on them.
 
 ### Native integration test coverage
 
