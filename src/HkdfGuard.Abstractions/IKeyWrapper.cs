@@ -44,10 +44,12 @@ public interface IKeyWrapper
     /// <summary>
     /// Reads a key file holding a key this instance wrapped, returning its bytes still wrapped -
     /// ready for <see cref="UnwrapAsync"/>. KeyRingBuilder reads every key file through its key
-    /// wrapper, so a wrapper backed by a native KMS can read through that KMS's own checks (the
-    /// native library refuses a file another account could have replaced, or one holding what looks
-    /// like an unwrapped key). The default reads it with ordinary file I/O
-    /// (<see cref="WrappedKeyFile.ReadAsync"/>).
+    /// wrapper, and there is no default: anyone who can replace a key file chooses the key new data
+    /// is encrypted under, so every implementation must refuse a file that an account other than
+    /// the trusted ones could have written or replaced - checking the file, and every folder above
+    /// it, on what was actually opened. <c>NativeHkdfKeyWrapperV1</c> does this through the native
+    /// library's <c>hkdfguard_open_file</c>, which also refuses a file holding what looks like an
+    /// unwrapped key.
     /// </summary>
     /// <param name="path">The key file's path</param>
     /// <param name="cancellationToken">Cancels the operation</param>
@@ -56,6 +58,5 @@ public interface IKeyWrapper
     /// <see cref="InvalidDataException"/>, or a <see cref="FileNotFoundException"/>)</exception>
     /// <exception cref="UnauthorizedAccessException">This account may not read the file, or the key
     /// wrapper doesn't trust where it lives</exception>
-    public ValueTask<byte[]> ReadKeyFileAsync(string path, CancellationToken cancellationToken = default)
-        => WrappedKeyFile.ReadAsync(path, cancellationToken);
+    public ValueTask<byte[]> ReadKeyFileAsync(string path, CancellationToken cancellationToken = default);
 }

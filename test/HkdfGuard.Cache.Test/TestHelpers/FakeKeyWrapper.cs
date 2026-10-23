@@ -9,6 +9,10 @@ namespace HkdfGuard.Cache.Test.TestHelpers;
 /// </summary>
 internal sealed class FakeKeyWrapper(byte[] key) : IKeyWrapper
 {
+    // Test-only: a plain read. Real key wrappers must refuse a key file another account could have replaced.
+    public async ValueTask<byte[]> ReadKeyFileAsync(string path, CancellationToken cancellationToken = default)
+        => await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
+
     public ValueTask<int> WrapAsync(ReadOnlyMemory<byte> plaintext, Memory<byte> result, CancellationToken cancellationToken = default)
         => throw new NotSupportedException($"{nameof(FakeKeyWrapper)} only supports Decrypt.");
 

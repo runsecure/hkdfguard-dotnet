@@ -66,6 +66,10 @@ public class AesGcmCryptoSessionBenchmarks
     // pays once anyway (see GlobalSetup's comment on session caching).
     private sealed class FixedKeyWrapper(byte[] key) : IKeyWrapper
     {
+        // Test-only: a plain read. Real key wrappers must refuse a key file another account could have replaced.
+        public async ValueTask<byte[]> ReadKeyFileAsync(string path, CancellationToken cancellationToken = default)
+            => await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
+
         public ValueTask<int> WrapAsync(ReadOnlyMemory<byte> plaintext, Memory<byte> result, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
         public ValueTask<int> UnwrapAsync(ReadOnlyMemory<byte> wrapped, Memory<byte> result, CancellationToken cancellationToken = default)

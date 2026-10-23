@@ -166,6 +166,10 @@ public class AesGcmCryptoProviderFactoryTests
     // so a test can observe the creating call returning before the key is revealed.
     private sealed class GatedKeyWrapper : IKeyWrapper
     {
+        // Test-only: a plain read. Real key wrappers must refuse a key file another account could have replaced.
+        public async ValueTask<byte[]> ReadKeyFileAsync(string path, CancellationToken cancellationToken = default)
+            => await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
+
         private readonly TaskCompletionSource _gate = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly byte[] _key = RandomNumberGenerator.GetBytes(32);
 
