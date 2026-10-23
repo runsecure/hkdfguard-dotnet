@@ -252,6 +252,12 @@ The `version` you give `WithKeyFile` is what appears as `v1` in every value. Whe
 `v2.key` with `WithKeyFile(version: 2, ...)`. New values use the highest version, and older values
 still decrypt as long as their key file stays registered.
 
+> This step makes the key file the key your program encrypts with, so you can watch a value survive
+> a restart. In an application, key files hold what your deployment pipeline encrypted, and are
+> read at runtime to decrypt it. For values the application encrypts while it runs, add an
+> ephemeral key at a higher version (`.WithEphemeralKey(version: 2)`): its encryption budget is counted exactly, in the one
+> process that holds it. See the README's encryption budget section.
+
 ## If something goes wrong
 
 | You see | Cause | Fix |

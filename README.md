@@ -100,6 +100,14 @@ tracking and purpose-scoped Additional Authenticated Data (AAD).
   because a per-process counter cannot see the other instances sharing the key). A background
   refresh re-reveals the same key, so it does not reset the count. Without an `ActivityListener`
   the only signal is the exception at the limit.
+
+  **The count is kept per process, by design.** It is exact for an ephemeral key, which only one
+  process ever holds. Key files carry what the deployment pipeline encrypted and are meant to be
+  decrypted at runtime; every process that loads one, and every restart, starts a fresh count for
+  it. **For encrypt operations, add an ephemeral key** (`WithEphemeralKey(2)` beside
+  `WithKeyFile(1, ...)`) so new values are encrypted under it. If an application does encrypt
+  values that must outlive the process under a key file, bound that key's use by deploying a new
+  key file at a higher version regularly.
 - **Purpose-scoped protectors.** `IDataProtector` binds a `name` (purpose) to every operation as
   AAD, so a value protected for one purpose can never be decrypted under another - even using the
   same underlying key.
