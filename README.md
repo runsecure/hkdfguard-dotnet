@@ -272,12 +272,13 @@ Node/Python mirror this layering, adding their own consumer branches as they cat
 | `HkdfGuard.SecureFile` | `TrustedKeyFile.ReadAsync` and `KeyFileTrust` - the managed equivalent of the native library's `hkdfguard_open_file`, for key wrappers with no native library to read key files through (network KMS providers). Refuses a key file unless it, and every folder above it, is owned and modifiable only by the operating system's administrators and the principals a `KeyFileTrust` adds (Windows ACLs and final-path check; Linux/macOS ownership and mode bits, following only trusted symbolic links), and refuses contents that look like an unwrapped key. Depends on `HkdfGuard.Abstractions`. |
 | `HkdfGuard.KeyWrapping.AwsKms` | `AwsKmsKeyWrapper` - an `IKeyWrapper` over one symmetric AWS KMS key (`Encrypt`/`Decrypt`/`GenerateDataKeyWithoutPlaintext`, the key pinned on every `Decrypt`, an optional encryption context bound as AAD), reading key files through `HkdfGuard.SecureFile`. Depends on `HkdfGuard.Abstractions`, `HkdfGuard.SecureFile` and `AWSSDK.KeyManagementService`. |
 | `HkdfGuard.KeyWrapping.AzureKeyVault` | `AzureKeyVaultKeyWrapper` - an `IKeyWrapper` over two Azure Key Vault keys: an RSA key wraps each DEK (RSA-OAEP-256) and a separate EC P-256 key signs each wrapped DEK (ES256), verified before every unwrap, so only principals allowed to sign can create a key file it accepts. Both keys pinned by name, rotation-safe by version; an optional context bound into the signature; key files read through `HkdfGuard.SecureFile`. Depends on `HkdfGuard.Abstractions`, `HkdfGuard.SecureFile` and `Azure.Security.KeyVault.Keys`. |
+| `HkdfGuard.KeyWrapping.GoogleKms` | `GoogleKmsKeyWrapper` - an `IKeyWrapper` over one symmetric Google Cloud KMS key (`Encrypt`/`Decrypt`, the key pinned on every `Decrypt`, a fixed HkdfGuard label and an optional context bound as AAD, CRC32C checksums on every request and response), reading key files through `HkdfGuard.SecureFile`. Depends on `HkdfGuard.Abstractions`, `HkdfGuard.SecureFile` and `Google.Cloud.Kms.V1`. |
 | `HkdfGuard.DataEncryptionKey` | The application-facing API: `KeyRing`/`KeyRingBuilder`, `IDataProtector`/`DataProtector`, `DataEncryptionKey` (the `IDataEncryptionKey` over an `ICryptoProvider` - output sizing and telemetry; disposing it disposes its provider), and the default `enc::v{version}::{base64}` wire format. Depends on `HkdfGuard.Abstractions`/`HkdfGuard.Diagnostics`. |
 | `HkdfGuard.Cache` | `ProtectedCache` (an `IProtectedCache` backed by an `IKeyRing` - encrypts under the ring's current key on Add/AddOrUpdate and records its version, reveals under that version on Decrypt, so it follows key rotation; nothing held as plaintext beyond a single call; each value is bound to its name as AAD, so a ciphertext under any other name fails authentication, and names match ignoring ASCII case only) and `ProtectedCacheCollection` (aggregates multiple `IProtectedReadOnlyCache` sources behind one read-only surface, checked in registration order). |
 | `HkdfGuard.EncryptedConfiguration` | `ProtectedConfigurationRoot` (an `IProtectedConfigurationRoot`) - wraps an `IConfigurationRoot`, revealing values formatted as protected secrets via a `KeyRing`; configuration itself only ever holds ciphertext, and `Decrypt` reads fresh from the underlying root every time so `Reload` takes effect immediately. Each value is bound to its own configuration key (`ProtectedConfigurationPurpose`), so a value copied to another key fails to decrypt. |
 | `HkdfGuard.DependencyInjection` | `AddKeyRingAsync` - builds a `KeyRing` asynchronously at registration and registers it as a singleton in an `IServiceCollection`. |
 | `HkdfGuard.Options` | `HkdfGuardOptions`/`HkdfGuardOptionsValidator`/`HkdfGuardOptionsExtensions.ApplyTo` - a plain-data mirror of `KeyRingBuilder`'s configuration surface (`ServiceName`, `KeyRefreshInterval`, `MaxRefreshFailures`/`FailOpenOnRefreshFailure`, key files, ephemeral keys), for binding a `KeyRing`'s identity/policy/key files from configuration. |
-| `HkdfGuard.Diagnostics.Test`, `HkdfGuard.Abstractions.Test`, `HkdfGuard.CryptoProvider.AesGcm256.Test`, `HkdfGuard.KeyWrapping.V1.Test`, `HkdfGuard.SecureFile.Test`, `HkdfGuard.KeyWrapping.AwsKms.Test`, `HkdfGuard.KeyWrapping.AzureKeyVault.Test`, `HkdfGuard.DataEncryptionKey.Test`, `HkdfGuard.Cache.Test`, `HkdfGuard.EncryptedConfiguration.Test`, `HkdfGuard.DependencyInjection.Test`, `HkdfGuard.Options.Test` | xUnit test suites, maintained at full line/branch coverage for their respective projects. |
+| `HkdfGuard.Diagnostics.Test`, `HkdfGuard.Abstractions.Test`, `HkdfGuard.CryptoProvider.AesGcm256.Test`, `HkdfGuard.KeyWrapping.V1.Test`, `HkdfGuard.SecureFile.Test`, `HkdfGuard.KeyWrapping.AwsKms.Test`, `HkdfGuard.KeyWrapping.AzureKeyVault.Test`, `HkdfGuard.KeyWrapping.GoogleKms.Test`, `HkdfGuard.DataEncryptionKey.Test`, `HkdfGuard.Cache.Test`, `HkdfGuard.EncryptedConfiguration.Test`, `HkdfGuard.DependencyInjection.Test`, `HkdfGuard.Options.Test` | xUnit test suites, maintained at full line/branch coverage for their respective projects. |
 
 Requires **.NET 10** (`net10.0`).
 
@@ -502,6 +503,25 @@ var wrapper = new AzureKeyVaultKeyWrapper(
 
 [Wrap keys with Azure Key Vault](docs/how-to/use-azure-key-vault.md) covers creating both keys,
 the role for each identity, and rotation.
+
+### Wrapping under Google Cloud KMS instead
+
+`GoogleKmsKeyWrapper` (package `HkdfGuard.KeyWrapping.GoogleKms`) is an `IKeyWrapper` over one
+symmetric Cloud KMS key, pinned on every `Decrypt`. Each wrapped DEK is bound, as AAD, to a fixed
+HkdfGuard label and an optional context, and every request and response is checked with CRC32C.
+The client signs in with Application Default Credentials:
+
+```csharp
+var kms = await KeyManagementServiceClient.CreateAsync();
+var wrapper = new GoogleKmsKeyWrapper(kms,
+    "projects/my-project/locations/us-east1/keyRings/myapp/cryptoKeys/myapp-wrap",
+    context: "my.service");
+```
+
+As with AWS KMS, any principal allowed to encrypt under the key can create a key file the wrapper
+accepts: give the application `roles/cloudkms.cryptoKeyDecrypter` only.
+[Wrap keys with Google Cloud KMS](docs/how-to/use-google-kms.md) covers creating the key, the role
+for each identity, and rotation.
 
 ### 2. Build a `KeyRing`
 
@@ -800,6 +820,18 @@ dotnet test test/HkdfGuard.KeyWrapping.AzureKeyVault.Test --settings azure.runse
 
 [Run the Azure Key Vault integration tests](docs/how-to/run-azure-key-vault-integration-tests.md)
 sets up a test vault, both keys and your role on them.
+
+`GoogleKmsIntegrationTests` make real calls against a symmetric Cloud KMS key. They are reported
+as skipped, never passed, unless `HKDFGUARD_TEST_GOOGLE_KMS_KEY_NAME` names one, which the
+git-ignored `google.runsettings` does. Credentials come from Application Default Credentials (for
+example `gcloud auth application-default login`):
+
+```powershell
+dotnet test test/HkdfGuard.KeyWrapping.GoogleKms.Test --settings google.runsettings
+```
+
+[Run the Google Cloud KMS integration tests](docs/how-to/run-google-kms-integration-tests.md) sets
+up a test key and your role on it.
 
 ### Native integration test coverage
 
