@@ -66,3 +66,6 @@ nunit-*.xml
 # Native release artifacts (e.g. src/HkdfGuard.KeyWrapping.V1/runtimes/) are distributed and
 # installed separately, never committed. Matches a runtimes folder at any depth.
 runtimes/
+
+# Local test run settings (e.g. the AWS KMS key ARN for integration tests). Never committed.
+*.runsettings

@@ -474,6 +474,9 @@ var wrapper = new AwsKmsKeyWrapper(kms,
 - The principal needs `kms:Encrypt`, `kms:Decrypt` and `kms:GenerateDataKeyWithoutPlaintext` on the key.
   A process that only reads existing key files needs only `kms:Decrypt`.
 
+[Wrap keys with AWS KMS](docs/how-to/use-aws-kms.md) walks through creating the key, the IAM
+permissions for each role, credentials, and creating key files.
+
 ### 2. Build a `KeyRing`
 
 `KeyRingBuilder` fluently collects a service name/cache-expiry/rotation
@@ -755,6 +758,10 @@ SDK's usual chain. The tests never create, alter or delete a key:
 HKDFGUARD_TEST_AWS_KMS_KEY_ID=arn:aws:kms:us-east-1:111122223333:key/... AWS_REGION=us-east-1 \
 dotnet test test/HkdfGuard.KeyWrapping.AwsKms.Test
 ```
+
+[Run the AWS KMS integration tests](docs/how-to/run-aws-kms-integration-tests.md) sets up a test
+key and a low-privilege IAM user, and keeps the key ARN in a git-ignored runsettings file instead
+of the environment.
 
 ### Native integration test coverage
 
