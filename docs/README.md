@@ -9,6 +9,9 @@ file.
 **Running HkdfGuard in production** (installing, provisioning, creating key files): see the
 [`hkdfguard` reference](reference/cli.md).
 
+**Using AWS KMS as the KEK** instead of the native TPM, Secure Enclave or Platform Crypto
+Provider: see [Wrap keys with AWS KMS](how-to/use-aws-kms.md).
+
 ## Map
 
 | Kind | Page | Status |
@@ -16,6 +19,8 @@ file.
 | Tutorial | [Getting started](getting-started.md) | Draft |
 | How-to | Provision a service on each platform | Planned |
 | How-to | Create key files in a deployment pipeline | Planned |
+| How-to | [Wrap keys with AWS KMS](how-to/use-aws-kms.md) | Draft |
+| How-to | [Run the AWS KMS integration tests](how-to/run-aws-kms-integration-tests.md) | Draft |
 | How-to | Rotate keys | Planned (see the README's *Key rotation* section for now) |
 | How-to | Use HkdfGuard with dependency injection and `IConfiguration` | Planned |
 | How-to | Troubleshoot | Planned |

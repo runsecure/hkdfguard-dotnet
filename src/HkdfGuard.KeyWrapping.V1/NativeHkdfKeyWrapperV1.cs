@@ -45,7 +45,7 @@ public class NativeHkdfKeyWrapperV1 : IKeyWrapper
             return ValueTask.FromCanceled<int>(cancellationToken);
 
         var status = _library.WrapDek(_serviceName, plaintext.Span, result.Span, out var bytesWritten);
-        return Complete(status, bytesWritten, "wrap");
+        return Complete(status, bytesWritten, result.Span, "wrap");
     }
 
     /// <inheritdoc/>
@@ -58,7 +58,7 @@ public class NativeHkdfKeyWrapperV1 : IKeyWrapper
         if (status != AbstractHkdfGuardKmsLibrary.Ok)
             CryptographicOperations.ZeroMemory(result.Span);
 
-        return Complete(status, bytesWritten, "unwrap");
+        return Complete(status, bytesWritten, result.Span, "unwrap");
     }
 
     /// <inheritdoc/>
@@ -68,7 +68,7 @@ public class NativeHkdfKeyWrapperV1 : IKeyWrapper
             return ValueTask.FromCanceled<int>(cancellationToken);
 
         var status = _library.GenerateAndWrapDek(_serviceName, result.Span, out var bytesWritten);
-        return Complete(status, bytesWritten, "generate-and-wrap");
+        return Complete(status, bytesWritten, result.Span, "generate-and-wrap");
     }
 
     /// <summary>
@@ -100,10 +100,16 @@ public class NativeHkdfKeyWrapperV1 : IKeyWrapper
         }
     }
 
-    private ValueTask<int> Complete(int status, int bytesWritten, string operation)
+    private ValueTask<int> Complete(int status, int bytesWritten, Span<byte> result, string operation)
     {
         if (status == AbstractHkdfGuardKmsLibrary.Ok)
-            return ValueTask.FromResult(bytesWritten);
+        {
+            if (AbstractHkdfGuardKmsLibrary.IsWrittenWithinCapacity(bytesWritten, result))
+                return ValueTask.FromResult(bytesWritten);
+
+            return ValueTask.FromException<int>(new CryptographicException(
+                $"Native KMS {operation} for service '{_serviceName}' reported {bytesWritten} bytes written into a {result.Length}-byte buffer; the result was discarded."));
+        }
 
         // Name the platform's meaning when it is known - "-13" alone tells an operator nothing.
         var meaning = _library.DescribeStatus(status) is { } description ? $" ({description})" : string.Empty;

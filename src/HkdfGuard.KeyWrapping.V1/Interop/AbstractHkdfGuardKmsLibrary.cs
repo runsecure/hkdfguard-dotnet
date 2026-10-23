@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using HkdfGuard.Abstractions;
 
 namespace HkdfGuard.KeyWrapping.V1.Interop;
@@ -170,7 +171,13 @@ internal abstract class AbstractHkdfGuardKmsLibrary
         var buffer = new byte[WrappedKeyLimits.MaxBytes];
         var status = OpenFile(path, buffer, out var bytesRead);
         if (status == Ok)
+        {
+            if (!IsWrittenWithinCapacity(bytesRead, buffer))
+                throw new CryptographicException(
+                    $"Native KMS open-file for key file '{path}' reported {bytesRead} bytes read into a {buffer.Length}-byte buffer; the result was discarded.");
+
             return buffer[..bytesRead];
+        }
 
         var message = $"Key file '{path}' was refused by the native library with status {status} ({DescribeStatus(status) ?? "unknown status"}).";
         throw status switch
@@ -190,6 +197,22 @@ internal abstract class AbstractHkdfGuardKmsLibrary
     /// <param name="bytesRead">On success, the number of bytes read.</param>
     /// <returns><see cref="Ok"/> on success, or a negative error code.</returns>
     protected abstract int OpenFile(string path, Span<byte> destination, out int bytesRead);
+
+    /// <summary>
+    /// Checks the count a successful native call reports writing against the buffer it was given,
+    /// as the Go and Node bindings do: a count below zero or above the buffer's length breaks the
+    /// native contract, so <paramref name="destination"/> is zeroed - it may hold part of a key -
+    /// and the caller must refuse the result.
+    /// </summary>
+    /// <returns>True when 0 &lt;= <paramref name="written"/> &lt;= destination.Length.</returns>
+    internal static bool IsWrittenWithinCapacity(int written, Span<byte> destination)
+    {
+        if (written >= 0 && written <= destination.Length)
+            return true;
+
+        CryptographicOperations.ZeroMemory(destination);
+        return false;
+    }
 
     /// <summary>
     /// hkdfguard_harden_process_with_flags' HKDFGUARD_HARDEN_REQUIRE_PROTECTED_SIGNATURE: fail unless
