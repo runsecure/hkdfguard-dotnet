@@ -13,6 +13,8 @@ namespace HkdfGuard.KeyWrapping.V1.Interop;
 /// <list type="number">
 /// <item><b>Location.</b> The system install, <see cref="SystemDirectory"/>, is used whenever it
 /// exists; the per-user install, <c>~/.hkdfguard/v1</c>, only when there is no system install.
+/// "~" is the effective user's home from the account database (getpwuid_r), never the HOME
+/// environment variable, which whoever starts the process could point anywhere.
 /// That order matters: anything running as the user can write to the user's home, so a per-user
 /// file must never be able to override a root-owned system one. If the system install exists but
 /// fails a check, loading fails - it never falls back to the user install. Nor does it fall back
@@ -27,6 +29,9 @@ namespace HkdfGuard.KeyWrapping.V1.Interop;
 /// the user themselves, could have put the file there.</item>
 /// <item><b>Code signature.</b> The file's signature must be valid and satisfy
 /// <see cref="CodeRequirement"/> - signed through Apple's CA by the HkdfGuard team.</item>
+/// <item><b>Version.</b> The library's own version - LC_ID_DYLIB's current version, in the Mach-O
+/// header the signature covers - must be at least <see cref="MinimumLibraryVersion"/>, so an older
+/// release, though genuinely signed, can't be put in place of a current one.</item>
 /// <item><b>What dyld loaded.</b> dlopen of an absolute path does not load exactly that path: dyld
 /// first looks for the path's leaf name in every DYLD_LIBRARY_PATH directory (dlopen(3)), and the
 /// dotnet host is entitled to honour DYLD_* variables despite its hardened runtime. So the loader
@@ -75,6 +80,15 @@ internal static class MacOsNativeLibraryLoader
     private static readonly HashSet<string> SharedSystemDirectories =
         new(["/", "/Library", "/Library/Application Support", "/Users"], StringComparer.Ordinal);
 
+    /// <summary>
+    /// The oldest library release this package loads, as Mach-O packs a version: major &lt;&lt; 16 |
+    /// minor &lt;&lt; 8 | patch (0.9.0). Raise it when a release fixes a security issue in an older one.
+    /// </summary>
+    internal const uint MinimumLibraryVersion = 0x0000_0900;
+
+    /// <summary>How much of the file is read to find its version: the header and load commands.</summary>
+    internal const int VersionReadLimit = 64 * 1024;
+
     /// <summary>The library's own minimum (its LC_BUILD_VERSION minos).</summary>
     internal static readonly Version MinimumMacOsVersion = new(13, 0);
 
@@ -110,12 +124,12 @@ internal static class MacOsNativeLibraryLoader
 
             RequireSupportedPlatform(RuntimeInformation.ProcessArchitecture, Environment.OSVersion.Version);
 
-            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile, Environment.SpecialFolderOption.DoNotVerify);
-            var (path, isSystem) = ChoosePath(MacOsNative.Probe, home);
+            var (path, isSystem) = ChoosePath(MacOsNative.Probe, MacOsNative.GetAccountHomeDirectory());
 
             uint[] trustedOwners = isSystem ? [0] : [0, MacOsNative.GetEffectiveUserId()];
             VerifyLocation(path, MacOsNative.GetStatus, trustedOwners);
             VerifySignature(path, MacOsNative.CheckCodeSignature);
+            VerifyVersion(path, ReadHead(path));
             RefuseShadowing(Environment.GetEnvironmentVariable, File.Exists);
 
             // dyld may still map a different file than the path asks for (see the class summary),
@@ -166,18 +180,129 @@ internal static class MacOsNativeLibraryLoader
     /// <param name="probe">lstat's result for a path: 0 if it exists, else the errno.</param>
     /// <exception cref="DllNotFoundException">Neither exists.</exception>
     /// <exception cref="SecurityException">An install location could not be examined.</exception>
-    internal static (string Path, bool IsSystem) ChoosePath(Func<string, int> probe, string homeDirectory)
+    /// <param name="homeDirectory">The user's home from the account database; null if there is none,
+    /// and then only the system install is considered.</param>
+    internal static (string Path, bool IsSystem) ChoosePath(Func<string, int> probe, string? homeDirectory)
     {
         if (IsPresent(SystemPath, probe, "system-wide"))
             return (SystemPath, true);
 
-        var user = UserPath(homeDirectory);
         // Only an absolute home: a relative one would resolve against the working directory.
-        if (homeDirectory.StartsWith('/') && IsPresent(user, probe, "per-user"))
+        if (homeDirectory is null || !homeDirectory.StartsWith('/'))
+            throw new DllNotFoundException(
+                $"The HkdfGuard native KMS library is not installed. Install it at '{SystemPath}' (system-wide); it is never loaded from anywhere else.");
+
+        var user = UserPath(homeDirectory);
+        if (IsPresent(user, probe, "per-user"))
             return (user, false);
 
         throw new DllNotFoundException(
             $"The HkdfGuard native KMS library is not installed. Install it at '{SystemPath}' (system-wide) or '{user}' (this user); it is never loaded from anywhere else.");
+    }
+
+    /// <summary>
+    /// Refuses a library older than <see cref="MinimumLibraryVersion"/>, or one whose version can't
+    /// be read. <paramref name="head"/> is the start of the verified file (see <see cref="ReadHead"/>).
+    /// </summary>
+    /// <exception cref="SecurityException">The version is missing, unreadable or too old.</exception>
+    internal static void VerifyVersion(string path, ReadOnlySpan<byte> head)
+    {
+        var version = ReadLibraryVersion(head)
+            ?? throw new SecurityException(
+                $"'{path}' is not an arm64 Mach-O library whose version can be read; refusing to load it.");
+        if (version < MinimumLibraryVersion)
+            throw new SecurityException(
+                $"'{path}' is HkdfGuard native library version {FormatVersion(version)}, older than the minimum this package accepts ({FormatVersion(MinimumLibraryVersion)}); install a current release.");
+    }
+
+    /// <summary>Major.minor.patch of a Mach-O packed version.</summary>
+    internal static string FormatVersion(uint packed) => $"{packed >> 16}.{(packed >> 8) & 0xFF}.{packed & 0xFF}";
+
+    /// <summary>The first <see cref="VersionReadLimit"/> bytes of the file (fewer if it's shorter).</summary>
+    [ExcludeFromCodeCoverage(Justification = "File I/O feeding VerifyVersion, which is covered.")]
+    private static byte[] ReadHead(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        var buffer = new byte[VersionReadLimit];
+        var total = 0;
+        int read;
+        while (total < buffer.Length && (read = stream.Read(buffer, total, buffer.Length - total)) > 0)
+            total += read;
+        return buffer[..total];
+    }
+
+    private const uint MachMagic64 = 0xFEEDFACF;     // MH_MAGIC_64, little-endian on arm64
+    private const uint FatMagic = 0xCAFEBABE;        // FAT_MAGIC, big-endian
+    private const uint FatMagic64 = 0xCAFEBABF;      // FAT_MAGIC_64, big-endian
+    private const uint CpuTypeArm64 = 0x0100000C;    // CPU_TYPE_ARM64
+    private const uint LoadCommandIdDylib = 0xD;     // LC_ID_DYLIB
+    private const int MachHeader64Size = 32;
+    private const int DylibCommandSize = 24;         // current_version is at offset 16
+
+    /// <summary>
+    /// The current version in an arm64 Mach-O library's LC_ID_DYLIB, from <paramref name="data"/>, the
+    /// start of the file; null if it is malformed, not arm64, has no LC_ID_DYLIB, or its header and
+    /// load commands don't fit in <paramref name="data"/>. A universal (fat) file is read through its
+    /// arm64 slice. Every length is checked before it is used.
+    /// </summary>
+    internal static uint? ReadLibraryVersion(ReadOnlySpan<byte> data)
+    {
+        if (data.Length < 8)
+            return null;
+
+        var bigEndianMagic = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(data);
+        if (bigEndianMagic is FatMagic or FatMagic64)
+        {
+            var entrySize = bigEndianMagic == FatMagic ? 20 : 32;
+            var count = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(data[4..]);
+            if (count > (uint)((data.Length - 8) / entrySize))
+                return null;
+            for (var i = 0; i < (int)count; i++)
+            {
+                var entry = data.Slice(8 + i * entrySize, entrySize);
+                if (System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(entry) != CpuTypeArm64)
+                    continue;
+                ulong offset = bigEndianMagic == FatMagic
+                    ? System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(entry[8..])
+                    : System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(entry[8..]);
+                if (offset >= (ulong)data.Length)
+                    return null;
+                return ReadThinLibraryVersion(data[(int)offset..]);
+            }
+            return null;
+        }
+
+        return ReadThinLibraryVersion(data);
+    }
+
+    private static uint? ReadThinLibraryVersion(ReadOnlySpan<byte> data)
+    {
+        if (data.Length < MachHeader64Size)
+            return null;
+        var le = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian;
+        if (le(data) != MachMagic64 || le(data[4..]) != CpuTypeArm64)
+            return null;
+
+        var commandCount = le(data[16..]);
+        var commandsSize = le(data[20..]);
+        if (commandsSize > (uint)(data.Length - MachHeader64Size) || commandCount > commandsSize / 8)
+            return null;
+
+        var commands = data.Slice(MachHeader64Size, (int)commandsSize);
+        var at = 0;
+        for (var i = 0u; i < commandCount; i++)
+        {
+            if (commands.Length - at < 8)
+                return null;
+            var command = le(commands[at..]);
+            var size = le(commands[(at + 4)..]);
+            if (size < 8 || size % 8 != 0 || size > (uint)(commands.Length - at))
+                return null;
+            if (command == LoadCommandIdDylib)
+                return size < DylibCommandSize ? null : le(commands[(at + 16)..]);
+            at += (int)size;
+        }
+        return null;
     }
 
     // ENOENT and ENOTDIR: nothing is installed there. Anything else (EACCES, ELOOP, EIO, ...) means

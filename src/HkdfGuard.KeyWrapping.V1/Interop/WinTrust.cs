@@ -6,12 +6,13 @@ using System.Security.Cryptography.X509Certificates;
 namespace HkdfGuard.KeyWrapping.V1.Interop;
 
 /// <summary>
-/// WinVerifyTrust with the generic Authenticode policy: checks that a file's embedded signature is
-/// intact and chains to a trusted root (honouring a timestamp countersignature, so a signature made
-/// while the certificate was valid stays valid). Revocation isn't checked and no network fetch is
-/// made, so loading the library never blocks on a CRL or OCSP endpoint. The signer's certificate
-/// chain - the one WinVerifyTrust itself built and validated - is handed back for the caller's own
-/// checks.
+/// WinVerifyTrust with the generic Authenticode policy. <see cref="VerifyEmbeddedSignature"/> checks
+/// that a file's embedded signature is intact and chains to a trusted root (honouring a timestamp
+/// countersignature, so a signature made while the certificate was valid stays valid), with no
+/// revocation check and no network fetch; the signer's certificate chain - the one WinVerifyTrust
+/// itself built and validated - is handed back for the caller's own checks.
+/// <see cref="CheckRevocation"/> is a second, separate pass that checks only revocation, network
+/// allowed; <see cref="WindowsRevocationPolicy"/> decides what its result means.
 /// </summary>
 [SupportedOSPlatform("windows")]
 [ExcludeFromCodeCoverage(Justification = "Thin P/Invoke binding to wintrust.dll; exercised by WindowsNativeLibraryLoaderTests on Windows.")]
@@ -26,6 +27,9 @@ internal static unsafe partial class WinTrust
     private const uint StateActionVerify = 1;         // WTD_STATEACTION_VERIFY
     private const uint StateActionClose = 2;          // WTD_STATEACTION_CLOSE
     private const uint CacheOnlyUrlRetrieval = 0x1000; // WTD_CACHE_ONLY_URL_RETRIEVAL
+    private const uint RevokeWholeChain = 1;          // WTD_REVOKE_WHOLECHAIN
+    private const uint StateActionIgnore = 0;         // WTD_STATEACTION_IGNORE
+    private const uint RevocationCheckChainExcludeRoot = 0x80; // WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT
     private const int NoSignerCert = unchecked((int)0x80096002); // TRUST_E_NO_SIGNER_CERT
     private static readonly IntPtr NoInteractiveUser = new(-1); // INVALID_HANDLE_VALUE
 
@@ -72,6 +76,38 @@ internal static unsafe partial class WinTrust
             }
 
             return status;
+        }
+    }
+
+    /// <summary>
+    /// Verifies the signature again, this time checking every certificate in the chain below the
+    /// root for revocation, fetching revocation information over the network if it isn't cached.
+    /// No state is kept, so there is nothing to release. Not lifetime signing: a timestamped
+    /// signature stays valid after its short-lived certificate expires.
+    /// </summary>
+    /// <param name="path">The signed file, already accepted by <see cref="VerifyEmbeddedSignature"/>.</param>
+    /// <returns>The WinVerifyTrust HRESULT; see <see cref="WindowsRevocationPolicy.Refuses"/>.</returns>
+    public static int CheckRevocation(string path)
+    {
+        fixed (char* filePath = path)
+        {
+            var file = new FileInfo
+            {
+                cbStruct = (uint)sizeof(FileInfo),
+                pcwszFilePath = (IntPtr)filePath,
+            };
+            var data = new Data
+            {
+                cbStruct = (uint)sizeof(Data),
+                dwUIChoice = UiNone,
+                fdwRevocationChecks = RevokeWholeChain,
+                dwUnionChoice = ChoiceFile,
+                pFile = (IntPtr)(&file),
+                dwStateAction = StateActionIgnore,
+                dwProvFlags = RevocationCheckChainExcludeRoot,
+            };
+            var action = GenericVerifyV2;
+            return WinVerifyTrust(NoInteractiveUser, ref action, ref data);
         }
     }
 

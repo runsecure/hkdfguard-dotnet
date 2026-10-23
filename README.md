@@ -349,8 +349,13 @@ On **Windows**, before mapping it, `WindowsNativeLibraryLoader` requires all of 
   certificate must carry the Code Signing EKU and the EKU of HkdfGuard's own Artifact Signing
   certificate profile. A matching subject from any other trusted root is refused, including a root
   a user added to their own certificate store. The leaf and intermediate certificates are not
-  pinned, because Artifact Signing reissues them often. No revocation check or certificate download
-  is made, so loading never touches the network.
+  pinned, because Artifact Signing reissues them often. This verification makes no network calls.
+- No certificate in the signer's chain has been revoked. Checked once per process, after every
+  other check has passed, by a second verification that may fetch revocation information over the
+  network. Only a definite "revoked" refuses the load; if revocation servers can't be reached, or
+  give no answer, the library loads, so a host with no network still starts. On a host whose
+  network silently drops traffic rather than refusing it, the first load can stall once until the
+  revocation lookup times out.
 - The signed PE header marks the file as a DLL for the process's architecture. The publisher's
   other signed binaries, such as `hkdfguard.exe`, pass the signature checks, so
   this check is what refuses one renamed into place.
@@ -360,7 +365,10 @@ a DLL planted on `PATH` or beside the application is never loaded.
 
 On **macOS**, `MacOsNativeLibraryLoader` uses the system install whenever it exists, and the
 per-user install only when there is no system install. Anything running as the user can write to
-the user's home, so a per-user file must never be able to override a root-owned system one. If the
+the user's home, so a per-user file must never be able to override a root-owned system one. The
+home is the effective user's entry in the account database (`getpwuid_r`), never the `HOME`
+environment variable, which whoever starts the process could point anywhere; with no usable entry,
+only the system install is considered. If the
 system install exists but fails a check, loading fails instead of falling back - and so does a
 system install that merely can't be examined (say, a directory this process may not read): only
 "nothing is there" counts as "not installed". Before loading, it requires all of the following:
@@ -374,6 +382,20 @@ system install that merely can't be examined (say, a directory this process may 
 - The file's code signature is valid, carries the identifier `libhkdfguard`, and was made with
   a Developer ID Application certificate issued through Apple's CA to the HkdfGuard team
   (`MFW3T8R8J3`). A development-signed build, or any other binary the team signs, is refused.
+- The library's own version - its `LC_ID_DYLIB` current version, in the Mach-O header the
+  signature covers - is at least `MinimumLibraryVersion` (0.9.0). An older release is refused even
+  though it is genuinely signed, so it can't be put in place of a current one.
+
+Certificate revocation is not checked on macOS. Apple's code-signing check can be told to require
+it, but then a host that can't reach Apple's servers couldn't load the library, turning a network
+outage into a service outage. What stands in for it: the signature must come from HkdfGuard's
+Developer ID and team, the system install can only be written by an administrator, and the minimum
+version refuses older genuine releases. The accepted risk is a stolen HkdfGuard signing
+certificate: whoever holds it, and can also write an install location (an administrator for the
+system install, the same user for a per-user one), could sign and plant a library of their own,
+whatever version it claims. The answer to such a compromise is Apple revoking the certificate and a
+new release; until consumers update, the system install's admin-only location is the barrier, so
+prefer it to a per-user install in production.
 
 `dlopen` of an absolute path does not load exactly that path: dyld first looks for the file's
 name in every `DYLD_LIBRARY_PATH` directory, and the `dotnet` host honours `DYLD_*` variables

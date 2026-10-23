@@ -14,7 +14,7 @@ namespace HkdfGuard.KeyWrapping.V1.Interop;
 /// library receives every plaintext DEK on unwrap and chooses every "random" DEK on
 /// generate-and-wrap, so loading an impostor would hand over every key. The default P/Invoke
 /// probe would search the application directory and then PATH; this loader replaces that with
-/// five checks, all of which must pass before the file is mapped:
+/// six checks, all of which must pass before the file is mapped:
 /// <list type="number">
 /// <item>The file exists at <c>%ProgramFiles%\HkdfGuard\v1\HkdfGuard.dll</c>. The Program Files
 /// location comes from the Windows known-folder registry setting, which only an administrator can
@@ -34,6 +34,9 @@ namespace HkdfGuard.KeyWrapping.V1.Interop;
 /// <item>Its PE header - covered by that signature - marks it a DLL for this process's
 /// architecture. Everything the HkdfGuard profile signs passes the signer checks, so this refuses
 /// its other binaries, such as hkdfguard.exe renamed into place.</item>
+/// <item>No certificate in the signer's chain has been revoked. Checked last, network allowed, and
+/// refused only when Windows definitively reports a revocation (<see cref="WindowsRevocationPolicy"/>):
+/// a host that can't reach the revocation servers still loads the library.</item>
 /// </list>
 /// The library's own dependencies are then resolved from System32 only. Any failed check throws;
 /// there is deliberately no fallback to the default search and no override of the path.
@@ -143,6 +146,9 @@ internal static class WindowsNativeLibraryLoader
         VerifyLocation(path);
         VerifySignature(path, expectedPublisher);
         VerifyImageKind(path);
+        // Last, once everything else has passed: refused only if a certificate in the chain is
+        // definitively revoked; unreachable revocation servers let the load continue.
+        WindowsRevocationPolicy.Verify(path, WinTrust.CheckRevocation(path));
 
         // Absolute path, so no probing for the library itself; its own imports (kernel32,
         // advapi32, ncrypt) come from System32 only, never the application directory or PATH.
