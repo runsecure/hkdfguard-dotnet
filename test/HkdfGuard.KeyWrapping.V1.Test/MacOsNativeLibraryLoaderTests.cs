@@ -399,7 +399,24 @@ public class MacOsNativeLibraryLoaderTests
     [InlineData("/opt/lib:/usr/local/lib")] // set, but no libhkdfguard.dylib in either
     public void RefuseShadowing_AllowsLoading_WhenNothingOnDyldLibraryPathHasTheLibrarysName(string? searchPath)
     {
-        MacOsNativeLibraryLoader.RefuseShadowing(_ => searchPath, _ => false);
+        MacOsNativeLibraryLoader.RefuseShadowing(n => n == "DYLD_LIBRARY_PATH" ? searchPath : null, _ => false);
+    }
+
+    [Theory]
+    [InlineData("DYLD_INSERT_LIBRARIES")]
+    [InlineData("DYLD_FRAMEWORK_PATH")]
+    [InlineData("DYLD_VERSIONED_LIBRARY_PATH")]
+    [InlineData("DYLD_VERSIONED_FRAMEWORK_PATH")]
+    [InlineData("DYLD_IMAGE_SUFFIX")]
+    public void RefuseShadowing_Refuses_WhenADyldVariableThatInjectsOrSubstitutesCodeIsSet(string variable)
+    {
+        var ex = Assert.Throws<SecurityException>(() =>
+            MacOsNativeLibraryLoader.RefuseShadowing(n => n == variable ? "/tmp/inject.dylib" : null, _ => false));
+
+        Assert.Contains(variable, ex.Message);
+        Assert.Equal(variable, Assert.Single(MacOsNativeLibraryLoader.RefusedDyldVariables, v => v == variable));
+        // Set but empty is the same as unset.
+        MacOsNativeLibraryLoader.RefuseShadowing(n => n == variable ? "" : null, _ => false);
     }
 
     [Theory]
@@ -408,20 +425,20 @@ public class MacOsNativeLibraryLoaderTests
     public void RefuseShadowing_Refuses_WhenADyldLibraryPathDirectoryHoldsALibraryOfTheSameName(string searchPath, string decoy)
     {
         var ex = Assert.Throws<SecurityException>(() =>
-            MacOsNativeLibraryLoader.RefuseShadowing(_ => searchPath, p => p == decoy));
+            MacOsNativeLibraryLoader.RefuseShadowing(n => n == "DYLD_LIBRARY_PATH" ? searchPath : null, p => p == decoy));
 
         Assert.Contains(decoy, ex.Message);
         Assert.Contains("DYLD_LIBRARY_PATH", ex.Message);
     }
 
     [Fact]
-    public void RefuseShadowing_OnlyConsultsDyldLibraryPath()
+    public void RefuseShadowing_ConsultsOnlyTheDyldVariablesItChecks()
     {
         var asked = new List<string>();
 
         MacOsNativeLibraryLoader.RefuseShadowing(name => { asked.Add(name); return null; }, _ => true);
 
-        Assert.Equal(["DYLD_LIBRARY_PATH"], asked);
+        Assert.Equal([.. MacOsNativeLibraryLoader.RefusedDyldVariables, "DYLD_LIBRARY_PATH"], asked);
     }
 
     [Fact]

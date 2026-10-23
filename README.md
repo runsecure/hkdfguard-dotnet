@@ -370,6 +370,13 @@ directory contains a `libhkdfguard.dylib`; and after loading it asks dyld which 
 mapped, unloading and refusing anything but the verified path. The library's own dependencies are
 absolute system paths and need no such check.
 
+The loader also refuses while `DYLD_INSERT_LIBRARIES`, `DYLD_FRAMEWORK_PATH`,
+`DYLD_VERSIONED_LIBRARY_PATH`, `DYLD_VERSIONED_FRAMEWORK_PATH` or `DYLD_IMAGE_SUFFIX` is set: each
+makes dyld inject code or substitute a library the native library calls with every DEK. These
+checks catch a misconfigured environment, not someone who controls it: dyld acts on the variables
+when the process starts, so injected code has already run, and can hide, by the time the loader
+looks. The real protection is a host signed with the Hardened Runtime, which makes dyld ignore them.
+
 On **Linux**, `LinuxNativeLibraryLoader` uses the package's file in the Debian multiarch directory
 (`/usr/lib/x86_64-linux-gnu` or `/usr/lib/aarch64-linux-gnu`) if it is there, otherwise the one in
 `/usr/lib64`. Only "nothing is there" moves on; a location that can't be examined is refused.
@@ -378,12 +385,16 @@ Before loading, it requires all of the following:
   and no directory or file is writable by its group or by others. Links are followed one component
   at a time and each target is checked where it lies, so `/lib -> usr/lib` passes and a link into a
   user's directory does not.
-- The dynamic linker's environment can't substitute anything. `dlopen` of an absolute path is
+- The dynamic linker's environment is checked. `dlopen` of an absolute path is
   never searched for, but the library's dependencies are found by name - and `libtss2-esys`
   receives every ECDH shared secret. So every `LD_LIBRARY_PATH` directory, and every path-named
   `LD_PRELOAD` or `LD_AUDIT` object, must pass the same path checks, and none may be relative,
   empty (the working directory) or use `$ORIGIN`-style tokens. Both the environment the process
   started with (`/proc/self/environ`) and the current one are checked.
+  This check catches a misconfigured environment. It can't stop someone who controls the
+  service's environment: whatever `LD_PRELOAD` or `LD_AUDIT` loads runs when the process starts,
+  before the check, and can hide from it. Protect the service's environment (its unit file,
+  container spec or launch configuration) as carefully as its binaries.
 
 After loading, `dladdr` must place the library's export in the verified file, and every object in
 its dependency closure, read from each file's `DT_NEEDED` entries, must be bound to a file that

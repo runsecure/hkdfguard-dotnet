@@ -196,14 +196,36 @@ internal static class MacOsNativeLibraryLoader
     }
 
     /// <summary>
-    /// Refuses, before anything is loaded, if a DYLD_LIBRARY_PATH directory contains a file named
-    /// <see cref="FileName"/>: dyld would load that in place of the verified path.
+    /// The dyld variables whose presence alone refuses the load: each makes dyld inject code into
+    /// this process, or load another file in place of a library it names - including the frameworks
+    /// the HkdfGuard native library calls with every DEK. None is set on a production host.
+    /// </summary>
+    internal static readonly string[] RefusedDyldVariables =
+        ["DYLD_INSERT_LIBRARIES", "DYLD_FRAMEWORK_PATH", "DYLD_VERSIONED_LIBRARY_PATH", "DYLD_VERSIONED_FRAMEWORK_PATH", "DYLD_IMAGE_SUFFIX"];
+
+    /// <summary>
+    /// Refuses, before anything is loaded, if one of <see cref="RefusedDyldVariables"/> is set, or a
+    /// DYLD_LIBRARY_PATH directory contains a file named <see cref="FileName"/>: dyld would load that
+    /// in place of the verified path.
+    /// <para>
+    /// A guard against a misconfigured environment, not against whoever controls it: dyld acts on
+    /// these variables when the process starts, so code they injected has already run - and can hide
+    /// - by the time this looks. Running the host with the Hardened Runtime, which makes dyld ignore
+    /// them, is what keeps that code out.
+    /// </para>
     /// </summary>
     /// <param name="getEnvironmentVariable">Reads an environment variable; null if unset.</param>
     /// <param name="exists">Whether a path exists.</param>
-    /// <exception cref="SecurityException">A shadowing library was found.</exception>
+    /// <exception cref="SecurityException">A refused variable is set, or a shadowing library was found.</exception>
     internal static void RefuseShadowing(Func<string, string?> getEnvironmentVariable, Func<string, bool> exists)
     {
+        foreach (var name in RefusedDyldVariables)
+        {
+            if (!string.IsNullOrEmpty(getEnvironmentVariable(name)))
+                throw new SecurityException(
+                    $"{name} is set, so dyld may inject code into this process or substitute a library the HkdfGuard native library uses; refusing to load it. Unset {name}.");
+        }
+
         var searchPath = getEnvironmentVariable("DYLD_LIBRARY_PATH");
         if (string.IsNullOrEmpty(searchPath))
             return;
