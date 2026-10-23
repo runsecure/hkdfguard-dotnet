@@ -11,6 +11,10 @@ namespace HkdfGuard.EncryptedConfiguration.Test.TestHelpers;
 /// </summary>
 internal sealed class TestKekWrapper : IKeyWrapper
 {
+    // Test-only: a plain read. Real key wrappers must refuse a key file another account could have replaced.
+    public async ValueTask<byte[]> ReadKeyFileAsync(string path, CancellationToken cancellationToken = default)
+        => await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
+
     private const int NonceSize = 12;
     private const int TagSize = 16;
 

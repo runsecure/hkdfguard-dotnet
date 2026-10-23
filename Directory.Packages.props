@@ -16,6 +16,13 @@
     <PackageVersion Include="Microsoft.Extensions.Options" Version="$(CoreLibVersion)" />
     <PackageVersion Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="$(CoreLibVersion)" />
 
+    <!-- AWS (HkdfGuard.KeyWrapping.AwsKms) -->
+    <PackageVersion Include="AWSSDK.KeyManagementService" Version="4.0.100.19" />
+
+    <!-- Azure (HkdfGuard.KeyWrapping.AzureKeyVault; Azure.Identity for its integration tests only) -->
+    <PackageVersion Include="Azure.Security.KeyVault.Keys" Version="4.10.2" />
+    <PackageVersion Include="Azure.Identity" Version="1.21.0" />
+
     <!-- Test infrastructure -->
     <PackageVersion Include="coverlet.collector" Version="6.0.4" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />

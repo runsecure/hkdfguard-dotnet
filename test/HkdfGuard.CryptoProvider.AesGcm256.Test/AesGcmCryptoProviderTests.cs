@@ -229,6 +229,10 @@ public class AesGcmCryptoProviderTests
     // then fails with a CryptographicException rather than an OperationCanceledException.
     private sealed class FailsOnShutdownKeyWrapper : IKeyWrapper
     {
+        // Test-only: a plain read. Real key wrappers must refuse a key file another account could have replaced.
+        public async ValueTask<byte[]> ReadKeyFileAsync(string path, CancellationToken cancellationToken = default)
+            => await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
+
         private int _calls;
 
         public TaskCompletionSource RefreshStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -383,10 +387,21 @@ public class AesGcmCryptoProviderTests
     [Theory]
     [InlineData(0)]
     [InlineData(-1)]
-    public async Task CreateAsync_WithMaxRefreshFailuresBelowOne_Throws(int maxRefreshFailures)
+    [InlineData(RefreshFailurePolicy.MaxAllowedRefreshFailures + 1)]
+    [InlineData(int.MaxValue)]
+    public async Task CreateAsync_WithMaxRefreshFailuresOutsideOneToOneHundred_Throws(int maxRefreshFailures)
     {
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
             AesGcmCryptoProvider.CreateAsync(new FakeKeyWrapper(), "wrapped"u8.ToArray(), 60, maxRefreshFailures));
+    }
+
+    [Fact]
+    public async Task CreateAsync_WithTheLargestAllowedMaxRefreshFailures_Succeeds()
+    {
+        Assert.Equal(100, RefreshFailurePolicy.MaxAllowedRefreshFailures);
+        await using var provider = await AesGcmCryptoProvider.CreateAsync(
+            new FakeKeyWrapper(), "wrapped"u8.ToArray(), 60, RefreshFailurePolicy.MaxAllowedRefreshFailures);
+        Assert.Equal(100, provider.MaxRefreshFailures);
     }
 
     [Fact]
@@ -605,5 +620,77 @@ public class AesGcmCryptoProviderTests
 
         Assert.True(provider.KeyAccessSuspended);
         Assert.Throws<CryptographicException>(() => provider.Encrypt("x"u8.ToArray(), new byte[64]));
+    }
+
+    [Fact]
+    public async Task FailClosed_WhenTheLoggerThrows_StillSuspendsAtTheLimit()
+    {
+        // A logger that throws on the tick reaching the limit must not let the key stay in use.
+        var wrapper = new FakeKeyWrapper { FixedKey = RandomNumberGenerator.GetBytes(32) };
+        using var provider = await AesGcmCryptoProvider.CreateAsync(wrapper, "wrapped"u8.ToArray(), 1,
+            maxRefreshFailures: 2, logger: new ThrowingLogger());
+        wrapper.ThrowOnDecrypt = new CryptographicException("KEK revoked");
+
+        await Task.Delay(TimeSpan.FromSeconds(2.6));                        // ticks ~1 s and ~2 s fail
+
+        Assert.True(provider.KeyAccessSuspended);
+        Assert.Throws<CryptographicException>(() => provider.Encrypt("x"u8.ToArray(), new byte[64]));
+
+        wrapper.ThrowOnDecrypt = null;                                       // and a throwing "resumed" log
+        await Task.Delay(TimeSpan.FromSeconds(1.0));                        // can't turn a success into a failure
+        Assert.False(provider.KeyAccessSuspended);
+    }
+
+    [Fact]
+    public async Task FailClosed_WhenTheKeyWrapperHangs_CountsEachTimedOutRefresh_WithoutPilingUpCalls()
+    {
+        var wrapper = new FakeKeyWrapper { FixedKey = RandomNumberGenerator.GetBytes(32) };
+        var logger = new RecordingLogger<AesGcmCryptoProvider>();
+        using var provider = await AesGcmCryptoProvider.CreateAsync(wrapper, "wrapped"u8.ToArray(), 1,
+            maxRefreshFailures: 2, logger: logger);
+        using var gate = new ManualResetEventSlim(false);
+        wrapper.BlockDecrypt = gate;
+        var callsBefore = wrapper.DecryptCallCount;
+
+        // Tick ~1 s starts a reveal that never returns; it times out at ~2 s (failure 1), and the
+        // next tick finds it still running (failure 2) instead of starting another call.
+        await Task.Delay(TimeSpan.FromSeconds(3.5));
+
+        Assert.True(provider.KeyAccessSuspended);
+        Assert.Equal(callsBefore + 1, wrapper.DecryptCallCount);
+        Assert.Contains(logger.Entries, e => e.EventId == 3 && e.Exception is TimeoutException);
+
+        // The key wrapper recovers: the abandoned call returns (its key is discarded), and the next
+        // refresh resumes service.
+        wrapper.BlockDecrypt = null;
+        gate.Set();
+        await Task.Delay(TimeSpan.FromSeconds(1.5));
+        Assert.False(provider.KeyAccessSuspended);
+    }
+
+    [Fact]
+    public async Task DisposeAsync_WhileTheKeyWrapperHangs_ReturnsWithoutWaitingForIt()
+    {
+        var wrapper = new FakeKeyWrapper();
+        var provider = await AesGcmCryptoProvider.CreateAsync(wrapper, "wrapped"u8.ToArray(), 1);
+        using var gate = new ManualResetEventSlim(false);
+        wrapper.BlockDecrypt = gate;
+        await Task.Delay(TimeSpan.FromSeconds(1.3));                        // a refresh is now stuck
+
+        var stopwatch = Stopwatch.StartNew();
+        await provider.DisposeAsync();
+        stopwatch.Stop();
+        gate.Set();
+
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(0.5), $"DisposeAsync took {stopwatch.Elapsed}");
+        Assert.Throws<ObjectDisposedException>(() => provider.Encrypt(new byte[] { 1 }, new byte[64]));
+    }
+
+    private sealed class ThrowingLogger : ILogger<AesGcmCryptoProvider>
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter) => throw new InvalidOperationException("logging sink is down");
     }
 }

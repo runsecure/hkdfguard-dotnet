@@ -21,7 +21,8 @@ namespace HkdfGuard.CryptoProvider.AesGcm256;
 /// consecutive failures dispose every session (zeroing the DEK) and suspend Encrypt/Decrypt - they
 /// throw CryptographicException - until a later refresh succeeds and operation resumes. Passing a
 /// null <c>maxRefreshFailures</c> instead keeps the last good session in use indefinitely (fail
-/// open).
+/// open). A refresh that takes longer than one refresh interval counts as failed, so a key wrapper
+/// that hangs instead of failing still suspends key access on schedule.
 /// </para>
 /// </summary>
 public sealed class AesGcmCryptoProvider : ICryptoProvider
@@ -59,6 +60,9 @@ public sealed class AesGcmCryptoProvider : ICryptoProvider
     // captured the old session just before a swap may still be using it; it's disposed one
     // interval later, on the next swap (or on Dispose), rather than immediately.
     private AesGcmCryptoSession? _retiring;
+    // A reveal a refresh stopped waiting for, while it may still be running. Touched only by the
+    // background loop. See RefreshAsync.
+    private Task<AesGcmCryptoSession>? _abandonedReveal;
     private int _disposed;
 
     // Construction always goes through CreateAsync, so the first key reveal is awaited, never
@@ -94,7 +98,7 @@ public sealed class AesGcmCryptoProvider : ICryptoProvider
     /// when key access is suspended, an informational one when it resumes, and a warning when the
     /// key nears its encryption limit. Optional, but without it (or an ActivityListener) none of
     /// these is visible - and under fail-open a revoked KEK goes unnoticed.</param>
-    /// <exception cref="ArgumentOutOfRangeException">expirySeconds is not between 1 and 300, or maxRefreshFailures is below 1</exception>
+    /// <exception cref="ArgumentOutOfRangeException">expirySeconds is not between 1 and 300, or maxRefreshFailures is not between 1 and 100</exception>
     public static Task<AesGcmCryptoProvider> CreateAsync(IKeyWrapper keyWrapper, byte[] wrapped, int expirySeconds,
         int? maxRefreshFailures = RefreshFailurePolicy.DefaultMaxRefreshFailures, CancellationToken cancellationToken = default, ILogger? logger = null)
         => CreateAsync(keyWrapper, wrapped, expirySeconds, maxRefreshFailures, budget: null, cancellationToken, logger);
@@ -122,8 +126,9 @@ public sealed class AesGcmCryptoProvider : ICryptoProvider
     {
         if (expirySeconds is < 1 or > 300)
             throw new ArgumentOutOfRangeException(nameof(expirySeconds), expirySeconds, "ExpirySeconds must be between 1 and 300.");
-        if (maxRefreshFailures is < 1)
-            throw new ArgumentOutOfRangeException(nameof(maxRefreshFailures), maxRefreshFailures, "MaxRefreshFailures must be at least 1.");
+        if (maxRefreshFailures is < 1 or > RefreshFailurePolicy.MaxAllowedRefreshFailures)
+            throw new ArgumentOutOfRangeException(nameof(maxRefreshFailures), maxRefreshFailures,
+                $"MaxRefreshFailures must be between 1 and {RefreshFailurePolicy.MaxAllowedRefreshFailures}.");
     }
 
     /// <summary>The configured refresh-failure policy; null means fail open.</summary>
@@ -241,9 +246,39 @@ public sealed class AesGcmCryptoProvider : ICryptoProvider
 
     // The unwrap runs outside _gate (a lock can't span an await) - safe because only the single
     // background loop refreshes once the provider exists.
+    //
+    // Each refresh waits at most one refresh interval for the key wrapper. A wrapper that hangs
+    // rather than failing (a busy TPM resource manager, a keychain prompt nobody can answer, a KMS
+    // endpoint that never replies) must still count towards the refresh-failure policy, or a
+    // revoked KEK would never suspend key access. A reveal that misses its deadline is abandoned,
+    // not cancelled - a native call can't be - and until it returns no new one is started, so a
+    // stuck key wrapper never accumulates calls; each tick in the meantime is a failed refresh.
     private async Task RefreshAsync(CancellationToken cancellationToken)
     {
-        var fresh = await RevealAsync(_keyWrapper, _wrapped, _budget, _logger, cancellationToken).ConfigureAwait(false);
+        if (_abandonedReveal is { IsCompleted: false })
+            throw new TimeoutException(
+                $"The key wrapper has still not returned from a refresh that timed out; no new refresh is started until it does.");
+        _abandonedReveal = null;
+
+        // Task.Run: a key wrapper may unwrap synchronously on the calling thread (the native one
+        // does), and a deadline can only be applied to a call that has returned a task.
+        var reveal = Task.Run(() => RevealAsync(_keyWrapper, _wrapped, _budget, _logger, cancellationToken), CancellationToken.None);
+        AesGcmCryptoSession fresh;
+        try
+        {
+            fresh = await reveal.WaitAsync(TimeSpan.FromSeconds(_expirySeconds), cancellationToken).ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            Abandon(reveal);
+            throw new TimeoutException($"The key wrapper did not reveal the key within {_expirySeconds} seconds.");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Shutdown: stop waiting, so Dispose never blocks on a stuck key wrapper.
+            Abandon(reveal);
+            throw;
+        }
 
         lock (_gate)
         {
@@ -252,7 +287,36 @@ public sealed class AesGcmCryptoProvider : ICryptoProvider
             stale?.Dispose();
         }
     }
-    
+
+    // Remembers a reveal the refresh gave up waiting for, and zeroes whatever key it eventually
+    // reveals: a late result is never put into use.
+    private void Abandon(Task<AesGcmCryptoSession> reveal)
+    {
+        _abandonedReveal = reveal;
+        _ = reveal.ContinueWith(static t =>
+            {
+                if (t.IsCompletedSuccessfully)
+                    t.Result.Dispose();
+                else
+                    _ = t.Exception; // observed: an abandoned reveal's failure was already counted as a timeout
+            },
+            CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+    }
+
+    // Runs code the application supplies (its logger, telemetry) so that an exception from it can
+    // never decide whether the key stays in use.
+    private static void Quietly(Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch
+        {
+            // Deliberately ignored: see above.
+        }
+    }
+
     private async Task RunRefreshLoopAsync(
         CancellationToken cancellationToken)
     {
@@ -274,25 +338,38 @@ public sealed class AesGcmCryptoProvider : ICryptoProvider
                             ActivityNames.CryptoProviderAesGcm256
                                 .BackgroundRefresh);
 
+                Exception? failure = null;
                 try
                 {
                     await RefreshAsync(cancellationToken).ConfigureAwait(false);
-                    var previousFailures = Interlocked.Exchange(ref _consecutiveRefreshFailures, 0);
-                    if (previousFailures >= _maxRefreshFailures)
-                        _logger?.KeyAccessResumed(previousFailures);
                 }
                 catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
                 {
-                    ComponentTelemetry
-                        .RecordException(activity, ex);
+                    failure = ex;
+                }
 
-                    var failures = Interlocked.Increment(ref _consecutiveRefreshFailures);
-                    _logger?.KeyRefreshFailed(failures, RefreshFailurePolicyDescription, ex);
-                    if (failures == _maxRefreshFailures)
-                    {
-                        SuspendKeyAccess(activity, failures);
-                        _logger?.KeyAccessSuspended(failures);
-                    }
+                if (failure is null)
+                {
+                    var previousFailures = Interlocked.Exchange(ref _consecutiveRefreshFailures, 0);
+                    if (previousFailures >= _maxRefreshFailures)
+                        Quietly(() => _logger?.KeyAccessResumed(previousFailures));
+                    continue;
+                }
+
+                var failures = Interlocked.Increment(ref _consecutiveRefreshFailures);
+
+                // Enforce the policy before anything that runs application code (telemetry, the
+                // logger), so an exception there can't leave the key in use past the limit. >= rather
+                // than ==, and a suspend that is a no-op once suspended, so no tick can step over it.
+                var suspendedNow = failures >= _maxRefreshFailures && SuspendKeyAccess();
+
+                Quietly(() => ComponentTelemetry.RecordException(activity, failure));
+                Quietly(() => _logger?.KeyRefreshFailed(failures, RefreshFailurePolicyDescription, failure));
+                if (suspendedNow)
+                {
+                    Quietly(() => activity?.AddEvent(new ActivityEvent(EventNames.KeyAccessSuspended,
+                        tags: new ActivityTagsCollection { [AttributeNames.ConsecutiveFailures] = failures })));
+                    Quietly(() => _logger?.KeyAccessSuspended(failures));
                 }
             }
         }
@@ -306,28 +383,26 @@ public sealed class AesGcmCryptoProvider : ICryptoProvider
 
     // Fail closed: zero every revealed copy of the DEK and refuse operations until a refresh
     // succeeds. The next successful RefreshAsync swaps a fresh session in and resumes service.
-    private void SuspendKeyAccess(Activity? activity, int failures)
+    // Returns whether this call suspended access - false if it already was.
+    private bool SuspendKeyAccess()
     {
         lock (_gate)
         {
             // Null unless a refresh has succeeded since the last swap.
             Interlocked.Exchange(ref _retiring, null)?.Dispose();
 
-            // Never null here: suspension happens once per failure streak, and a streak only
-            // restarts after a successful refresh has put a session back in _current.
-            Interlocked.Exchange(ref _current, null)!.Dispose();
+            // Null if already suspended: every failed tick past the limit calls this.
+            var current = Interlocked.Exchange(ref _current, null);
+            current?.Dispose();
+            return current is not null;
         }
-
-        activity?.AddEvent(new ActivityEvent(EventNames.KeyAccessSuspended, tags: new ActivityTagsCollection
-        {
-            [AttributeNames.ConsecutiveFailures] = failures,
-        }));
     }
 
     /// <summary>
-    /// Stops the background refresh - awaiting a refresh already in flight rather than blocking on
-    /// it - then zeroes the wrapped payload and every revealed key. Prefer this over Dispose: an
-    /// in-flight refresh may be a network call to a KMS. Safe to call more than once.
+    /// Stops the background refresh, then zeroes the wrapped payload and every revealed key. A
+    /// refresh still waiting on the key wrapper is abandoned rather than waited for, so a stuck
+    /// wrapper can't block shutdown; whatever key it later reveals is zeroed when it arrives.
+    /// Safe to call more than once.
     /// </summary>
     public async ValueTask DisposeAsync()
     {
@@ -340,8 +415,8 @@ public sealed class AesGcmCryptoProvider : ICryptoProvider
     }
 
     /// <summary>
-    /// Synchronous <see cref="DisposeAsync"/>, for IDisposable callers: blocks until a refresh
-    /// already in flight observes cancellation.
+    /// Synchronous <see cref="DisposeAsync"/>, for IDisposable callers. Never waits on a refresh
+    /// still inside the key wrapper.
     /// </summary>
     public void Dispose()
     {

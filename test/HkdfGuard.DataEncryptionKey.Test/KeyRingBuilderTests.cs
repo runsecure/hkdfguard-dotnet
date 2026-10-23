@@ -346,6 +346,43 @@ public class KeyRingBuilderTests
     }
 
     [Fact]
+    public async Task Build_WithAKeyFileAboveEveryEphemeralVersionAndRotationOn_ThrowsBeforeReadingAnyKeyFile()
+    {
+        var wrapper = new ReadingKeyWrapper(RandomNumberGenerator.GetBytes(32), "wrapped"u8.ToArray());
+        var factory = new RecordingCryptoProviderFactory();
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => new KeyRingBuilder()
+            .WithKeyWrapper(wrapper)
+            .WithCryptoProviderFactory(factory)
+            .WithKeyRefreshInterval(60)
+            .WithKeyFile(10, "dek.bin")
+            .WithEphemeralKey(1)
+            .BuildAsync());
+
+        Assert.StartsWith("Key file version 10 is above every ephemeral version", exception.Message);
+        Assert.Empty(wrapper.PathsRead);
+        Assert.Empty(factory.CreatedProviders);
+    }
+
+    [Fact]
+    public async Task Build_WithAKeyFileAboveEveryEphemeralVersionAndRotationOff_KeepsTheKeyFileCurrent()
+    {
+        var wrapper = new ReadingKeyWrapper(RandomNumberGenerator.GetBytes(32), "wrapped"u8.ToArray());
+
+        await using var ring = await new KeyRingBuilder()
+            .WithKeyWrapper(wrapper)
+            .WithCryptoProviderFactory(new RecordingCryptoProviderFactory())
+            .WithKeyRefreshInterval(60)
+            .WithKeyFile(10, "dek.bin")
+            .WithEphemeralKey(1)
+            .WithoutEphemeralKeyRotation()
+            .BuildAsync();
+
+        Assert.Equal(10, ring.CurrentVersion);
+        Assert.Null(ring.EphemeralKeyRotationInterval);
+    }
+
+    [Fact]
     public async Task Build_WhenTheKeyWrapperRefusesAKeyFile_FailsWithItsReason()
     {
         var wrapper = new ReadingKeyWrapper(RandomNumberGenerator.GetBytes(32), []);
@@ -399,7 +436,8 @@ public class KeyRingBuilderTests
     [Theory]
     [InlineData(1)]
     [InlineData(50)]
-    public void WithMaxRefreshFailures_AtLeastOne_SetsMaxRefreshFailures(int maxRefreshFailures)
+    [InlineData(100)]
+    public void WithMaxRefreshFailures_FromOneToOneHundred_SetsMaxRefreshFailures(int maxRefreshFailures)
     {
         var builder = new KeyRingBuilder().WithMaxRefreshFailures(maxRefreshFailures);
 
@@ -409,7 +447,9 @@ public class KeyRingBuilderTests
     [Theory]
     [InlineData(0)]
     [InlineData(-1)]
-    public void WithMaxRefreshFailures_BelowOne_Throws(int maxRefreshFailures)
+    [InlineData(101)]
+    [InlineData(int.MaxValue)]
+    public void WithMaxRefreshFailures_OutsideOneToOneHundred_Throws(int maxRefreshFailures)
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => new KeyRingBuilder().WithMaxRefreshFailures(maxRefreshFailures));
     }

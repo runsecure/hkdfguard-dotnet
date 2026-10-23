@@ -164,6 +164,18 @@ public class KmsLibraryContractTests
         Assert.Contains(library.DescribeStatus(status)!, thrown.Message);
     }
 
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(Abstractions.WrappedKeyLimits.MaxBytes + 1)]
+    public void OpenFile_WhenTheNativeLibraryReportsACountOutsideTheBuffer_Throws(int reported)
+    {
+        var library = new FakeHkdfGuardKmsLibrary { OpenFileBytesReadOverride = reported };
+
+        var thrown = Assert.Throws<System.Security.Cryptography.CryptographicException>(() => library.OpenFile("dek.bin"));
+
+        Assert.Contains($"reported {reported} bytes read", thrown.Message);
+    }
+
     [Fact]
     public void OpenFile_NamesTheMissingFile()
     {

@@ -27,7 +27,7 @@ public sealed class HkdfGuardOptions
     /// <summary>
     /// How many consecutive failed attempts to re-reveal a key (every KeyRefreshInterval seconds)
     /// are tolerated before that key's provider fails closed - zeroing the key and refusing
-    /// every operation until a refresh succeeds. At least 1. Unset keeps KeyRingBuilder's
+    /// every operation until a refresh succeeds. 1 to 100 (RefreshFailurePolicy.MaxAllowedRefreshFailures). Unset keeps KeyRingBuilder's
     /// default (KeyRingBuilder.DefaultMaxRefreshFailures).
     /// </summary>
     public int? MaxRefreshFailures { get; set; }
@@ -43,13 +43,16 @@ public sealed class HkdfGuardOptions
     /// How many hours between scheduled ephemeral key rotations - each adds a fresh ephemeral key
     /// as the ring's new current version. 1 to <see cref="MaxEphemeralKeyRotationHours"/>. Unset keeps
     /// KeyRingBuilder's default of 24 hours. Applies only when EphemeralKeys is not empty. Can't be
-    /// combined with DisableEphemeralKeyRotation.
+    /// combined with DisableEphemeralKeyRotation. While rotation is on, the highest EphemeralKeys
+    /// version must be above every KeyFiles version, or the first rotation would replace the key
+    /// file as the current version.
     /// </summary>
     public int? EphemeralKeyRotationHours { get; set; }
 
     /// <summary>
     /// True turns scheduled ephemeral key rotation off: the ephemeral key built at startup stays
-    /// current until the process restarts.
+    /// current until the process restarts. Required when a KeyFiles version is above every
+    /// EphemeralKeys version.
     /// </summary>
     public bool DisableEphemeralKeyRotation { get; set; }
 

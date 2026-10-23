@@ -18,7 +18,9 @@ namespace HkdfGuard.DataEncryptionKey;
 /// it's bound to. Key files are rotated by deployment, not here: each release brings its own
 /// freshly generated key files. Ephemeral keys are rotated here: a ring with any ephemeral key
 /// adds a fresh one as its new current version every <see cref="EphemeralKeyRotationInterval"/>
-/// (24 hours unless configured otherwise).
+/// (24 hours unless configured otherwise). Because a rotation adds its key above the current
+/// version, a rotating ring must have its highest ephemeral version above every key file - Build
+/// refuses a key file above every ephemeral version unless rotation is turned off.
 /// </summary>
 public sealed class KeyRingBuilder
 {
@@ -73,7 +75,8 @@ public sealed class KeyRingBuilder
     /// How often the built ring adds a fresh ephemeral key as its new current version. Defaults to
     /// <see cref="DefaultEphemeralKeyRotationInterval"/>; null only after an explicit
     /// <see cref="WithoutEphemeralKeyRotation"/>. Applies only to a ring with at least one ephemeral
-    /// key: a ring of key files alone never rotates, so its key-file version stays current.
+    /// key: a ring of key files alone never rotates, so its key-file version stays current. While
+    /// set, Build refuses a ring whose highest key file is above every ephemeral version.
     /// </summary>
     public TimeSpan? EphemeralKeyRotationInterval { get; private set; } = DefaultEphemeralKeyRotationInterval;
 
@@ -89,7 +92,8 @@ public sealed class KeyRingBuilder
     /// Sets how often the built ring rotates its ephemeral encryption key: each interval it
     /// generates a fresh ephemeral key and adds it at CurrentVersion + 1, so every later Encrypt
     /// uses it. Earlier keys stay registered for <see cref="EphemeralKeyRetention"/>, so what they
-    /// encrypted still decrypts for that long.
+    /// encrypted still decrypts for that long. The first rotation would supersede a key file above
+    /// every ephemeral version, so Build refuses that layout while rotation is on.
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">interval is outside
     /// <see cref="MinEphemeralKeyRotationInterval"/>-<see cref="MaxEphemeralKeyRotationInterval"/></exception>
@@ -105,7 +109,8 @@ public sealed class KeyRingBuilder
 
     /// <summary>
     /// Turns scheduled ephemeral key rotation off: the ephemeral key built at startup stays current
-    /// until the process restarts. A later <see cref="WithEphemeralKeyRotation"/> call replaces this.
+    /// until the process restarts. Required for a ring whose highest key file is above every
+    /// ephemeral version. A later <see cref="WithEphemeralKeyRotation"/> call replaces this.
     /// </summary>
     public KeyRingBuilder WithoutEphemeralKeyRotation()
     {
@@ -192,11 +197,12 @@ public sealed class KeyRingBuilder
     /// provider fails closed - zeroes its DEK and throws on every operation until a refresh
     /// succeeds. Not calling this keeps <see cref="DefaultMaxRefreshFailures"/>.
     /// </summary>
-    /// <exception cref="ArgumentOutOfRangeException">maxRefreshFailures is below 1</exception>
+    /// <exception cref="ArgumentOutOfRangeException">maxRefreshFailures is not between 1 and 100 (RefreshFailurePolicy.MaxAllowedRefreshFailures)</exception>
     public KeyRingBuilder WithMaxRefreshFailures(int maxRefreshFailures)
     {
-        if (maxRefreshFailures < 1)
-            throw new ArgumentOutOfRangeException(nameof(maxRefreshFailures), maxRefreshFailures, "MaxRefreshFailures must be at least 1.");
+        if (maxRefreshFailures is < 1 or > RefreshFailurePolicy.MaxAllowedRefreshFailures)
+            throw new ArgumentOutOfRangeException(nameof(maxRefreshFailures), maxRefreshFailures,
+                $"MaxRefreshFailures must be between 1 and {RefreshFailurePolicy.MaxAllowedRefreshFailures}.");
 
         MaxRefreshFailures = maxRefreshFailures;
         return this;
@@ -277,7 +283,8 @@ public sealed class KeyRingBuilder
     /// </summary>
     /// <param name="cancellationToken">Cancels reading key files and revealing keys; anything
     /// already created is disposed.</param>
-    /// <exception cref="InvalidOperationException">No key wrapper, no crypto provider factory, no key refresh interval, or no key files/ephemeral keys were configured</exception>
+    /// <exception cref="InvalidOperationException">No key wrapper, no crypto provider factory, no key refresh interval, or no key files/ephemeral keys were configured;
+    /// or ephemeral key rotation is on and a key file is registered above every ephemeral version</exception>
     public async Task<KeyRing> BuildAsync(CancellationToken cancellationToken = default)
     {
         if (_keyWrapper is null)
@@ -292,6 +299,17 @@ public sealed class KeyRingBuilder
         if (KeyRefreshInterval is null)
             throw new InvalidOperationException("A key refresh interval is required - call WithKeyRefreshInterval first.");
 
+        // Each rotation adds its key at CurrentVersion + 1: with a key file above every ephemeral
+        // version, the first one would take over from the key file, and everything encrypted after
+        // that would be lost on restart. Checked before any key file is read.
+        if (_ephemeralVersions.Count > 0 && EphemeralKeyRotationInterval is not null && _keyFiles.Count > 0)
+        {
+            var highestKeyFile = _keyFiles.Keys.Last();
+            if (highestKeyFile > _ephemeralVersions.Max())
+                throw new InvalidOperationException(
+                    $"Key file version {highestKeyFile} is above every ephemeral version, so the first scheduled rotation would replace it as the current version and new values would be encrypted under a key that does not survive a restart. Register the ephemeral key at a version above every key file, or call WithoutEphemeralKeyRotation.");
+        }
+
         // If anything fails partway (unreadable file, unwrap failure, duplicate version), dispose
         // every provider created so far - each runs a background refresh holding a revealed key.
         var ring = new KeyRing(_formatProvider);
@@ -302,6 +320,12 @@ public sealed class KeyRingBuilder
                 // Read through the key wrapper: a native KMS reads its own key files, with its own
                 // checks on who could have written them.
                 var wrapped = await _keyWrapper.ReadKeyFileAsync(path, cancellationToken).ConfigureAwait(false);
+                // Whatever the key wrapper, a wrapped key is never empty and never over the limit.
+                if (wrapped is not { Length: > 0 })
+                    throw new InvalidDataException($"Key file '{path}' is empty.");
+                if (wrapped.Length > WrappedKeyLimits.MaxBytes)
+                    throw new InvalidDataException(
+                        $"Key file '{path}' is larger than {WrappedKeyLimits.MaxBytes} bytes (WrappedKeyLimits.MaxBytes); a wrapped key never is.");
                 var provider = await _cryptoProviderFactory
                     .CreateAsync(_keyWrapper, wrapped, KeyRefreshInterval.Value, MaxRefreshFailures, cancellationToken)
                     .ConfigureAwait(false);

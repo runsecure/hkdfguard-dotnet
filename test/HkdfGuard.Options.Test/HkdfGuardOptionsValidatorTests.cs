@@ -146,6 +146,40 @@ public class HkdfGuardOptionsValidatorTests
     }
 
     [Fact]
+    public void Validate_KeyFileAboveEveryEphemeralVersionWithRotationOn_Fails()
+    {
+        var options = ValidOptions();
+        options.EphemeralKeys = [1];
+        options.KeyFiles = [new KeyFileOptions { Version = 10, Path = "/tmp/dek.bin" }];
+
+        var result = new HkdfGuardOptionsValidator().Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains(result.Failures!, f => f.StartsWith("KeyFiles version 10 is above every ephemeral version"));
+    }
+
+    [Fact]
+    public void Validate_KeyFileAboveEveryEphemeralVersionWithRotationDisabled_Succeeds()
+    {
+        var options = ValidOptions();
+        options.EphemeralKeys = [1];
+        options.KeyFiles = [new KeyFileOptions { Version = 10, Path = "/tmp/dek.bin" }];
+        options.DisableEphemeralKeyRotation = true;
+
+        Assert.True(new HkdfGuardOptionsValidator().Validate(null, options).Succeeded);
+    }
+
+    [Fact]
+    public void Validate_KeyFilesOnlyWithDefaultRotation_Succeeds()
+    {
+        var options = ValidOptions();
+        options.EphemeralKeys = [];
+        options.KeyFiles = [new KeyFileOptions { Version = 5, Path = "/tmp/dek.bin" }];
+
+        Assert.True(new HkdfGuardOptionsValidator().Validate(null, options).Succeeded);
+    }
+
+    [Fact]
     public void Validate_UniqueVersionsAcrossKeyFilesAndEphemeralKeys_Succeeds()
     {
         var options = ValidOptions();
@@ -160,7 +194,9 @@ public class HkdfGuardOptionsValidatorTests
     [Theory]
     [InlineData(0)]
     [InlineData(-1)]
-    public void Validate_MaxRefreshFailuresBelowOne_Fails(int maxRefreshFailures)
+    [InlineData(101)]
+    [InlineData(int.MaxValue)]
+    public void Validate_MaxRefreshFailuresOutsideOneToOneHundred_Fails(int maxRefreshFailures)
     {
         var options = ValidOptions();
         options.MaxRefreshFailures = maxRefreshFailures;
@@ -174,7 +210,8 @@ public class HkdfGuardOptionsValidatorTests
     [Theory]
     [InlineData(1)]
     [InlineData(10)]
-    public void Validate_MaxRefreshFailuresAtLeastOne_Succeeds(int maxRefreshFailures)
+    [InlineData(100)]
+    public void Validate_MaxRefreshFailuresFromOneToOneHundred_Succeeds(int maxRefreshFailures)
     {
         var options = ValidOptions();
         options.MaxRefreshFailures = maxRefreshFailures;

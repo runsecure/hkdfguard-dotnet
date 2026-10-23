@@ -41,8 +41,10 @@ tracking and purpose-scoped Additional Authenticated Data (AAD).
   `hkdfguard.key_access_suspended` event, and every Encrypt/Decrypt throws
   `CryptographicException` until a later refresh succeeds, at which point service resumes with no
   restart. So revoking the KEK stops a running process within about `3 × KeyRefreshInterval`.
-  `WithMaxRefreshFailures(n)` (or `HkdfGuardOptions.MaxRefreshFailures`) changes `n`; pick it so
-  that `n × KeyRefreshInterval` is longer than any KEK outage you'd rather ride out.
+  `WithMaxRefreshFailures(n)` (or `HkdfGuardOptions.MaxRefreshFailures`) changes `n`, from 1 to
+  100 (`RefreshFailurePolicy.MaxAllowedRefreshFailures`); pick it so that `n × KeyRefreshInterval`
+  is longer than any KEK outage you'd rather ride out. 100 at the longest interval is about 8 h 20
+  min; a larger limit would quietly fail open, so failing open has to be asked for explicitly.
   `WithFailOpenOnRefreshFailure()` (or `HkdfGuardOptions.FailOpenOnRefreshFailure`) opts out: the
   last good session then stays in use indefinitely, and revoking the KEK never stops the process.
   Either way, give the factory a logger - `new AesGcmCryptoProviderFactory(logger)` - and every
@@ -98,6 +100,14 @@ tracking and purpose-scoped Additional Authenticated Data (AAD).
   because a per-process counter cannot see the other instances sharing the key). A background
   refresh re-reveals the same key, so it does not reset the count. Without an `ActivityListener`
   the only signal is the exception at the limit.
+
+  **The count is kept per process, by design.** It is exact for an ephemeral key, which only one
+  process ever holds. Key files carry what the deployment pipeline encrypted and are meant to be
+  decrypted at runtime; every process that loads one, and every restart, starts a fresh count for
+  it. **For encrypt operations, add an ephemeral key** (`WithEphemeralKey(2)` beside
+  `WithKeyFile(1, ...)`) so new values are encrypted under it. If an application does encrypt
+  values that must outlive the process under a key file, bound that key's use by deploying a new
+  key file at a higher version regularly.
 - **Purpose-scoped protectors.** `IDataProtector` binds a `name` (purpose) to every operation as
   AAD, so a value protected for one purpose can never be decrypted under another - even using the
   same underlying key.
@@ -269,12 +279,15 @@ Node/Python mirror this layering, adding their own consumer branches as they cat
 | `HkdfGuard.Abstractions` | Interfaces and pure data types only (`IKeyRing`, `IKeyWrapper`, `ICryptoProvider`, `ICryptoProviderFactory`, `IDataEncryptionKey`, `IDataProtector`, `IProtectedCache`/`IProtectedReadOnlyCache`, `IEncryptedFormatProvider`, `KeyTrackingValue`, `ArrayUtility`, `ProtectedCacheBase`). Depends only on `HkdfGuard.Diagnostics`. |
 | `HkdfGuard.CryptoProvider.AesGcm256` | `AesGcmCryptoSession` (internal, key-bound at construction) wrapped directly by the public `AesGcmCryptoProvider` (an `ICryptoProvider` that reveals/refreshes it from an `IKeyWrapper` + wrapped bytes, and only ever holds one active session at a time; also exposes `GetEncryptedAllocationLength`/`GetDecryptedAllocationLength` for sizing buffers), minted via `AesGcmCryptoProviderFactory` (an `ICryptoProviderFactory`); plus `AesGcmPipelineDataProtector` (an `IPipelineDataProtector` over one in-memory key, for protecting values in a pipeline before a durable KEK exists - see below). Depends on `HkdfGuard.Abstractions`/`HkdfGuard.Diagnostics`; its `HkdfGuardTelemetry.CryptoProviderAesGcm256` component keeps its own independent `EnableSensitiveLogging` flag rather than sharing `Root`'s. |
 | `HkdfGuard.KeyWrapping.V1` | `NativeHkdfKeyWrapperV1` (an `IKeyWrapper`, whose async methods complete synchronously) and `NativeHost`, which resolve and bind the current OS's native KMS library (Linux/.so, macOS/.dylib, Windows/.dll - see `Interop/`) to wrap and unwrap a 32-byte DEK under a service-identified KEK held entirely outside this process. |
+| `HkdfGuard.SecureFile` | `TrustedKeyFile.ReadAsync` and `KeyFileTrust` - the managed equivalent of the native library's `hkdfguard_open_file`, for key wrappers with no native library to read key files through (network KMS providers). Refuses a key file unless it, and every folder above it, is owned and modifiable only by the operating system's administrators and the principals a `KeyFileTrust` adds (Windows ACLs and final-path check; Linux/macOS ownership and mode bits, following only trusted symbolic links), and refuses contents that look like an unwrapped key. Depends on `HkdfGuard.Abstractions`. |
+| `HkdfGuard.KeyWrapping.AwsKms` | `AwsKmsKeyWrapper` - an `IKeyWrapper` over one symmetric AWS KMS key (`Encrypt`/`Decrypt`/`GenerateDataKeyWithoutPlaintext`, the key pinned on every `Decrypt`, an optional encryption context bound as AAD), reading key files through `HkdfGuard.SecureFile`. Depends on `HkdfGuard.Abstractions`, `HkdfGuard.SecureFile` and `AWSSDK.KeyManagementService`. |
+| `HkdfGuard.KeyWrapping.AzureKeyVault` | `AzureKeyVaultKeyWrapper` - an `IKeyWrapper` over two Azure Key Vault keys: an RSA key wraps each DEK (RSA-OAEP-256) and a separate EC P-256 key signs each wrapped DEK (ES256), verified before every unwrap, so only principals allowed to sign can create a key file it accepts. Both keys pinned by name, rotation-safe by version; an optional context bound into the signature; key files read through `HkdfGuard.SecureFile`. Depends on `HkdfGuard.Abstractions`, `HkdfGuard.SecureFile` and `Azure.Security.KeyVault.Keys`. |
 | `HkdfGuard.DataEncryptionKey` | The application-facing API: `KeyRing`/`KeyRingBuilder`, `IDataProtector`/`DataProtector`, `DataEncryptionKey` (the `IDataEncryptionKey` over an `ICryptoProvider` - output sizing and telemetry; disposing it disposes its provider), and the default `enc::v{version}::{base64}` wire format. Depends on `HkdfGuard.Abstractions`/`HkdfGuard.Diagnostics`. |
 | `HkdfGuard.Cache` | `ProtectedCache` (an `IProtectedCache` backed by an `IKeyRing` - encrypts under the ring's current key on Add/AddOrUpdate and records its version, reveals under that version on Decrypt, so it follows key rotation; nothing held as plaintext beyond a single call; each value is bound to its name as AAD, so a ciphertext under any other name fails authentication, and names match ignoring ASCII case only) and `ProtectedCacheCollection` (aggregates multiple `IProtectedReadOnlyCache` sources behind one read-only surface, checked in registration order). |
 | `HkdfGuard.EncryptedConfiguration` | `ProtectedConfigurationRoot` (an `IProtectedConfigurationRoot`) - wraps an `IConfigurationRoot`, revealing values formatted as protected secrets via a `KeyRing`; configuration itself only ever holds ciphertext, and `Decrypt` reads fresh from the underlying root every time so `Reload` takes effect immediately. Each value is bound to its own configuration key (`ProtectedConfigurationPurpose`), so a value copied to another key fails to decrypt. |
 | `HkdfGuard.DependencyInjection` | `AddKeyRingAsync` - builds a `KeyRing` asynchronously at registration and registers it as a singleton in an `IServiceCollection`. |
 | `HkdfGuard.Options` | `HkdfGuardOptions`/`HkdfGuardOptionsValidator`/`HkdfGuardOptionsExtensions.ApplyTo` - a plain-data mirror of `KeyRingBuilder`'s configuration surface (`ServiceName`, `KeyRefreshInterval`, `MaxRefreshFailures`/`FailOpenOnRefreshFailure`, key files, ephemeral keys), for binding a `KeyRing`'s identity/policy/key files from configuration. |
-| `HkdfGuard.Diagnostics.Test`, `HkdfGuard.Abstractions.Test`, `HkdfGuard.CryptoProvider.AesGcm256.Test`, `HkdfGuard.KeyWrapping.V1.Test`, `HkdfGuard.DataEncryptionKey.Test`, `HkdfGuard.Cache.Test`, `HkdfGuard.EncryptedConfiguration.Test`, `HkdfGuard.DependencyInjection.Test`, `HkdfGuard.Options.Test` | xUnit test suites, maintained at full line/branch coverage for their respective projects. |
+| `HkdfGuard.Diagnostics.Test`, `HkdfGuard.Abstractions.Test`, `HkdfGuard.CryptoProvider.AesGcm256.Test`, `HkdfGuard.KeyWrapping.V1.Test`, `HkdfGuard.SecureFile.Test`, `HkdfGuard.KeyWrapping.AwsKms.Test`, `HkdfGuard.KeyWrapping.AzureKeyVault.Test`, `HkdfGuard.DataEncryptionKey.Test`, `HkdfGuard.Cache.Test`, `HkdfGuard.EncryptedConfiguration.Test`, `HkdfGuard.DependencyInjection.Test`, `HkdfGuard.Options.Test` | xUnit test suites, maintained at full line/branch coverage for their respective projects. |
 
 Requires **.NET 10** (`net10.0`).
 
@@ -370,6 +383,13 @@ directory contains a `libhkdfguard.dylib`; and after loading it asks dyld which 
 mapped, unloading and refusing anything but the verified path. The library's own dependencies are
 absolute system paths and need no such check.
 
+The loader also refuses while `DYLD_INSERT_LIBRARIES`, `DYLD_FRAMEWORK_PATH`,
+`DYLD_VERSIONED_LIBRARY_PATH`, `DYLD_VERSIONED_FRAMEWORK_PATH` or `DYLD_IMAGE_SUFFIX` is set: each
+makes dyld inject code or substitute a library the native library calls with every DEK. These
+checks catch a misconfigured environment, not someone who controls it: dyld acts on the variables
+when the process starts, so injected code has already run, and can hide, by the time the loader
+looks. The real protection is a host signed with the Hardened Runtime, which makes dyld ignore them.
+
 On **Linux**, `LinuxNativeLibraryLoader` uses the package's file in the Debian multiarch directory
 (`/usr/lib/x86_64-linux-gnu` or `/usr/lib/aarch64-linux-gnu`) if it is there, otherwise the one in
 `/usr/lib64`. Only "nothing is there" moves on; a location that can't be examined is refused.
@@ -378,12 +398,16 @@ Before loading, it requires all of the following:
   and no directory or file is writable by its group or by others. Links are followed one component
   at a time and each target is checked where it lies, so `/lib -> usr/lib` passes and a link into a
   user's directory does not.
-- The dynamic linker's environment can't substitute anything. `dlopen` of an absolute path is
+- The dynamic linker's environment is checked. `dlopen` of an absolute path is
   never searched for, but the library's dependencies are found by name - and `libtss2-esys`
   receives every ECDH shared secret. So every `LD_LIBRARY_PATH` directory, and every path-named
   `LD_PRELOAD` or `LD_AUDIT` object, must pass the same path checks, and none may be relative,
   empty (the working directory) or use `$ORIGIN`-style tokens. Both the environment the process
   started with (`/proc/self/environ`) and the current one are checked.
+  This check catches a misconfigured environment. It can't stop someone who controls the
+  service's environment: whatever `LD_PRELOAD` or `LD_AUDIT` loads runs when the process starts,
+  before the check, and can hide from it. Protect the service's environment (its unit file,
+  container spec or launch configuration) as carefully as its binaries.
 
 After loading, `dladdr` must place the library's export in the verified file, and every object in
 its dependency closure, read from each file's `DT_NEEDED` entries, must be bound to a file that
@@ -442,6 +466,64 @@ them - thread-pool workers for `async` I/O, timers and `Task.Run`. Calling it fi
 covers the threads that exist then, not the ones the runtime adds later, so **use
 `RequireProtectedSignature` for a Windows service**: it closes later threads too.
 
+### Wrapping under AWS KMS instead
+
+`AwsKmsKeyWrapper` (package `HkdfGuard.KeyWrapping.AwsKms`) is an `IKeyWrapper` over one symmetric
+AWS KMS key. Use it in place of `NativeHkdfKeyWrapperV1` wherever a wrapper is taken. Every call is
+a KMS request, authorized by the process's IAM credentials and recorded in CloudTrail:
+
+```csharp
+using var kms = new AmazonKeyManagementServiceClient(); // default credential and region chain
+var wrapper = new AwsKmsKeyWrapper(kms,
+    "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+    new Dictionary<string, string> { ["purpose"] = "my.service" });
+```
+
+- `GenerateAndWrapAsync` calls `GenerateDataKeyWithoutPlaintext` for an AES-256 key, so the
+  plaintext DEK never leaves KMS on that call. `WrapAsync` calls `Encrypt` and `UnwrapAsync` calls `Decrypt`.
+- The key is pinned on every `Decrypt`. A symmetric ciphertext names its own key, and without the pin
+  a substituted key file wrapped under any other key the principal may use would still be revealed.
+  Prefer a key ARN to an alias: `Decrypt` resolves an alias when it is called, so re-pointing the
+  alias makes DEKs wrapped under the old key unreadable. KMS's automatic key rotation keeps the
+  ARN and needs nothing here.
+- The optional encryption context is KMS's AAD. It is bound into every wrapped DEK, required again
+  to reveal it, and can be required by the key policy (`kms:EncryptionContext:purpose`). CloudTrail
+  logs it in plaintext, so it must never hold a secret.
+- Failures surface as `CryptographicException`, naming KMS's error code (for example
+  `AccessDeniedException` or `InvalidCiphertextException`), with the AWS exception as the inner
+  exception. A failed unwrap zeroes the caller's buffer.
+- Key files are read only from where no untrusted account could have written or replaced them, by
+  the native library's rules, checked in managed code: on Windows, a local fixed drive, reached
+  through no link, junction or substituted drive, with the file and every folder above it owned and
+  modifiable only by SYSTEM, Administrators or TrustedInstaller; on Linux and macOS, the file and
+  every directory above it owned by root and writable by no one else, following only root-owned
+  links. A `KeyFileTrust` passed to the constructor adds the deployment's own account or group. A
+  file that looks like an unwrapped key is refused too. A KMS ciphertext is about 184 bytes, well
+  inside `WrappedKeyLimits.MaxBytes`.
+- The principal needs `kms:Encrypt`, `kms:Decrypt` and `kms:GenerateDataKeyWithoutPlaintext` on the key.
+  A process that only reads existing key files needs only `kms:Decrypt`.
+
+[Wrap keys with AWS KMS](docs/how-to/use-aws-kms.md) walks through creating the key, the IAM
+permissions for each role, credentials, and creating key files.
+
+### Wrapping under Azure Key Vault instead
+
+`AzureKeyVaultKeyWrapper` (package `HkdfGuard.KeyWrapping.AzureKeyVault`) wraps each DEK under an
+RSA key in Key Vault and signs it with a separate EC P-256 key; unwrap verifies the signature
+first. RSA wrapping needs only the public key, so without the signature anyone could create a key
+file holding a DEK they chose; with it, only principals allowed to sign can:
+
+```csharp
+var wrapper = new AzureKeyVaultKeyWrapper(
+    new Uri("https://myvault.vault.azure.net/keys/myapp-wrap"),
+    new Uri("https://myvault.vault.azure.net/keys/myapp-sign"),
+    new DefaultAzureCredential(),
+    context: "my.service");
+```
+
+[Wrap keys with Azure Key Vault](docs/how-to/use-azure-key-vault.md) covers creating both keys,
+the role for each identity, and rotation.
+
 ### 2. Build a `KeyRing`
 
 `KeyRingBuilder` fluently collects a service name/cache-expiry/rotation
@@ -459,12 +541,12 @@ were configured. `BuildAsync` reads every key file through the key wrapper
 link, junction or short name in its path, or loose ownership or permissions), and one that holds
 what looks like an unwrapped key: a refusal is a `FileNotFoundException`,
 `UnauthorizedAccessException` or `InvalidDataException` naming the native status (see
-[the CLI reference](docs/reference/cli.md#status-codes)). Other key wrappers read with ordinary
-file I/O by default (`WrappedKeyFile.ReadAsync`): each key file must hold 1 to
-`WrappedKeyLimits.MaxBytes` (512) bytes, and no more than one byte past that is ever read, so
-pointing it at the wrong file can't make startup allocate an unbounded buffer. The limit leaves room for larger keys and extra fingerprinting
-beyond today's 156-byte macOS payload; raising that one constant also resizes the buffer an
-ephemeral key is generated into. If anything fails or is cancelled partway through, every provider
+[the CLI reference](docs/reference/cli.md#status-codes)). There is no fallback reader: every key
+wrapper must implement `ReadKeyFileAsync` itself, refusing a file that an untrusted account could
+have written or replaced, since whoever can replace a key file chooses the key new data is
+encrypted under. A wrapped key is at most `WrappedKeyLimits.MaxBytes` (512) bytes, which leaves
+room for larger keys and extra fingerprinting beyond today's 156-byte macOS payload; raising that
+one constant also resizes the buffer an ephemeral key is generated into. If anything fails or is cancelled partway through, every provider
 it already created is disposed.
 
 Building is asynchronous only: `BuildAsync` reads the key files and reveals every key through the
@@ -714,6 +796,31 @@ sudo scripts/provision-linux-test-key.sh
 HKDFGUARD_TEST_SERVICE=com.hkdfguard.integration.test.221 \
 dotnet test test/HkdfGuard.KeyWrapping.V1.Test
 ```
+
+`AwsKmsIntegrationTests` make real calls against a symmetric KMS key. They are reported as skipped,
+never passed, unless `HKDFGUARD_TEST_AWS_KMS_KEY_ID` names one. Credentials and region come from the
+SDK's usual chain. The tests never create, alter or delete a key:
+
+```bash
+HKDFGUARD_TEST_AWS_KMS_KEY_ID=arn:aws:kms:us-east-1:111122223333:key/... AWS_REGION=us-east-1 \
+dotnet test test/HkdfGuard.KeyWrapping.AwsKms.Test
+```
+
+[Run the AWS KMS integration tests](docs/how-to/run-aws-kms-integration-tests.md) sets up a test
+key and a low-privilege IAM user, and keeps the key ARN in a git-ignored runsettings file instead
+of the environment.
+
+`AzureKeyVaultIntegrationTests` make real calls against an RSA wrapping key and an EC P-256
+signing key. They are reported as skipped, never passed, unless `HKDFGUARD_TEST_AZURE_WRAP_KEY_ID`
+and `HKDFGUARD_TEST_AZURE_SIGN_KEY_ID` both name one, which the git-ignored `azure.runsettings`
+does. Credentials come from `DefaultAzureCredential` (for example `az login`):
+
+```powershell
+dotnet test test/HkdfGuard.KeyWrapping.AzureKeyVault.Test --settings azure.runsettings
+```
+
+[Run the Azure Key Vault integration tests](docs/how-to/run-azure-key-vault-integration-tests.md)
+sets up a test vault, both keys and your role on them.
 
 ### Native integration test coverage
 
