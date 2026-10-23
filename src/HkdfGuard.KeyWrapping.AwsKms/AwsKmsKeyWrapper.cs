@@ -3,6 +3,7 @@ using Amazon.KeyManagementService;
 using Amazon.KeyManagementService.Model;
 using Amazon.Runtime;
 using HkdfGuard.Abstractions;
+using HkdfGuard.SecureFile;
 
 namespace HkdfGuard.KeyWrapping.AwsKms;
 
@@ -25,6 +26,12 @@ namespace HkdfGuard.KeyWrapping.AwsKms;
 /// (kms:EncryptionContext:*). It is logged in plaintext by CloudTrail, so it must not hold secrets.
 /// </para>
 /// <para>
+/// Key files are read only from where an untrusted account can't have written or replaced them
+/// (see <see cref="ReadKeyFileAsync"/> and <see cref="KeyFileTrust"/>). Pinning the key stops a key
+/// file wrapped under another key; this stops one wrapped under this key by anyone who may call
+/// kms:Encrypt, which would otherwise choose the DEK new data is encrypted under.
+/// </para>
+/// <para>
 /// Plaintext key bytes this class owns - the buffer sent to Encrypt and the stream Decrypt returns
 /// - are zeroed once used. The AWS SDK base64-encodes both into JSON strings it does not expose,
 /// which can't be zeroed and live until collected.
@@ -41,6 +48,7 @@ public sealed class AwsKmsKeyWrapper : IKeyWrapper
     private readonly IAmazonKeyManagementService _client;
     private readonly string _keyId;
     private readonly Dictionary<string, string>? _encryptionContext;
+    private readonly KeyFileTrust _keyFileTrust;
 
     /// <param name="client">The KMS client every call is made through. Not disposed by this wrapper;
     /// its owner (typically the DI container) disposes it.</param>
@@ -48,16 +56,20 @@ public sealed class AwsKmsKeyWrapper : IKeyWrapper
     /// alias name ("alias/...") or alias ARN.</param>
     /// <param name="encryptionContext">Bound into every wrapped DEK and required again to reveal
     /// it. Copied at construction; null or empty binds none.</param>
+    /// <param name="keyFileTrust">Who besides the operating system's administrators may have
+    /// written a key file <see cref="ReadKeyFileAsync"/> reads; null trusts administrators only
+    /// (<see cref="KeyFileTrust.AdministratorsOnly"/>).</param>
     /// <exception cref="ArgumentNullException">client or keyId is null, or the context holds a null value</exception>
     /// <exception cref="ArgumentException">keyId is empty or whitespace, or the context holds an empty key</exception>
     public AwsKmsKeyWrapper(IAmazonKeyManagementService client, string keyId,
-        IReadOnlyDictionary<string, string>? encryptionContext = null)
+        IReadOnlyDictionary<string, string>? encryptionContext = null, KeyFileTrust? keyFileTrust = null)
     {
         ArgumentNullException.ThrowIfNull(client);
         ArgumentException.ThrowIfNullOrWhiteSpace(keyId);
 
         _client = client;
         _keyId = keyId;
+        _keyFileTrust = keyFileTrust ?? KeyFileTrust.AdministratorsOnly;
 
         if (encryptionContext is { Count: > 0 })
         {
@@ -176,6 +188,31 @@ public sealed class AwsKmsKeyWrapper : IKeyWrapper
             .ConfigureAwait(false);
         return CopyWrapped(response.CiphertextBlob, result, "generate-and-wrap");
     }
+
+    /// <summary>
+    /// Reads a key file this wrapper wrote, still wrapped, refusing one that an account other than
+    /// the operating system's administrators and the <see cref="KeyFileTrust"/> given at
+    /// construction could have written or replaced - the managed equivalent of the native library's
+    /// checks. On Windows the file must be on a local fixed drive, reached through real folders (no
+    /// symbolic link, junction or substituted drive), and it and every folder above
+    /// it must be owned by, and modifiable only by, trusted principals. On Linux and macOS it and
+    /// every directory above it must be owned by root or a trusted user and writable by nobody else
+    /// (by its group only if that group is trusted), and only symbolic links a trusted user owns are
+    /// followed. It is also refused if it is empty, over <see cref="WrappedKeyLimits.MaxBytes"/>, or
+    /// looks like an unwrapped key.
+    /// </summary>
+    /// <param name="path">The key file's path</param>
+    /// <param name="cancellationToken">Cancels the read</param>
+    /// <returns>The file's contents, still wrapped</returns>
+    /// <exception cref="FileNotFoundException">The file doesn't exist</exception>
+    /// <exception cref="UnauthorizedAccessException">This account may not read the file, or it isn't
+    /// somewhere only trusted principals can modify</exception>
+    /// <exception cref="InvalidDataException">The file is empty, too long, or holds what looks like an
+    /// unwrapped key</exception>
+    /// <exception cref="IOException">The file can't be read, or another process has it open for writing</exception>
+    /// <exception cref="ArgumentException">The <see cref="KeyFileTrust"/> names a principal that can't be trusted</exception>
+    public ValueTask<byte[]> ReadKeyFileAsync(string path, CancellationToken cancellationToken = default)
+        => TrustedKeyFile.ReadAsync(path, _keyFileTrust, cancellationToken);
 
     // A fresh dictionary per request, so nothing the SDK (or a handler in its pipeline) does to a
     // request can change what later requests bind.

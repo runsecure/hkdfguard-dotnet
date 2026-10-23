@@ -6,6 +6,7 @@ using Amazon.Runtime;
 using HkdfGuard.Abstractions;
 using HkdfGuard.CryptoProvider.AesGcm256;
 using HkdfGuard.KeyWrapping.AwsKms.Test.TestHelpers;
+using HkdfGuard.SecureFile;
 
 namespace HkdfGuard.KeyWrapping.AwsKms.Test;
 
@@ -307,24 +308,6 @@ public class AwsKmsKeyWrapperTests
     }
 
     [Fact]
-    public async Task ReadKeyFileAsync_ReadsWithOrdinaryFileIo()
-    {
-        var wrapper = new AwsKmsKeyWrapper(FakeKms.Create().Client, KeyArn);
-        var path = Path.GetTempFileName();
-        try
-        {
-            var wrapped = RandomNumberGenerator.GetBytes(184);
-            await File.WriteAllBytesAsync(path, wrapped);
-
-            Assert.Equal(wrapped, await ((IKeyWrapper)wrapper).ReadKeyFileAsync(path));
-        }
-        finally
-        {
-            File.Delete(path);
-        }
-    }
-
-    [Fact]
     public void Scrub_ZeroesAnExposedBuffer_AndSkipsAReadOnlyOne()
     {
         var exposed = new byte[] { 1, 2, 3 };
@@ -356,5 +339,53 @@ public class AwsKmsKeyWrapperTests
         var decryptedLength = provider.Decrypt(encrypted.AsSpan(0, encryptedLength), decrypted);
 
         Assert.Equal(expected, decrypted[..decryptedLength]);
+    }
+
+    [Fact]
+    public async Task ReadKeyFile_ByDefault_RefusesAFileTheCurrentUserCouldHaveReplaced()
+    {
+        // The user's temp folder (Windows) or the shared /tmp (Linux, macOS): neither is somewhere
+        // only administrators can write.
+        var wrapper = new AwsKmsKeyWrapper(FakeKms.Create().Client, KeyArn, Context);
+        var path = Path.Combine(Directory.CreateTempSubdirectory("hkdfguard-keys-").FullName, "v1.key");
+        await File.WriteAllBytesAsync(path, RandomNumberGenerator.GetBytes(184));
+        try
+        {
+            if (!OperatingSystem.IsWindows() && Path.GetTempPath().StartsWith("/var/folders/", StringComparison.Ordinal))
+                return; // macOS's per-user temp folder is private to its user; TrustedKeyFileTests covers macOS
+
+            await Assert.ThrowsAsync<UnauthorizedAccessException>(async () => await wrapper.ReadKeyFileAsync(path));
+        }
+        finally
+        {
+            Directory.Delete(Path.GetDirectoryName(path)!, recursive: true);
+        }
+    }
+
+    [WindowsFact]
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    public async Task ReadKeyFile_WithTheWritersAccountTrusted_ReadsTheFile_AndAKeyRingRevealsIt()
+    {
+        var kms = FakeKms.Create();
+        var wrapper = new AwsKmsKeyWrapper(kms.Client, KeyArn, Context, WindowsTempDirectory.TrustCurrentUser);
+        using var dir = new WindowsTempDirectory();
+
+        var wrapped = new byte[WrappedKeyLimits.MaxBytes];
+        var length = await wrapper.GenerateAndWrapAsync(wrapped);
+        var path = dir.Write("v1.key", wrapped[..length]);
+
+        Assert.Equal(wrapped[..length], await wrapper.ReadKeyFileAsync(path));
+    }
+
+    [WindowsFact]
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    public async Task ReadKeyFile_TrustingEveryone_IsRefused()
+    {
+        var wrapper = new AwsKmsKeyWrapper(FakeKms.Create().Client, KeyArn, Context,
+            new KeyFileTrust { WindowsPrincipals = ["S-1-1-0"] });
+        using var dir = new WindowsTempDirectory();
+        var path = dir.Write("v1.key", RandomNumberGenerator.GetBytes(184));
+
+        await Assert.ThrowsAsync<ArgumentException>(async () => await wrapper.ReadKeyFileAsync(path));
     }
 }

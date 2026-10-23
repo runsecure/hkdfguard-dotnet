@@ -6,6 +6,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\HkdfGuard.Abstractions\HkdfGuard.Abstractions.csproj" />
+    <ProjectReference Include="..\HkdfGuard.SecureFile\HkdfGuard.SecureFile.csproj" />
   </ItemGroup>
 
   <ItemGroup>

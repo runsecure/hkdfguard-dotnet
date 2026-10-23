@@ -17,7 +17,7 @@ To run the AWS KMS integration tests against a key of your own, see
 | Identified by | A service name | A key ARN |
 | Who may wrap and unwrap | Local accounts and groups the native library allows | IAM principals the key policy and IAM policies allow |
 | Each call | Local, synchronous | A KMS request over the network, logged in CloudTrail |
-| Key file reads | Through the native library, which refuses files another account could have replaced | Ordinary file I/O; protecting the folder is up to you |
+| Key file reads | Through the native library, which refuses files another account could have replaced | The same rules, checked in managed code; who else is trusted is set with `KeyFileTrust` |
 | Install | The native package | Nothing beyond the NuGet package |
 
 Wrapped DEKs aren't interchangeable. A key file wrapped by one wrapper can't be unwrapped by the
@@ -211,11 +211,66 @@ A KMS-wrapped DEK is about 184 bytes, well inside `WrappedKeyLimits.MaxBytes`. U
 wrapper, KMS can wrap anywhere the pipeline role has credentials; it doesn't have to run on the
 host that uses the key.
 
-> **Security:** `AwsKmsKeyWrapper` reads key files with ordinary file I/O and makes none of the
-> native library's ownership and permission checks. Keep key files where only administrators and
-> the deployment can write, and the application can only read. Anyone who can replace a key file
-> *and* call `Encrypt` on the key can choose your application's DEK; step 2 keeps the second half
-> away from everyone but the pipeline.
+### Where key files can live
+
+Anyone who can replace a key file *and* call `Encrypt` on the key can choose your application's
+DEK. Step 2 keeps `Encrypt` with the pipeline; `AwsKmsKeyWrapper` keeps the other half by refusing
+to read a key file that anyone untrusted could have written or replaced. It applies the native
+library's rules:
+
+- **Windows:** the file is on a local fixed drive, not a UNC path or network drive, and its path
+  runs through no symbolic link, junction or substituted drive. The file and every folder above it
+  are owned by SYSTEM, Administrators or TrustedInstaller, and grant no one else the right to write,
+  delete, rename, change permissions or take ownership. For a folder that includes creating files
+  in it. The drive root is held only to renaming and deleting what's beneath it. So nothing under
+  `C:\ProgramData`, your user profile or `%TEMP%` is trusted, nor a folder made directly under `C:\`
+  with its default permissions.
+- **Linux and macOS:** the file and every directory above it, up to `/`, are owned by root and
+  writable by neither their group nor others. A symbolic link is followed only if root owns it. So
+  nothing under `/tmp`, `/var/tmp` or a home directory is trusted.
+- **Everywhere:** a file that is empty, over 512 bytes, exactly 32 bytes, or a 32-byte key written
+  as hex or base64 is refused. Those last ones are probably a plaintext key: treat it as exposed.
+
+Prepare the folder once, as an administrator. On Windows, give it its own permissions, with
+inheritance removed:
+
+```powershell
+New-Item -ItemType Directory -Force C:\HkdfGuardKeys\myapp | Out-Null
+icacls C:\HkdfGuardKeys /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-32-545:(OI)(CI)RX"
+icacls C:\HkdfGuardKeys /setowner "*S-1-5-32-544" /T
+```
+
+On Linux:
+
+```bash
+sudo install -d -o root -g myapp -m 0750 /etc/hkdfguard/keys/myapp
+```
+
+Then write key files as an administrator (elevated on Windows, so Administrators owns the file; as
+root on Linux and macOS), and let the application's account only read them: on Linux,
+`sudo install -o root -g myapp -m 0640 v1.key /etc/hkdfguard/keys/myapp/`.
+
+If the pipeline writes key files as an account of its own instead, trust it explicitly:
+
+```csharp
+using HkdfGuard.SecureFile;
+
+var wrapper = new AwsKmsKeyWrapper(kms, keyArn, encryptionContext,
+    new KeyFileTrust
+    {
+        // Windows: the deployer account, which owns the files it creates, and any group granted
+        // Modify on the folder. SIDs, not names: Get-LocalUser deployer | Select-Object SID
+        WindowsPrincipals = ["S-1-5-21-1111111111-2222222222-3333333333-1005"],
+        // Linux and macOS: the deployer's uid, and a group allowed to write (id deployer).
+        UnixUserIds = [1001],
+        UnixGroupIds = [2001],
+    });
+```
+
+> **Security:** never trust the account the application itself runs as, except on a developer
+> machine. An application that can rewrite its own key files can be made to switch to an older,
+> still-valid one. Everyone, Authenticated Users, Users, Interactive and Anonymous are refused if
+> listed.
 
 ## 7. Use the key file
 
@@ -279,3 +334,15 @@ exception is its `InnerException`. A failed unwrap zeroes the caller's buffer.
 | `KMSInvalidStateException` | The key is pending deletion | Cancel the deletion right away, within its waiting period |
 | `Unable to get IAM security credentials` or similar | The SDK found no credentials | Step 3 |
 | `ThrottlingException` | Too many requests for the account's KMS quota | Lengthen `KeyRefreshInterval`, or ask AWS for a higher quota |
+
+Reading a key file fails before KMS is called:
+
+| You see | Cause | Fix |
+|---|---|---|
+| `UnauthorizedAccessException` ... `is not trusted` | The file or a folder above it is owned, or modifiable, by an account that isn't trusted; the message names it | [Where key files can live](#where-key-files-can-live): fix the folder's permissions, or trust the deployer with `KeyFileTrust` |
+| `UnauthorizedAccessException` ... `UNC or device path` or `drive` | The file isn't on a local fixed drive | Move it to a local drive |
+| `UnauthorizedAccessException` ... `it opens` | The path runs through a link, junction or substituted drive | Configure the full, real path |
+| `InvalidDataException` ... `unwrapped` | The file holds what looks like a plaintext key | Treat the key as exposed: replace it, and write the file with `AwsKmsKeyWrapper` |
+| `InvalidDataException` ... `empty` or `larger than` | It isn't a key file | Check the path |
+| `IOException` | Another process has the file open for writing, or it can't be read | Let the deployment finish writing it |
+| `ArgumentException` naming `KeyFileTrust` | A listed SID isn't valid, or is a group everyone is in | List the deployer's own account or group |

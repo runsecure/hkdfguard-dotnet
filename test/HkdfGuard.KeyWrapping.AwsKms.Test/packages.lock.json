@@ -127,6 +127,13 @@
         "type": "Project",
         "dependencies": {
           "AWSSDK.KeyManagementService": "[4.0.100.19, )",
+          "HkdfGuard.Abstractions": "[1.0.0, )",
+          "HkdfGuard.SecureFile": "[1.0.0, )"
+        }
+      },
+      "hkdfguard.securefile": {
+        "type": "Project",
+        "dependencies": {
           "HkdfGuard.Abstractions": "[1.0.0, )"
         }
       },
