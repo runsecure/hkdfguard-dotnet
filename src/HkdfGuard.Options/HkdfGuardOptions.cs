@@ -27,7 +27,7 @@ public sealed class HkdfGuardOptions
     /// <summary>
     /// How many consecutive failed attempts to re-reveal a key (every KeyRefreshInterval seconds)
     /// are tolerated before that key's provider fails closed - zeroing the key and refusing
-    /// every operation until a refresh succeeds. At least 1. Unset keeps KeyRingBuilder's
+    /// every operation until a refresh succeeds. 1 to 100 (RefreshFailurePolicy.MaxAllowedRefreshFailures). Unset keeps KeyRingBuilder's
     /// default (KeyRingBuilder.DefaultMaxRefreshFailures).
     /// </summary>
     public int? MaxRefreshFailures { get; set; }

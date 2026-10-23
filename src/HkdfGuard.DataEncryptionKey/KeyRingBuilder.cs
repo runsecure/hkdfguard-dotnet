@@ -197,11 +197,12 @@ public sealed class KeyRingBuilder
     /// provider fails closed - zeroes its DEK and throws on every operation until a refresh
     /// succeeds. Not calling this keeps <see cref="DefaultMaxRefreshFailures"/>.
     /// </summary>
-    /// <exception cref="ArgumentOutOfRangeException">maxRefreshFailures is below 1</exception>
+    /// <exception cref="ArgumentOutOfRangeException">maxRefreshFailures is not between 1 and 100 (RefreshFailurePolicy.MaxAllowedRefreshFailures)</exception>
     public KeyRingBuilder WithMaxRefreshFailures(int maxRefreshFailures)
     {
-        if (maxRefreshFailures < 1)
-            throw new ArgumentOutOfRangeException(nameof(maxRefreshFailures), maxRefreshFailures, "MaxRefreshFailures must be at least 1.");
+        if (maxRefreshFailures is < 1 or > RefreshFailurePolicy.MaxAllowedRefreshFailures)
+            throw new ArgumentOutOfRangeException(nameof(maxRefreshFailures), maxRefreshFailures,
+                $"MaxRefreshFailures must be between 1 and {RefreshFailurePolicy.MaxAllowedRefreshFailures}.");
 
         MaxRefreshFailures = maxRefreshFailures;
         return this;

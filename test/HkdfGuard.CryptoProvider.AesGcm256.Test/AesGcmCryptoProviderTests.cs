@@ -387,10 +387,21 @@ public class AesGcmCryptoProviderTests
     [Theory]
     [InlineData(0)]
     [InlineData(-1)]
-    public async Task CreateAsync_WithMaxRefreshFailuresBelowOne_Throws(int maxRefreshFailures)
+    [InlineData(RefreshFailurePolicy.MaxAllowedRefreshFailures + 1)]
+    [InlineData(int.MaxValue)]
+    public async Task CreateAsync_WithMaxRefreshFailuresOutsideOneToOneHundred_Throws(int maxRefreshFailures)
     {
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
             AesGcmCryptoProvider.CreateAsync(new FakeKeyWrapper(), "wrapped"u8.ToArray(), 60, maxRefreshFailures));
+    }
+
+    [Fact]
+    public async Task CreateAsync_WithTheLargestAllowedMaxRefreshFailures_Succeeds()
+    {
+        Assert.Equal(100, RefreshFailurePolicy.MaxAllowedRefreshFailures);
+        await using var provider = await AesGcmCryptoProvider.CreateAsync(
+            new FakeKeyWrapper(), "wrapped"u8.ToArray(), 60, RefreshFailurePolicy.MaxAllowedRefreshFailures);
+        Assert.Equal(100, provider.MaxRefreshFailures);
     }
 
     [Fact]

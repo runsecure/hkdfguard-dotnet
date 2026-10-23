@@ -436,7 +436,8 @@ public class KeyRingBuilderTests
     [Theory]
     [InlineData(1)]
     [InlineData(50)]
-    public void WithMaxRefreshFailures_AtLeastOne_SetsMaxRefreshFailures(int maxRefreshFailures)
+    [InlineData(100)]
+    public void WithMaxRefreshFailures_FromOneToOneHundred_SetsMaxRefreshFailures(int maxRefreshFailures)
     {
         var builder = new KeyRingBuilder().WithMaxRefreshFailures(maxRefreshFailures);
 
@@ -446,7 +447,9 @@ public class KeyRingBuilderTests
     [Theory]
     [InlineData(0)]
     [InlineData(-1)]
-    public void WithMaxRefreshFailures_BelowOne_Throws(int maxRefreshFailures)
+    [InlineData(101)]
+    [InlineData(int.MaxValue)]
+    public void WithMaxRefreshFailures_OutsideOneToOneHundred_Throws(int maxRefreshFailures)
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => new KeyRingBuilder().WithMaxRefreshFailures(maxRefreshFailures));
     }
