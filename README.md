@@ -459,12 +459,12 @@ were configured. `BuildAsync` reads every key file through the key wrapper
 link, junction or short name in its path, or loose ownership or permissions), and one that holds
 what looks like an unwrapped key: a refusal is a `FileNotFoundException`,
 `UnauthorizedAccessException` or `InvalidDataException` naming the native status (see
-[the CLI reference](docs/reference/cli.md#status-codes)). Other key wrappers read with ordinary
-file I/O by default (`WrappedKeyFile.ReadAsync`): each key file must hold 1 to
-`WrappedKeyLimits.MaxBytes` (512) bytes, and no more than one byte past that is ever read, so
-pointing it at the wrong file can't make startup allocate an unbounded buffer. The limit leaves room for larger keys and extra fingerprinting
-beyond today's 156-byte macOS payload; raising that one constant also resizes the buffer an
-ephemeral key is generated into. If anything fails or is cancelled partway through, every provider
+[the CLI reference](docs/reference/cli.md#status-codes)). There is no fallback reader: every key
+wrapper must implement `ReadKeyFileAsync` itself, refusing a file that an untrusted account could
+have written or replaced, since whoever can replace a key file chooses the key new data is
+encrypted under. A wrapped key is at most `WrappedKeyLimits.MaxBytes` (512) bytes, which leaves
+room for larger keys and extra fingerprinting beyond today's 156-byte macOS payload; raising that
+one constant also resizes the buffer an ephemeral key is generated into. If anything fails or is cancelled partway through, every provider
 it already created is disposed.
 
 Building is asynchronous only: `BuildAsync` reads the key files and reveals every key through the

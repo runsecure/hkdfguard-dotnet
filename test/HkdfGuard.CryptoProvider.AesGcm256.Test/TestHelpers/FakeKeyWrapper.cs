@@ -8,13 +8,24 @@ namespace HkdfGuard.CryptoProvider.AesGcm256.Test.TestHelpers;
 /// </summary>
 internal sealed class FakeKeyWrapper : IKeyWrapper
 {
-    public int DecryptCallCount { get; private set; }
+    // Test-only: a plain read. Real key wrappers must refuse a key file another account could have replaced.
+    public async ValueTask<byte[]> ReadKeyFileAsync(string path, CancellationToken cancellationToken = default)
+        => await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
+
+    private int _decryptCallCount;
+    public int DecryptCallCount => Volatile.Read(ref _decryptCallCount);
     public int GenerateAndWrapCallCount { get; private set; }
 
     /// <summary>
     /// When set, Decrypt throws this instead of revealing a key.
     /// </summary>
     public Exception? ThrowOnDecrypt { get; set; }
+
+    /// <summary>
+    /// When set, UnwrapAsync blocks the calling thread until this is set - models a key wrapper
+    /// that hangs rather than failing, as the native one does on a stuck TPM or keychain prompt.
+    /// </summary>
+    public ManualResetEventSlim? BlockDecrypt { get; set; }
 
     /// <summary>
     /// When set, UnwrapAsync fills only this many bytes and reports that count - models a wrapper
@@ -33,7 +44,8 @@ internal sealed class FakeKeyWrapper : IKeyWrapper
 
     public ValueTask<int> UnwrapAsync(ReadOnlyMemory<byte> wrapped, Memory<byte> result, CancellationToken cancellationToken = default)
     {
-        DecryptCallCount++;
+        Interlocked.Increment(ref _decryptCallCount);
+        BlockDecrypt?.Wait();
         if (ThrowOnDecrypt is not null)
             throw ThrowOnDecrypt;
 
