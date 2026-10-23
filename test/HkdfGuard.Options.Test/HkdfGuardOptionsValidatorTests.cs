@@ -194,7 +194,9 @@ public class HkdfGuardOptionsValidatorTests
     [Theory]
     [InlineData(0)]
     [InlineData(-1)]
-    public void Validate_MaxRefreshFailuresBelowOne_Fails(int maxRefreshFailures)
+    [InlineData(101)]
+    [InlineData(int.MaxValue)]
+    public void Validate_MaxRefreshFailuresOutsideOneToOneHundred_Fails(int maxRefreshFailures)
     {
         var options = ValidOptions();
         options.MaxRefreshFailures = maxRefreshFailures;
@@ -208,7 +210,8 @@ public class HkdfGuardOptionsValidatorTests
     [Theory]
     [InlineData(1)]
     [InlineData(10)]
-    public void Validate_MaxRefreshFailuresAtLeastOne_Succeeds(int maxRefreshFailures)
+    [InlineData(100)]
+    public void Validate_MaxRefreshFailuresFromOneToOneHundred_Succeeds(int maxRefreshFailures)
     {
         var options = ValidOptions();
         options.MaxRefreshFailures = maxRefreshFailures;

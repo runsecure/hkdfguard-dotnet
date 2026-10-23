@@ -98,7 +98,7 @@ public sealed class AesGcmCryptoProvider : ICryptoProvider
     /// when key access is suspended, an informational one when it resumes, and a warning when the
     /// key nears its encryption limit. Optional, but without it (or an ActivityListener) none of
     /// these is visible - and under fail-open a revoked KEK goes unnoticed.</param>
-    /// <exception cref="ArgumentOutOfRangeException">expirySeconds is not between 1 and 300, or maxRefreshFailures is below 1</exception>
+    /// <exception cref="ArgumentOutOfRangeException">expirySeconds is not between 1 and 300, or maxRefreshFailures is not between 1 and 100</exception>
     public static Task<AesGcmCryptoProvider> CreateAsync(IKeyWrapper keyWrapper, byte[] wrapped, int expirySeconds,
         int? maxRefreshFailures = RefreshFailurePolicy.DefaultMaxRefreshFailures, CancellationToken cancellationToken = default, ILogger? logger = null)
         => CreateAsync(keyWrapper, wrapped, expirySeconds, maxRefreshFailures, budget: null, cancellationToken, logger);
@@ -126,8 +126,9 @@ public sealed class AesGcmCryptoProvider : ICryptoProvider
     {
         if (expirySeconds is < 1 or > 300)
             throw new ArgumentOutOfRangeException(nameof(expirySeconds), expirySeconds, "ExpirySeconds must be between 1 and 300.");
-        if (maxRefreshFailures is < 1)
-            throw new ArgumentOutOfRangeException(nameof(maxRefreshFailures), maxRefreshFailures, "MaxRefreshFailures must be at least 1.");
+        if (maxRefreshFailures is < 1 or > RefreshFailurePolicy.MaxAllowedRefreshFailures)
+            throw new ArgumentOutOfRangeException(nameof(maxRefreshFailures), maxRefreshFailures,
+                $"MaxRefreshFailures must be between 1 and {RefreshFailurePolicy.MaxAllowedRefreshFailures}.");
     }
 
     /// <summary>The configured refresh-failure policy; null means fail open.</summary>

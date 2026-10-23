@@ -41,8 +41,10 @@ tracking and purpose-scoped Additional Authenticated Data (AAD).
   `hkdfguard.key_access_suspended` event, and every Encrypt/Decrypt throws
   `CryptographicException` until a later refresh succeeds, at which point service resumes with no
   restart. So revoking the KEK stops a running process within about `3 × KeyRefreshInterval`.
-  `WithMaxRefreshFailures(n)` (or `HkdfGuardOptions.MaxRefreshFailures`) changes `n`; pick it so
-  that `n × KeyRefreshInterval` is longer than any KEK outage you'd rather ride out.
+  `WithMaxRefreshFailures(n)` (or `HkdfGuardOptions.MaxRefreshFailures`) changes `n`, from 1 to
+  100 (`RefreshFailurePolicy.MaxAllowedRefreshFailures`); pick it so that `n × KeyRefreshInterval`
+  is longer than any KEK outage you'd rather ride out. 100 at the longest interval is about 8 h 20
+  min; a larger limit would quietly fail open, so failing open has to be asked for explicitly.
   `WithFailOpenOnRefreshFailure()` (or `HkdfGuardOptions.FailOpenOnRefreshFailure`) opts out: the
   last good session then stays in use indefinitely, and revoking the KEK never stops the process.
   Either way, give the factory a logger - `new AesGcmCryptoProviderFactory(logger)` - and every
