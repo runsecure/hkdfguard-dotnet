@@ -302,6 +302,12 @@ public sealed class KeyRingBuilder
                 // Read through the key wrapper: a native KMS reads its own key files, with its own
                 // checks on who could have written them.
                 var wrapped = await _keyWrapper.ReadKeyFileAsync(path, cancellationToken).ConfigureAwait(false);
+                // Whatever the key wrapper, a wrapped key is never empty and never over the limit.
+                if (wrapped is not { Length: > 0 })
+                    throw new InvalidDataException($"Key file '{path}' is empty.");
+                if (wrapped.Length > WrappedKeyLimits.MaxBytes)
+                    throw new InvalidDataException(
+                        $"Key file '{path}' is larger than {WrappedKeyLimits.MaxBytes} bytes (WrappedKeyLimits.MaxBytes); a wrapped key never is.");
                 var provider = await _cryptoProviderFactory
                     .CreateAsync(_keyWrapper, wrapped, KeyRefreshInterval.Value, MaxRefreshFailures, cancellationToken)
                     .ConfigureAwait(false);
