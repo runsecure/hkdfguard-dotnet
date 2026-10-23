@@ -10,7 +10,8 @@ file.
 [`hkdfguard` reference](reference/cli.md).
 
 **Using AWS KMS as the KEK** instead of the native TPM, Secure Enclave or Platform Crypto
-Provider: see [Wrap keys with AWS KMS](how-to/use-aws-kms.md).
+Provider: see [Wrap keys with AWS KMS](how-to/use-aws-kms.md). **Using Azure Key Vault:** see
+[Wrap keys with Azure Key Vault](how-to/use-azure-key-vault.md).
 
 ## Map
 
@@ -21,6 +22,8 @@ Provider: see [Wrap keys with AWS KMS](how-to/use-aws-kms.md).
 | How-to | Create key files in a deployment pipeline | Planned |
 | How-to | [Wrap keys with AWS KMS](how-to/use-aws-kms.md) | Draft |
 | How-to | [Run the AWS KMS integration tests](how-to/run-aws-kms-integration-tests.md) | Draft |
+| How-to | [Wrap keys with Azure Key Vault](how-to/use-azure-key-vault.md) | Draft |
+| How-to | [Run the Azure Key Vault integration tests](how-to/run-azure-key-vault-integration-tests.md) | Draft |
 | How-to | Rotate keys | Planned (see the README's *Key rotation* section for now) |
 | How-to | Use HkdfGuard with dependency injection and `IConfiguration` | Planned |
 | How-to | Troubleshoot | Planned |
