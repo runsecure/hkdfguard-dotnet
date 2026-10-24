@@ -162,17 +162,187 @@ public class MacOsNativeLibraryLoaderTests
         Assert.Contains(MacOsNativeLibraryLoader.UserPath(Home), ex.Message);
     }
 
-    [Theory]
-    [InlineData(Home)]
-    [InlineData("")]               // no home directory known
-    [InlineData("relative/home")]  // never resolved against the working directory
-    public void ChoosePath_WithNeitherInstallUsable_ThrowsNamingBothLocations(string home)
+    [Fact]
+    public void ChoosePath_WithNeitherInstallUsable_ThrowsNamingBothLocations()
     {
         var ex = Assert.Throws<DllNotFoundException>(() =>
-            MacOsNativeLibraryLoader.ChoosePath(p => !p.StartsWith('/') && p.EndsWith(".dylib") ? Present : ENOENT, home));
+            MacOsNativeLibraryLoader.ChoosePath(_ => ENOENT, Home));
 
         Assert.Contains(MacOsNativeLibraryLoader.SystemPath, ex.Message);
-        Assert.Contains(".hkdfguard/v1/libhkdfguard.dylib", ex.Message);
+        Assert.Contains(MacOsNativeLibraryLoader.UserPath(Home), ex.Message);
+    }
+
+    [Theory]
+    [InlineData(null)]             // no account database entry, or it couldn't be read
+    [InlineData("")]               // an entry with no home directory
+    [InlineData("relative/home")]  // never resolved against the working directory
+    public void ChoosePath_WithNoUsableAccountHome_ConsidersOnlyTheSystemInstall(string? home)
+    {
+        var probed = new List<string>();
+
+        var ex = Assert.Throws<DllNotFoundException>(() =>
+            MacOsNativeLibraryLoader.ChoosePath(p => { probed.Add(p); return p.EndsWith(".dylib") && !p.StartsWith('/') ? Present : ENOENT; }, home));
+
+        Assert.Equal([MacOsNativeLibraryLoader.SystemPath], probed);
+        Assert.Contains(MacOsNativeLibraryLoader.SystemPath, ex.Message);
+        Assert.DoesNotContain(".hkdfguard", ex.Message);
+    }
+
+    [Fact]
+    public void ChoosePath_WithNoUsableAccountHome_StillUsesTheSystemInstall()
+    {
+        var (path, isSystem) = MacOsNativeLibraryLoader.ChoosePath(_ => Present, null);
+
+        Assert.Equal(MacOsNativeLibraryLoader.SystemPath, path);
+        Assert.True(isSystem);
+    }
+
+    // --- The library's version ------------------------------------------------------------------
+
+    private const uint Arm64 = 0x0100000C;
+    private const uint X86_64 = 0x01000007;
+
+    // A thin Mach-O 64 header followed by the given load commands, each as (cmd, cmdsize, body).
+    private static byte[] MachO(uint cpuType, params (uint Cmd, uint Size, uint? Version)[] commands)
+    {
+        var body = new List<byte>();
+        foreach (var (cmd, size, version) in commands)
+        {
+            var command = new byte[size];
+            BitConverter.GetBytes(cmd).CopyTo(command, 0);
+            BitConverter.GetBytes(size).CopyTo(command, 4);
+            if (version is { } v && size >= 24)
+                BitConverter.GetBytes(v).CopyTo(command, 16);
+            body.AddRange(command);
+        }
+        var header = new byte[32];
+        BitConverter.GetBytes(0xFEEDFACFu).CopyTo(header, 0);
+        BitConverter.GetBytes(cpuType).CopyTo(header, 4);
+        BitConverter.GetBytes((uint)commands.Length).CopyTo(header, 16);
+        BitConverter.GetBytes((uint)body.Count).CopyTo(header, 20);
+        return [.. header, .. body];
+    }
+
+    private static byte[] Dylib(uint version, uint cpuType = Arm64) =>
+        MachO(cpuType, (0x19, 72, null), (0xD, 48, version), (0x32, 32, null)); // LC_SEGMENT_64, LC_ID_DYLIB, LC_BUILD_VERSION
+
+    private static void PutBigEndian(byte[] buffer, int at, uint value)
+    {
+        buffer[at] = (byte)(value >> 24); buffer[at + 1] = (byte)(value >> 16); buffer[at + 2] = (byte)(value >> 8); buffer[at + 3] = (byte)value;
+    }
+
+    // A universal file: a FAT_MAGIC header with one 20-byte entry per slice, slices at 4 KiB boundaries.
+    private static byte[] Fat(params (uint CpuType, byte[] Slice)[] slices)
+    {
+        const int align = 4096;
+        var file = new byte[align * (slices.Length + 1)];
+        PutBigEndian(file, 0, 0xCAFEBABE);
+        PutBigEndian(file, 4, (uint)slices.Length);
+        for (var i = 0; i < slices.Length; i++)
+        {
+            var offset = align * (i + 1);
+            PutBigEndian(file, 8 + i * 20, slices[i].CpuType);
+            PutBigEndian(file, 8 + i * 20 + 8, (uint)offset);
+            PutBigEndian(file, 8 + i * 20 + 12, (uint)slices[i].Slice.Length);
+            slices[i].Slice.CopyTo(file, offset);
+        }
+        return file;
+    }
+
+    [Theory]
+    [InlineData(0x0000_0900u)] // the minimum itself, 0.9.0
+    [InlineData(0x0000_0901u)] // 0.9.1
+    [InlineData(0x0001_0000u)] // 1.0.0
+    public void VerifyVersion_AcceptsTheMinimumAndNewer(uint version)
+    {
+        Assert.Equal(version, MacOsNativeLibraryLoader.ReadLibraryVersion(Dylib(version)));
+        MacOsNativeLibraryLoader.VerifyVersion("/x.dylib", Dylib(version));
+    }
+
+    [Theory]
+    [InlineData(0x0000_0800u, "0.8.0")]
+    [InlineData(0x0000_08FFu, "0.8.255")]
+    [InlineData(0x0000_0000u, "0.0.0")]
+    public void VerifyVersion_RefusesAnOlderRelease_NamingBothVersions(uint version, string shown)
+    {
+        var ex = Assert.Throws<SecurityException>(() => MacOsNativeLibraryLoader.VerifyVersion("/x.dylib", Dylib(version)));
+
+        Assert.Contains($"version {shown}", ex.Message);
+        Assert.Contains("(0.9.0)", ex.Message);
+    }
+
+    public static TheoryData<string, byte[]> UnreadableLibraries() => new()
+    {
+        { "empty", [] },
+        { "truncated header", Dylib(0x0000_0900)[..20] },
+        { "wrong magic", [.. new byte[] { 0x7F, (byte)'E', (byte)'L', (byte)'F' }, .. Dylib(0x0000_0900)[4..]] },
+        { "x86_64 only", Dylib(0x0000_0900, X86_64) },
+        { "no LC_ID_DYLIB", MachO(Arm64, (0x19, 72, null), (0x32, 32, null)) },
+        { "LC_ID_DYLIB too short", MachO(Arm64, (0xD, 16, null)) },
+        { "cmdsize zero", MachO(Arm64, (0x19, 8, null)) is var z ? Patch(z, 36, 0) : [] },
+        { "cmdsize not a multiple of 8", Patch(Dylib(0x0000_0900), 36, 70) },
+        { "cmdsize past the commands", Patch(Dylib(0x0000_0900), 36, 0x7FFF_FFF8) },
+        { "sizeofcmds past the data", Patch(Dylib(0x0000_0900), 20, 0x7FFF_FFF8) },
+        { "ncmds larger than sizeofcmds allows", Patch(Dylib(0x0000_0900), 16, 1000) },
+        { "fat without an arm64 slice", Fat((X86_64, Dylib(0x0000_0900, X86_64))) },
+        { "fat with an arm64 slice outside the data", Patch(Fat((Arm64, Dylib(0x0000_0900))), 16, 0x0100_0000, bigEndian: true) },
+        { "fat claiming more slices than fit", Patch(Fat((Arm64, Dylib(0x0000_0900))), 4, 1000, bigEndian: true) },
+    };
+
+    private static byte[] Patch(byte[] data, int at, uint value, bool bigEndian = false)
+    {
+        var copy = (byte[])data.Clone();
+        if (bigEndian)
+            PutBigEndian(copy, at, value);
+        else
+            BitConverter.GetBytes(value).CopyTo(copy, at);
+        return copy;
+    }
+
+    [Theory]
+    [MemberData(nameof(UnreadableLibraries))]
+    public void VerifyVersion_RefusesAFileWhoseVersionCannotBeRead(string why, byte[] data)
+    {
+        Assert.Null(MacOsNativeLibraryLoader.ReadLibraryVersion(data));
+        var ex = Assert.Throws<SecurityException>(() => MacOsNativeLibraryLoader.VerifyVersion("/x.dylib", data));
+        Assert.Contains("version can be read", ex.Message);
+        Assert.NotEmpty(why);
+    }
+
+    [Fact]
+    public void ReadLibraryVersion_ReadsTheArm64SliceOfAUniversalFile()
+    {
+        var fat = Fat((X86_64, Dylib(0x0000_0800, X86_64)), (Arm64, Dylib(0x0000_0902)));
+
+        Assert.Equal(0x0000_0902u, MacOsNativeLibraryLoader.ReadLibraryVersion(fat));
+    }
+
+    [Fact]
+    public void GetAccountHomeDirectory_OnMacOs_IsAnExistingAbsoluteFolder_NotTakenFromHome()
+    {
+        if (!OperatingSystem.IsMacOS())
+            return;
+
+        var home = MacOsNative.GetAccountHomeDirectory();
+
+        Assert.NotNull(home);
+        Assert.StartsWith("/", home);
+        Assert.True(Directory.Exists(home), home);
+    }
+
+    [Fact]
+    public void TheInstalledLibrary_WhenPresent_PassesTheVersionCheck()
+    {
+        var path = MacOsNativeLibraryLoader.SystemPath;
+        if (!System.IO.File.Exists(path))
+            return; // not installed on this host
+
+        var head = System.IO.File.ReadAllBytes(path).AsSpan(0, Math.Min((int)new FileInfo(path).Length, MacOsNativeLibraryLoader.VersionReadLimit)).ToArray();
+        var version = MacOsNativeLibraryLoader.ReadLibraryVersion(head);
+
+        Assert.NotNull(version);
+        Assert.True(version >= MacOsNativeLibraryLoader.MinimumLibraryVersion, $"installed version {MacOsNativeLibraryLoader.FormatVersion(version!.Value)}");
+        MacOsNativeLibraryLoader.VerifyVersion(path, head);
     }
 
     [Theory]

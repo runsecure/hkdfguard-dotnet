@@ -7,7 +7,7 @@ namespace HkdfGuard.KeyWrapping.V1.Interop;
 
 /// <summary>
 /// The macOS system calls MacOsNativeLibraryLoader's checks rely on: lstat for ownership,
-/// permissions and type; geteuid; dladdr for which file dyld really loaded; and the Security
+/// permissions and type; geteuid and getpwuid_r for the user's home; dladdr for which file dyld really loaded; and the Security
 /// framework's static code signature check. Every import names a system library by absolute
 /// path - and the runtime resolves these by name, not through dlopen with a path, so
 /// DYLD_LIBRARY_PATH's leaf-name override (see the loader) does not apply to them.
@@ -79,6 +79,37 @@ internal static unsafe partial class MacOsNative
 
     public static uint GetEffectiveUserId() => geteuid();
 
+    // struct passwd on arm64 (pwd.h): pw_name @0, pw_passwd @8, pw_uid @16, pw_gid @20, pw_change @24,
+    // pw_class @32, pw_gecos @40, pw_dir @48, pw_shell @56, pw_expire @64; 72 bytes.
+    private const int PasswdSize = 72;
+    private const int PasswdDirOffset = 48;
+    private const int ERANGE = 34;
+
+    /// <summary>
+    /// This process's effective user's home directory from the account database (getpwuid_r), or
+    /// null if there's no entry or it can't be read. Unlike the HOME environment variable, which
+    /// the runtime's UserProfile honours, whoever launches the process can't redirect it.
+    /// </summary>
+    public static string? GetAccountHomeDirectory()
+    {
+        var passwd = stackalloc byte[PasswdSize];
+        for (var size = 4096; size <= 1 << 20; size *= 2)
+        {
+            var buffer = new byte[size];
+            fixed (byte* b = buffer)
+            {
+                IntPtr result = 0;
+                var rc = getpwuid_r(geteuid(), passwd, b, (nuint)size, &result);
+                if (rc == ERANGE)
+                    continue;
+                if (rc != 0 || result == 0)
+                    return null;
+                return Marshal.PtrToStringUTF8(*(IntPtr*)(passwd + PasswdDirOffset));
+            }
+        }
+        return null;
+    }
+
     /// <summary>
     /// dladdr: the file dyld actually mapped the code at <paramref name="address"/> from, or null
     /// if dyld doesn't know the address. This is what was loaded, as opposed to what was asked for.
@@ -138,6 +169,9 @@ internal static unsafe partial class MacOsNative
 
     [LibraryImport(LibSystem)]
     private static partial int dladdr(IntPtr address, IntPtr* info);
+
+    [LibraryImport(LibSystem)]
+    private static partial int getpwuid_r(uint uid, byte* passwd, byte* buffer, nuint bufferSize, IntPtr* result);
 
     [LibraryImport(CoreFoundation)]
     private static partial IntPtr CFURLCreateFromFileSystemRepresentation(IntPtr allocator, byte* buffer, nint length, byte isDirectory);
