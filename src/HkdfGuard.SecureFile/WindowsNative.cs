@@ -38,6 +38,8 @@ internal static unsafe partial class WindowsNative
         }
     }
 
+    // System32 only: the runtime's default would try kernel32.dll beside this assembly first.
     [LibraryImport("kernel32.dll", SetLastError = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     private static partial uint GetFinalPathNameByHandleW(SafeFileHandle file, char* path, uint length, uint flags);
 }
