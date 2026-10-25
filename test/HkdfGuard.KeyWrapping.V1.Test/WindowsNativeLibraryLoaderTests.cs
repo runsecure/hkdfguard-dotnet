@@ -240,6 +240,96 @@ public class WindowsNativeLibraryLoaderTests
         }
     }
 
+    [WindowsTheory]
+    [InlineData(0, 9, 0)]
+    [InlineData(0, 9, 1)]
+    [InlineData(0, 10, 0)]
+    [InlineData(1, 0, 0)]
+    public void VerifyMinimumVersion_TheMinimumOrLater_Passes(int major, int minor, int patch)
+    {
+        WindowsNativeLibraryLoader.VerifyMinimumVersion("test", new Version(major, minor, patch));
+    }
+
+    [WindowsTheory]
+    [InlineData(0, 8, 9)]
+    [InlineData(0, 8, 65535)]
+    [InlineData(0, 0, 0)]
+    public void VerifyMinimumVersion_AnOlderVersion_IsRefused(int major, int minor, int patch)
+    {
+        var ex = Assert.Throws<SecurityException>(() => WindowsNativeLibraryLoader.VerifyMinimumVersion("test", new Version(major, minor, patch)));
+
+        Assert.Contains("older than the minimum", ex.Message);
+    }
+
+    [WindowsFact]
+    public void VerifyMinimumVersion_NoVersionResource_IsRefused()
+    {
+        var ex = Assert.Throws<SecurityException>(() => WindowsNativeLibraryLoader.VerifyMinimumVersion("test", null));
+
+        Assert.Contains("no readable version resource", ex.Message);
+    }
+
+    [WindowsFact]
+    public void ReadFileVersion_AFileWithNoVersionResource_IsNull()
+    {
+        var path = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllBytes(path, "MZ not really a PE image"u8.ToArray());
+
+            Assert.Null(WindowsNativeLibraryLoader.ReadFileVersion(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [InstalledWindowsLibraryFact]
+    public void ReadFileVersion_TheInstalledLibrary_IsAtLeastTheMinimum()
+    {
+        var version = WindowsNativeLibraryLoader.ReadFileVersion(WindowsNativeLibraryLoader.InstalledPath);
+
+        Assert.NotNull(version);
+        WindowsNativeLibraryLoader.VerifyMinimumVersion(WindowsNativeLibraryLoader.InstalledPath, version);
+    }
+
+    [WindowsTheory]
+    [InlineData(@"C:\Program Files\HkdfGuard\v1\HkdfGuard.dll")]
+    [InlineData(@"c:\program files\hkdfguard\v1\hkdfguard.DLL")]
+    [InlineData(@"\\?\C:\Program Files\HkdfGuard\v1\HkdfGuard.dll")]
+    public void VerifyLoadedModule_TheVerifiedFileItself_Passes_WhateverItsCaseOrLongPathPrefix(string loaded)
+    {
+        WindowsNativeLibraryLoader.VerifyLoadedModule(@"C:\Program Files\HkdfGuard\v1\HkdfGuard.dll", loaded);
+    }
+
+    [WindowsTheory]
+    [InlineData(@"C:\Users\someone\AppData\Local\Temp\HkdfGuard.dll")] // the same name, loaded earlier from elsewhere
+    [InlineData(@"C:\app\app.exe.local\HkdfGuard.dll")] // DLL redirection
+    [InlineData(@"C:\Program Files\HkdfGuard\v2\HkdfGuard.dll")]
+    [InlineData(@"\\?\UNC\server\share\HkdfGuard.dll")]
+    public void VerifyLoadedModule_AModuleMappedFromAnyOtherFile_IsRefused(string loaded)
+    {
+        const string verified = @"C:\Program Files\HkdfGuard\v1\HkdfGuard.dll";
+
+        var ex = Assert.Throws<SecurityException>(() => WindowsNativeLibraryLoader.VerifyLoadedModule(verified, loaded));
+
+        Assert.Contains(verified, ex.Message);
+        Assert.Contains(loaded, ex.Message);
+    }
+
+    [InstalledWindowsLibraryFact]
+    public void Load_TheInstalledLibrary_IsTheFileWindowsMapped()
+    {
+        var handle = WindowsNativeLibraryLoader.Load();
+
+        // Worked out independently of the loader's own check: the process's module list.
+        var module = global::System.Diagnostics.Process.GetCurrentProcess().Modules
+            .Cast<global::System.Diagnostics.ProcessModule>()
+            .Single(m => m.BaseAddress == handle);
+        Assert.Equal(WindowsNativeLibraryLoader.InstalledPath, module.FileName, ignoreCase: true);
+    }
+
     [InstalledWindowsLibraryFact]
     public void VerifyImageKind_TheInstalledLibrary_Passes()
     {

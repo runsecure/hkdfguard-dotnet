@@ -360,9 +360,14 @@ On **Windows**, before mapping it, `WindowsNativeLibraryLoader` requires all of 
 - The signed PE header marks the file as a DLL for the process's architecture. The publisher's
   other signed binaries, such as `hkdfguard.exe`, pass the signature checks, so
   this check is what refuses one renamed into place.
+- Its version resource - also covered by the signature - is at least `MinimumLibraryVersion`
+  (0.9.0). An older release, or one with no version resource, is refused even though it is
+  genuinely signed.
 
-Its dependencies are then loaded from System32 only. Any failed check throws, with no fallback, so
-a DLL planted on `PATH` or beside the application is never loaded.
+Its dependencies are then loaded from System32 only, and after loading, the module Windows mapped
+must be the verified file (`GetModuleFileNameW`), so neither a same-named DLL already in the process
+nor loader redirection can stand in for it. Any failed check throws, with no fallback, so a DLL
+planted on `PATH` or beside the application is never loaded.
 
 On **macOS**, `MacOsNativeLibraryLoader` uses the system install whenever it exists, and the
 per-user install only when there is no system install. Anything running as the user can write to

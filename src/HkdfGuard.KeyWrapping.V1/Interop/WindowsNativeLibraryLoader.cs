@@ -34,15 +34,20 @@ namespace HkdfGuard.KeyWrapping.V1.Interop;
 /// <item>Its PE header - covered by that signature - marks it a DLL for this process's
 /// architecture. Everything the HkdfGuard profile signs passes the signer checks, so this refuses
 /// its other binaries, such as hkdfguard.exe renamed into place.</item>
+/// <item>Its version resource - also covered by that signature - is at least
+/// <see cref="MinimumLibraryVersion"/>, so an older release, though genuinely signed, can't be put
+/// in place of a current one.</item>
 /// <item>No certificate in the signer's chain has been revoked. Checked last, network allowed, and
 /// refused only when Windows definitively reports a revocation (<see cref="WindowsRevocationPolicy"/>):
 /// a host that can't reach the revocation servers still loads the library.</item>
 /// </list>
-/// The library's own dependencies are then resolved from System32 only. Any failed check throws;
-/// there is deliberately no fallback to the default search and no override of the path.
+/// The library's own dependencies are then resolved from System32 only. After loading, the module
+/// Windows actually mapped must be the file that was verified (<see cref="VerifyLoadedModule"/>).
+/// Any failed check throws; there is deliberately no fallback to the default search and no
+/// override of the path.
 /// </summary>
 [SupportedOSPlatform("windows")]
-internal static class WindowsNativeLibraryLoader
+internal static unsafe partial class WindowsNativeLibraryLoader
 {
     internal const string FileName = "HkdfGuard.dll";
 
@@ -146,14 +151,119 @@ internal static class WindowsNativeLibraryLoader
         VerifyLocation(path);
         VerifySignature(path, expectedPublisher);
         VerifyImageKind(path);
+        VerifyMinimumVersion(path, ReadFileVersion(path));
         // Last, once everything else has passed: refused only if a certificate in the chain is
         // definitively revoked; unreachable revocation servers let the load continue.
         WindowsRevocationPolicy.Verify(path, WinTrust.CheckRevocation(path));
 
         // Absolute path, so no probing for the library itself; its own imports (kernel32,
         // advapi32, ncrypt) come from System32 only, never the application directory or PATH.
-        return NativeLibrary.Load(path, typeof(WindowsNativeLibraryLoader).Assembly, DllImportSearchPath.System32);
+        var handle = NativeLibrary.Load(path, typeof(WindowsNativeLibraryLoader).Assembly, DllImportSearchPath.System32);
+        try
+        {
+            VerifyLoadedModule(path, ModuleFileName(handle, path));
+            return handle;
+        }
+        catch
+        {
+            NativeLibrary.Free(handle);
+            throw;
+        }
     }
+
+    /// <summary>
+    /// The oldest Windows native library release this package loads (major.minor.patch): 0.9.0,
+    /// the first to carry a version resource. A release that fixes a security issue raises it.
+    /// </summary>
+    internal static readonly Version MinimumLibraryVersion = new(0, 9, 0);
+
+    /// <summary>
+    /// Refuses a library whose file version - major, minor and patch from its signed version
+    /// resource, or null if it has none or it can't be read - is below
+    /// <see cref="MinimumLibraryVersion"/>. The fourth (revision) field is not compared. Run after
+    /// <see cref="VerifySignature(string, string)"/>, whose hash covers the resource.
+    /// </summary>
+    /// <exception cref="SecurityException">No version, or an older one.</exception>
+    internal static void VerifyMinimumVersion(string path, Version? version)
+    {
+        if (version is null)
+            throw new SecurityException(
+                $"'{path}' carries no readable version resource, so it predates {MinimumLibraryVersion}, the oldest HkdfGuard native library this package accepts; install a current release.");
+        if (version < MinimumLibraryVersion)
+            throw new SecurityException(
+                $"'{path}' is HkdfGuard native library version {version}, older than the minimum this package accepts ({MinimumLibraryVersion}); install a current release.");
+    }
+
+    /// <summary>
+    /// The file version (major.minor.patch) from <paramref name="path"/>'s version resource, read
+    /// through version.dll from System32; null if it has none or it can't be read.
+    /// </summary>
+    internal static Version? ReadFileVersion(string path)
+    {
+        var size = GetFileVersionInfoSizeW(path, IntPtr.Zero);
+        if (size == 0)
+            return null;
+        var block = new byte[size];
+        fixed (byte* data = block)
+        {
+            if (GetFileVersionInfoW(path, 0, size, data) == 0)
+                return null;
+            if (VerQueryValueW(data, @"\", out var info, out var length) == 0 || info == null || length < 52)
+                return null;
+            var fixedInfo = (uint*)info; // VS_FIXEDFILEINFO: signature, struct version, file version MS, LS, ...
+            if (fixedInfo[0] != 0xFEEF04BD)
+                return null;
+            return new Version((int)(fixedInfo[2] >> 16), (int)(fixedInfo[2] & 0xFFFF), (int)(fixedInfo[3] >> 16));
+        }
+    }
+
+    [LibraryImport("version.dll", StringMarshalling = StringMarshalling.Utf16)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    private static partial uint GetFileVersionInfoSizeW(string fileName, IntPtr handle);
+
+    [LibraryImport("version.dll", StringMarshalling = StringMarshalling.Utf16)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    private static partial int GetFileVersionInfoW(string fileName, uint handle, uint length, byte* data);
+
+    [LibraryImport("version.dll", StringMarshalling = StringMarshalling.Utf16)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    private static partial int VerQueryValueW(byte* block, string subBlock, out void* buffer, out uint length);
+
+    /// <summary>
+    /// Requires the file Windows mapped the loaded module from to be the verified path.
+    /// LoadLibraryEx returns an already-loaded module of the same name, and honours loader
+    /// redirection (.local, manifests), without mapping the path it was given; this is the
+    /// Windows counterpart of the dladdr check on Linux and macOS. The comparison is
+    /// case-insensitive, as NTFS names are, and ignores a <c>\\?\</c> prefix.
+    /// </summary>
+    /// <exception cref="SecurityException">Windows loaded some other file.</exception>
+    internal static void VerifyLoadedModule(string verified, string loaded)
+    {
+        if (!string.Equals(StripLongPathPrefix(loaded), StripLongPathPrefix(verified), StringComparison.OrdinalIgnoreCase))
+            throw new SecurityException(
+                $"'{verified}' passed verification, but Windows loaded '{loaded}' instead (a module of the same name was already loaded, or the load was redirected); refusing to use it.");
+    }
+
+    private static string StripLongPathPrefix(string path) =>
+        path.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase) ? @"\\" + path[8..]
+        : path.StartsWith(@"\\?\", StringComparison.Ordinal) ? path[4..]
+        : path;
+
+    private static string ModuleFileName(IntPtr module, string path)
+    {
+        var buffer = new char[32768]; // the longest path Windows supports, plus its terminator
+        uint length;
+        fixed (char* chars = buffer)
+            length = GetModuleFileNameW(module, chars, (uint)buffer.Length);
+        if (length == 0 || length >= buffer.Length)
+            throw new SecurityException(
+                $"Could not read which file Windows loaded for '{path}' (error {Marshal.GetLastPInvokeError()}); refusing to use it.");
+        return new string(buffer, 0, (int)length);
+    }
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    private static partial uint GetModuleFileNameW(IntPtr module, char* fileName, uint size);
 
     /// <summary>
     /// Checks the file and each parent folder below the drive root: not a reparse point, and
