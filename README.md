@@ -134,9 +134,11 @@ tracking and purpose-scoped Additional Authenticated Data (AAD).
   and returns it after. The pool grows to the peak number of concurrent operations and no further;
   every pooled instance holds its own native copy of the key, all released when the session is
   disposed.
-- **Built-in telemetry.** Every library emits `System.Diagnostics.ActivitySource` activities
+- **Built-in telemetry.** The key ring, data protectors, AES-GCM crypto provider, protected cache
+  and encrypted configuration emit `System.Diagnostics.ActivitySource` activities
   (OpenTelemetry-compatible) with exceptions recorded on failure, and an opt-in sensitive-logging
-  mode that emits operation metadata (never raw key/plaintext/ciphertext bytes).
+  mode that emits operation metadata (never raw key/plaintext/ciphertext bytes). The key wrappers
+  and key-file readers emit none (see [Diagnostics](#diagnostics)).
 
 ## Key rotation
 
@@ -435,11 +437,18 @@ Before loading, it requires all of the following:
   service's environment: whatever `LD_PRELOAD` or `LD_AUDIT` loads runs when the process starts,
   before the check, and can hide from it. Protect the service's environment (its unit file,
   container spec or launch configuration) as carefully as its binaries.
+- The process's own dynamic linker (its `PT_INTERP`, which must pass the same path checks) is
+  asked in list mode (`ld.so --list`, what `ldd` uses), under the `LD_LIBRARY_PATH` and
+  `LD_PRELOAD` the process started with and nothing else, where it would find every library
+  `libhkdfguard.so.1` pulls in. Each must pass the same path checks, so a dependency found
+  somewhere writable is refused before any of its code runs; a dependency it can't find, or output
+  it can't parse, refuses the load too.
 
 After loading, `dladdr` must place the library's export in the verified file, and every object in
 its dependency closure, read from each file's `DT_NEEDED` entries, must be bound to a file that
-passes the path checks. That catches a dependency the process had already loaded from somewhere
-else under the same name; the library is then unloaded and the load refused. Two things are outside
+passes the path checks. That catches what list mode can't see: a dependency name the process had
+already bound to some other object before the load; the library is then unloaded and the load
+refused. Two things are outside
 the loader's reach: the TPM transport module tpm2-tss loads at the first TPM call, which only the
 environment check covers, and the .NET runtime's own injection points (startup hooks, CLR
 profilers), which need a protected service environment on every platform.
@@ -572,7 +581,7 @@ what looks like an unwrapped key: a refusal is a `FileNotFoundException`,
 wrapper must implement `ReadKeyFileAsync` itself, refusing a file that an untrusted account could
 have written or replaced, since whoever can replace a key file chooses the key new data is
 encrypted under. A wrapped key is at most `WrappedKeyLimits.MaxBytes` (512) bytes, which leaves
-room for larger keys and extra fingerprinting beyond today's 156-byte macOS payload; raising that
+room for larger keys and extra fingerprinting beyond today's 125-byte macOS payload; raising that
 one constant also resizes the buffer an ephemeral key is generated into. If anything fails or is cancelled partway through, every provider
 it already created is disposed.
 
@@ -755,6 +764,14 @@ may hold it:
   an observer how long a secret is - enough to distinguish a 16-character password from a
   64-character API key.
 - **Key versions**: which version encrypted a value, and whether an added version became current.
+
+Activities come from `HkdfGuard.Abstractions` (`ProtectedCacheBase`, on `Root`), `HkdfGuard.Cache`
+(`Cache`), `HkdfGuard.DataEncryptionKey` (`DataProtection`), `HkdfGuard.CryptoProvider.AesGcm256`
+(`CryptoProviderAesGcm256`, and `DataProtection` for `AesGcmPipelineDataProtector`) and
+`HkdfGuard.EncryptedConfiguration` (`EncryptedConfiguration`). Nothing emits on `KeyWrapping` yet:
+the key wrappers (`NativeHkdfKeyWrapperV1`, `AwsKmsKeyWrapper`, `AzureKeyVaultKeyWrapper`) and
+`HkdfGuard.SecureFile` record no activities of their own, so wrapping, unwrapping and key-file
+reads show up in a trace only inside the key ring or provider activity that called them, if any.
 
 Independently of this flag, failures are always recorded on the current activity
 (`RecordException`), and an exception message can name the entry involved - for example a

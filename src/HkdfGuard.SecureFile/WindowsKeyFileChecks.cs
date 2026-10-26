@@ -13,8 +13,9 @@ namespace HkdfGuard.SecureFile;
 /// contacted.</item>
 /// <item>The opened file's final path - with every symbolic link, junction, mount point and
 /// substituted drive resolved - is the path that was asked for, once Path.GetFullPath has
-/// expanded any 8.3 short name. So nothing on the path redirects it, and the folders checked are
-/// the ones the file is in.</item>
+/// expanded any 8.3 short name (it expands each one that exists on disk; a path still spelled
+/// with a short name doesn't match the final path and is refused). So nothing on the path
+/// redirects it, and the folders checked are the ones the file is in.</item>
 /// <item>The file, and every folder above it, is owned by a trusted principal, and grants no one
 /// else any right to write, append, delete, rename, change its permissions or take ownership.
 /// For a folder that also covers creating files and folders in it. The drive root is held only to

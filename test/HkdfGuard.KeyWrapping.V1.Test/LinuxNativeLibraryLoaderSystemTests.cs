@@ -181,6 +181,75 @@ public partial class LinuxNativeLibraryLoaderSystemTests
         LinuxNativeLibraryLoader.VerifyDependencies(InstalledLinuxLibraryFactAttribute.InstalledPath!, ElfDependencies.ReadNeeded, LinuxNative.GetLoadedPath, p => Resolve(p)!);
     }
 
+    // --- What would be loaded: the real dynamic linker in list mode ------------------------------
+
+    private static string Interpreter()
+    {
+        var interpreter = ElfDependencies.ReadInterpreter("/proc/self/exe");
+        Assert.NotNull(interpreter);
+        return interpreter;
+    }
+
+    private static IReadOnlyList<string> ListingFor(string target, Dictionary<string, string>? environment = null)
+        => LinuxNativeLibraryLoader.ParseListing(target, LinuxNativeLibraryLoader.ListDependencies(Interpreter(), target, environment ?? new Dictionary<string, string>()));
+
+    private static string LibcFromTheListingOfSh()
+        => Assert.Single(ListingFor("/bin/sh"), p => Path.GetFileName(p).StartsWith("libc.so", StringComparison.Ordinal));
+
+    [LinuxFact]
+    public void ThisProcesssDynamicLinker_IsTrusted()
+        => Assert.StartsWith("/", Resolve(Interpreter()));
+
+    [LinuxFact]
+    public void TheListingOfASystemBinary_NamesLibc_AndPassesThePathChecks()
+    {
+        var paths = ListingFor("/bin/sh");
+
+        Assert.Contains(paths, p => Path.GetFileName(p).Contains("libc.so", StringComparison.Ordinal));
+        LinuxNativeLibraryLoader.VerifyListing("/bin/sh", paths, p => Resolve(p)!);
+    }
+
+    [LinuxFact]
+    public void ADependencyFoundInAWritableFolder_IsRefusedBeforeAnythingLoads()
+    {
+        // The real dynamic linker, told by LD_LIBRARY_PATH to look in a folder anyone can write,
+        // finds a copy of libc there; the check refuses it whoever owns it, since the folder is 0777.
+        var libc = LibcFromTheListingOfSh();
+        var folder = Directory.CreateTempSubdirectory("hkdfguard-listing-");
+        try
+        {
+            File.SetUnixFileMode(folder.FullName, (UnixFileMode)0x1FF);
+            var planted = Path.Combine(folder.FullName, Path.GetFileName(libc));
+            File.Copy(libc, planted);
+
+            var paths = ListingFor("/bin/sh", new() { ["LD_LIBRARY_PATH"] = folder.FullName });
+            Assert.Contains(planted, paths);
+
+            var ex = Assert.Throws<SecurityException>(() => LinuxNativeLibraryLoader.VerifyListing("/bin/sh", paths, p => Resolve(p)!));
+            Assert.Contains(planted, ex.Message);
+            Assert.Contains("nothing was loaded", ex.Message);
+        }
+        finally
+        {
+            folder.Delete(recursive: true);
+        }
+    }
+
+    [LinuxFact]
+    public void TheListingOfAFileThatDoesNotExist_Fails()
+        => Assert.Throws<SecurityException>(() => LinuxNativeLibraryLoader.ListDependencies(Interpreter(), "/nonexistent/libhkdfguard.so.1", new Dictionary<string, string>()));
+
+    [LinuxFact]
+    public void TheListingOfASharedLibrary_NamesTheDynamicLinker()
+    {
+        // libhkdfguard.so.1 is a shared object, not an executable; list mode works on those too.
+        var libc = LibcFromTheListingOfSh();
+        var paths = ListingFor(libc);
+
+        Assert.Contains(paths, p => Path.GetFileName(p).StartsWith("ld-linux", StringComparison.Ordinal));
+        LinuxNativeLibraryLoader.VerifyListing(libc, paths, p => Resolve(p)!);
+    }
+
     private const int ENOENT = 2;
 
     [LibraryImport("libc.so.6")]

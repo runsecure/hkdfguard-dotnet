@@ -38,7 +38,7 @@ public class KeyRingBuilderInputLimitsTests
 
     [Theory]
     [InlineData(1)]
-    [InlineData(156)]                       // today's macOS payload
+    [InlineData(156)]                       // between today's Windows (132) and Linux (276) payloads
     [InlineData(WrappedKeyLimits.MaxBytes)] // the limit itself
     public async Task KeyFilesUpToTheLimit_AreReadWhole(int length)
     {

@@ -543,6 +543,86 @@ public class LinuxNativeLibraryLoaderTests
 
         Assert.IsType<IOException>(ex.InnerException);
     }
+
+    // --- What would be loaded: the dynamic linker's list mode -----------------------------------
+
+    [Fact]
+    public void ParseListing_ReturnsEveryFile_SkippingTheVdso()
+    {
+        const string output = "\tlinux-vdso.so.1 (0x00007ffd2a5f2000)\n"
+                              + "\tlibtss2-esys.so.0 => /lib/x86_64-linux-gnu/libtss2-esys.so.0 (0x00007f1c2a000000)\n"
+                              + "\t/usr/lib/libpreloaded.so (0x00007f1c29e00000)\n"
+                              + "\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f1c29c00000)\n"
+                              + "\t/lib64/ld-linux-x86-64.so.2 (0x00007f1c2a200000)\n";
+
+        Assert.Equal(
+            ["/lib/x86_64-linux-gnu/libtss2-esys.so.0", "/usr/lib/libpreloaded.so", "/lib/x86_64-linux-gnu/libc.so.6", "/lib64/ld-linux-x86-64.so.2"],
+            LinuxNativeLibraryLoader.ParseListing("lib", output));
+    }
+
+    [Theory]
+    [InlineData("\tlibmissing.so.1 => not found\n", "can't find 'libmissing.so.1'")]
+    [InlineData("\tstatically linked\n", "doesn't understand")]
+    [InlineData("\tlibx.so => /lib/libx.so\n", "doesn't understand")]
+    [InlineData("\tlibx.so => relative/libx.so (0x1000)\n", "not an absolute path")]
+    [InlineData("\tlibx.so => lib x.so (0x1000)\n", "not an absolute path")]
+    public void ParseListing_ANameItCannotFind_OrALineItCannotRead_IsRefused(string output, string reason)
+    {
+        var ex = Assert.Throws<SecurityException>(() => LinuxNativeLibraryLoader.ParseListing("lib", output));
+
+        Assert.Contains(reason, ex.Message);
+    }
+
+    [Fact]
+    public void ListingEnvironment_IsOnlyTheStartupLibraryPathAndPreload()
+    {
+        var initial = Encoding.UTF8.GetBytes("HOME=/root\0LD_LIBRARY_PATH=/opt/lib\0LD_AUDIT=/opt/audit.so\0PATH=/usr/bin\0LD_PRELOAD=/opt/pre.so\0LD_LIBRARY_PATHX=/x\0");
+
+        Assert.Equal(
+            new Dictionary<string, string> { ["LD_LIBRARY_PATH"] = "/opt/lib", ["LD_PRELOAD"] = "/opt/pre.so" },
+            LinuxNativeLibraryLoader.ListingEnvironment(initial));
+        Assert.Empty(LinuxNativeLibraryLoader.ListingEnvironment(null));
+        Assert.Empty(LinuxNativeLibraryLoader.ListingEnvironment([]));
+    }
+
+    [Fact]
+    public void ListingEnvironment_KeepsTheLastValue_AsTheDynamicLinkerDoes()
+        => Assert.Equal(
+            new Dictionary<string, string> { ["LD_PRELOAD"] = "/opt/second.so" },
+            LinuxNativeLibraryLoader.ListingEnvironment(Encoding.UTF8.GetBytes("LD_PRELOAD=/opt/first.so\0LD_PRELOAD=/opt/second.so")));
+
+    [Fact]
+    public void ListingEnvironment_RefusesAValueThatIsNotUtf8()
+    {
+        byte[] initial = [.. "LD_LIBRARY_PATH=/opt/"u8, 0xFF, .. "lib"u8, 0];
+
+        var ex = Assert.Throws<SecurityException>(() => LinuxNativeLibraryLoader.ListingEnvironment(initial));
+        Assert.Contains("LD_LIBRARY_PATH", ex.Message);
+    }
+
+    [Fact]
+    public void VerifyListing_RefusesTheFirstUntrustedPath()
+    {
+        var fs = HostWithClosure();
+        string Trusted(string p) => fs.Resolve(p)!;
+
+        LinuxNativeLibraryLoader.VerifyListing("lib", ["/lib/x86_64-linux-gnu/libc.so.6", "/lib64/ld-linux-x86-64.so.2"], Trusted);
+
+        var ex = Assert.Throws<SecurityException>(() => LinuxNativeLibraryLoader.VerifyListing(
+            "lib", ["/lib/x86_64-linux-gnu/libc.so.6", "/home/dev/lib/libtss2-esys.so.0", "/tmp/missing.so"], Trusted));
+        Assert.Contains("/home/dev/lib/libtss2-esys.so.0", ex.Message);
+        Assert.Contains("nothing was loaded", ex.Message);
+        Assert.DoesNotContain("/tmp/missing.so", ex.Message);
+    }
+
+    [Fact]
+    public void VerifyListing_APathThatCannotBeExamined_IsRefused()
+    {
+        var ex = Assert.Throws<SecurityException>(() => LinuxNativeLibraryLoader.VerifyListing(
+            "lib", ["/lib/x86_64-linux-gnu/libc.so.6"], _ => throw new IOException("statx failed with errno 13.")));
+
+        Assert.IsType<IOException>(ex.InnerException);
+    }
 }
 
 /// <summary>DT_NEEDED parsing, against synthetic ELF images and, where installed, the real library.</summary>
@@ -680,6 +760,68 @@ public class ElfDependenciesTests
         {
             File.Delete(path);
         }
+    }
+
+    /// <summary>A 64-bit little-endian ELF image whose only program header (a PT_INTERP unless <paramref name="type"/> says otherwise) holds <paramref name="interpreter"/>.</summary>
+    private static byte[] ElfWithInterpreter(byte[] interpreter, ulong? sizeOverride = null, uint type = 3)
+    {
+        const int header = 64, phdr = 56;
+        var image = new byte[header + phdr + interpreter.Length];
+        image[0] = 0x7F; image[1] = (byte)'E'; image[2] = (byte)'L'; image[3] = (byte)'F';
+        image[4] = 2; image[5] = 1; image[6] = 1;
+        BitConverter.TryWriteBytes(image.AsSpan(32), (ulong)header);   // e_phoff
+        BitConverter.TryWriteBytes(image.AsSpan(54), (ushort)phdr);    // e_phentsize
+        BitConverter.TryWriteBytes(image.AsSpan(56), (ushort)1);       // e_phnum
+        BitConverter.TryWriteBytes(image.AsSpan(header), type);
+        BitConverter.TryWriteBytes(image.AsSpan(header + 8), (ulong)(header + phdr));
+        BitConverter.TryWriteBytes(image.AsSpan(header + 32), sizeOverride ?? (ulong)interpreter.Length);
+        interpreter.CopyTo(image, header + phdr);
+        return image;
+    }
+
+    private static string? ParseInterpreter(byte[] image)
+        => ElfDependencies.ReadInterpreter("test", (offset, count) => offset + count <= image.Length ? image.AsSpan((int)offset, count).ToArray() : null);
+
+    [Fact]
+    public void ReadsTheInterpreterPath()
+        => Assert.Equal("/lib64/ld-linux-x86-64.so.2", ParseInterpreter(ElfWithInterpreter("/lib64/ld-linux-x86-64.so.2\0"u8.ToArray())));
+
+    [Fact]
+    public void AnObjectWithNoInterpreter_HasNone()
+    {
+        Assert.Null(ParseInterpreter(ElfWithInterpreter("/lib64/ld-linux-x86-64.so.2\0"u8.ToArray(), type: 4)));
+        Assert.Null(ParseInterpreter(Elf(["libc.so.6"])));
+    }
+
+    public static TheoryData<string, byte[]> MalformedInterpreters() => new()
+    {
+        { "empty or implausibly long", ElfWithInterpreter([], sizeOverride: 0) },
+        { "empty or implausibly long", ElfWithInterpreter(new byte[4097]) },
+        { "not a NUL-terminated string", ElfWithInterpreter("/lib64/ld-linux-x86-64.so.2"u8.ToArray()) },
+        { "not a NUL-terminated string", ElfWithInterpreter([0]) },
+        { "runs past the end", ElfWithInterpreter("/lib/ld.so\0"u8.ToArray(), sizeOverride: 64) },
+        { "not an ELF file", [0x7F, (byte)'E', (byte)'L', (byte)'G', .. new byte[200]] },
+    };
+
+    [Theory]
+    [MemberData(nameof(MalformedInterpreters))]
+    public void AMalformedInterpreter_IsRefused(string reason, byte[] image)
+    {
+        var ex = Assert.Throws<SecurityException>(() => ParseInterpreter(image));
+
+        Assert.Contains("'test'", ex.Message);
+        Assert.Contains(reason, ex.Message);
+    }
+
+    [Fact]
+    public void AProgramHeaderTableTooLargeToBePlausible_IsRefused()
+    {
+        var image = Elf(["libc.so.6"]);
+        BitConverter.TryWriteBytes(image.AsSpan(54), ushort.MaxValue); // e_phentsize
+        BitConverter.TryWriteBytes(image.AsSpan(56), (ushort)4096);    // e_phnum
+
+        Assert.Contains("implausibly large", Assert.Throws<SecurityException>(() => Parse(image)).Message);
+        Assert.Contains("implausibly large", Assert.Throws<SecurityException>(() => ParseInterpreter(image)).Message);
     }
 
     [InstalledLinuxLibraryFact]

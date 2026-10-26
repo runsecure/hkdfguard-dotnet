@@ -1,13 +1,15 @@
 using System.Buffers.Binary;
 using System.Security;
 using System.Text;
+using Microsoft.Win32.SafeHandles;
 
 namespace HkdfGuard.KeyWrapping.V1.Interop;
 
 /// <summary>
 /// Reads the DT_NEEDED entries - the shared libraries an ELF object asks the dynamic linker to load
-/// - from a 64-bit little-endian ELF file (x86-64 and arm64 Linux). Only the ELF header, the
-/// program headers, the dynamic segment and its string table are read. Anything malformed is
+/// - and the PT_INTERP path - the dynamic linker an executable names - from a 64-bit little-endian
+/// ELF file (x86-64 and arm64 Linux). Only the ELF header, the program headers, the interpreter
+/// path, the dynamic segment and its string table are read, each bounded. Anything malformed is
 /// refused: the caller is deciding whether to trust what the file pulled into the process.
 /// </summary>
 internal static class ElfDependencies
@@ -18,8 +20,12 @@ internal static class ElfDependencies
     private const int MaxProgramHeaders = 4096;
     private const int MaxSegmentBytes = 1 << 20;
 
+    // PT_INTERP is a path: PATH_MAX.
+    private const int MaxInterpreterBytes = 4096;
+
     private const uint PtLoad = 1;
     private const uint PtDynamic = 2;
+    private const uint PtInterp = 3;
 
     private const long DtNull = 0;
     private const long DtNeeded = 1;
@@ -31,39 +37,68 @@ internal static class ElfDependencies
     public static IReadOnlyList<string> ReadNeeded(string path)
     {
         using var file = File.OpenHandle(path);
-        return ReadNeeded(path, (offset, count) =>
-        {
-            var buffer = new byte[count];
-            var total = 0;
-            while (total < count)
-            {
-                var read = RandomAccess.Read(file, buffer.AsSpan(total), offset + total);
-                if (read == 0)
-                    break;
-                total += read;
-            }
+        return ReadNeeded(path, Reader(file));
+    }
 
-            return total == count ? buffer : null;
-        });
+    /// <summary>
+    /// The PT_INTERP path of the ELF file at <paramref name="path"/> - for an executable, the
+    /// dynamic linker the kernel started it with - or null if it has none.
+    /// </summary>
+    /// <exception cref="SecurityException">The file is not a well-formed 64-bit little-endian ELF object.</exception>
+    public static string? ReadInterpreter(string path)
+    {
+        using var file = File.OpenHandle(path);
+        return ReadInterpreter(path, Reader(file));
+    }
+
+    // Reads exactly count bytes at offset, or returns null if the file is shorter.
+    private static Func<long, int, byte[]?> Reader(SafeFileHandle file) => (offset, count) =>
+    {
+        var buffer = new byte[count];
+        var total = 0;
+        while (total < count)
+        {
+            var read = RandomAccess.Read(file, buffer.AsSpan(total), offset + total);
+            if (read == 0)
+                break;
+            total += read;
+        }
+
+        return total == count ? buffer : null;
+    };
+
+    /// <param name="path">The file's name, for messages.</param>
+    /// <param name="read">Reads exactly count bytes at offset, or returns null if the file is shorter.</param>
+    internal static string? ReadInterpreter(string path, Func<long, int, byte[]?> read)
+    {
+        var (programHeaders, programHeaderSize, programHeaderCount) = ReadProgramHeaders(path, read);
+        for (var i = 0; i < programHeaderCount; i++)
+        {
+            var entry = programHeaders.AsSpan(i * programHeaderSize, programHeaderSize);
+            if (BinaryPrimitives.ReadUInt32LittleEndian(entry) != PtInterp)
+                continue;
+
+            var offset = ToOffset(path, BinaryPrimitives.ReadUInt64LittleEndian(entry[8..]));
+            var fileSize = BinaryPrimitives.ReadUInt64LittleEndian(entry[32..]);
+            if (fileSize is 0 or > MaxInterpreterBytes)
+                throw Malformed(path, "its interpreter path is empty or implausibly long");
+
+            var raw = Read(path, read, offset, (int)fileSize, "interpreter path");
+            var end = Array.IndexOf(raw, (byte)0);
+            if (end <= 0)
+                throw Malformed(path, "its interpreter path is not a NUL-terminated string");
+
+            return Encoding.UTF8.GetString(raw, 0, end);
+        }
+
+        return null;
     }
 
     /// <param name="path">The file's name, for messages.</param>
     /// <param name="read">Reads exactly count bytes at offset, or returns null if the file is shorter.</param>
     internal static IReadOnlyList<string> ReadNeeded(string path, Func<long, int, byte[]?> read)
     {
-        var header = Read(path, read, 0, HeaderSize, "ELF header");
-        if (header[0] != 0x7F || header[1] != (byte)'E' || header[2] != (byte)'L' || header[3] != (byte)'F')
-            throw Malformed(path, "it is not an ELF file");
-        if (header[4] != 2 || header[5] != 1)
-            throw Malformed(path, "it is not a 64-bit little-endian ELF file");
-
-        var programHeaderOffset = ToOffset(path, BinaryPrimitives.ReadUInt64LittleEndian(header.AsSpan(32)));
-        var programHeaderSize = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(54));
-        var programHeaderCount = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(56));
-        if (programHeaderSize < ProgramHeaderSize || programHeaderCount is 0 or > MaxProgramHeaders)
-            throw Malformed(path, "its program header table is malformed");
-
-        var programHeaders = Read(path, read, programHeaderOffset, programHeaderSize * programHeaderCount, "program headers");
+        var (programHeaders, programHeaderSize, programHeaderCount) = ReadProgramHeaders(path, read);
         var loads = new List<(ulong VirtualAddress, ulong FileSize, long Offset)>();
         (long Offset, int Size)? dynamic = null;
         for (var i = 0; i < programHeaderCount; i++)
@@ -123,6 +158,28 @@ internal static class ElfDependencies
         }
 
         return names;
+    }
+
+    // Validates the ELF header and returns the program header table, the size of one entry and the
+    // number of entries.
+    private static (byte[] Table, int EntrySize, int Count) ReadProgramHeaders(string path, Func<long, int, byte[]?> read)
+    {
+        var header = Read(path, read, 0, HeaderSize, "ELF header");
+        if (header[0] != 0x7F || header[1] != (byte)'E' || header[2] != (byte)'L' || header[3] != (byte)'F')
+            throw Malformed(path, "it is not an ELF file");
+        if (header[4] != 2 || header[5] != 1)
+            throw Malformed(path, "it is not a 64-bit little-endian ELF file");
+
+        var programHeaderOffset = ToOffset(path, BinaryPrimitives.ReadUInt64LittleEndian(header.AsSpan(32)));
+        var programHeaderSize = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(54));
+        var programHeaderCount = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(56));
+        if (programHeaderSize < ProgramHeaderSize || programHeaderCount is 0 or > MaxProgramHeaders)
+            throw Malformed(path, "its program header table is malformed");
+
+        // Both fields are 16-bit, so their product can reach 256 MB; bound the table like every
+        // other region read, before anything is allocated for it.
+        var tableBytes = ToSize(path, (ulong)programHeaderSize * programHeaderCount, "program header table");
+        return (Read(path, read, programHeaderOffset, tableBytes, "program headers"), programHeaderSize, programHeaderCount);
     }
 
     private static byte[] Read(string path, Func<long, int, byte[]?> read, long offset, int count, string what)

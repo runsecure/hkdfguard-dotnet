@@ -1,3 +1,5 @@
+using System.ComponentModel;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
@@ -31,12 +33,20 @@ namespace HkdfGuard.KeyWrapping.V1.Interop;
 /// relative, empty (the working directory) or use $ORIGIN-style substitutions. Both the
 /// environment the process started with (/proc/self/environ, what the dynamic linker read) and
 /// the current one are checked.</item>
+/// <item><b>What would be loaded.</b> Before dlopen, the process's own dynamic linker (its
+/// PT_INTERP, which must itself pass the path checks) is asked, in list mode (ld.so --list, the
+/// mechanism ldd uses), where it would find every object the library pulls in, under the
+/// LD_LIBRARY_PATH and LD_PRELOAD the process started with. List mode resolves exactly as dlopen
+/// would - RUNPATH, ld.so.cache and all - but runs none of the libraries' code, so every path it
+/// reports must pass the path checks before any of it can run here. A name it can't find refuses
+/// the load.</item>
 /// <item><b>What was loaded.</b> After dlopen, dladdr must place the library's export in the
 /// verified file, and every object in its dependency closure (read from each file's DT_NEEDED
-/// entries) must be bound to a file that passes the path checks. This catches a dependency the
-/// process had already loaded from somewhere else under the same name. On failure the library is
-/// unloaded - though, as on macOS, any initializer an impostor had has already run; the
-/// environment check exists so that it never gets that far in practice.</item>
+/// entries) must be bound to a file that passes the path checks. This catches what list mode
+/// can't see: a dependency name the process had already bound to some other object before the
+/// library was loaded. On failure the library is unloaded - though, as on macOS, any initializer
+/// an impostor had has already run; the checks before loading exist so that it never gets that
+/// far in practice.</item>
 /// </list>
 /// Any failed check throws; there is deliberately no fallback and no override.
 /// <para>
@@ -65,6 +75,9 @@ internal static class LinuxNativeLibraryLoader
     // The kernel's own limit on symbolic links followed in one lookup.
     internal const int MaxSymbolicLinks = 40;
 
+    /// <summary>How long the dynamic linker's list run may take: it only maps files and reads headers.</summary>
+    internal static readonly TimeSpan ListingTimeout = TimeSpan.FromSeconds(30);
+
     private const int ENOENT = 2;
     private const int ENOTDIR = 20;
 
@@ -90,14 +103,16 @@ internal static class LinuxNativeLibraryLoader
             var candidates = CandidatePaths(RuntimeInformation.ProcessArchitecture);
             var path = ResolveTrusted(ChoosePath(candidates, LinuxNative.Probe), UnixFileType.RegularFile, LinuxNative.GetStatusOrNull, LinuxNative.ReadLink)!;
 
-            var environment = ReadEnvironment(Environment.GetEnvironmentVariable, LinuxNative.ReadInitialEnvironment());
+            var initialEnvironment = LinuxNative.ReadInitialEnvironment();
+            var environment = ReadEnvironment(Environment.GetEnvironmentVariable, initialEnvironment);
             VerifyEnvironment(environment, (p, type) => ResolveTrusted(p, type, LinuxNative.GetStatusOrNull, LinuxNative.ReadLink, allowMissing: true));
+
+            string Trusted(string p) => ResolveTrusted(p, UnixFileType.RegularFile, LinuxNative.GetStatusOrNull, LinuxNative.ReadLink)!;
+            VerifyBeforeLoading(path, initialEnvironment, Trusted);
 
             var handle = NativeLibrary.Load(path);
             try
             {
-                string Trusted(string p) => ResolveTrusted(p, UnixFileType.RegularFile, LinuxNative.GetStatusOrNull, LinuxNative.ReadLink)!;
-
                 var loaded = NativeLibrary.TryGetExport(handle, ProbeExport, out var export) ? LinuxNative.GetImagePath(export) : null;
                 VerifyLoadedImage(path, loaded is null ? null : Trusted(loaded));
                 VerifyDependencies(path, ElfDependencies.ReadNeeded, LinuxNative.GetLoadedPath, Trusted);
@@ -341,6 +356,219 @@ internal static class LinuxNativeLibraryLoader
 
     private static SecurityException Untrusted(string variable, string value, string what)
         => new($"{variable} ('{value}') contains {what}; the dynamic linker could load the HkdfGuard native library's dependencies from there. Refusing to load it.");
+
+    /// <summary>
+    /// Asks this process's own dynamic linker, in list mode, where it would find everything
+    /// <paramref name="library"/> pulls in, and requires each of those files to pass the path
+    /// checks - before dlopen, so nothing that would fail them ever runs here.
+    /// </summary>
+    /// <param name="library">The verified library.</param>
+    /// <param name="initialEnvironment">/proc/self/environ's block, or null if it could not be read.</param>
+    /// <param name="resolveTrusted">Resolves a path, throwing unless it passes the path checks.</param>
+    /// <exception cref="SecurityException">The dynamic linker is untrusted, can't say, or would load an untrusted file.</exception>
+    [SupportedOSPlatform("linux")]
+    [ExcludeFromCodeCoverage(Justification = "Wires the covered policy methods to /proc/self/exe and the dynamic linker; its parts run against the real dynamic linker in the Linux-only tests.")]
+    internal static void VerifyBeforeLoading(string library, byte[]? initialEnvironment, Func<string, string> resolveTrusted)
+    {
+        string? interpreter;
+        try
+        {
+            interpreter = ElfDependencies.ReadInterpreter("/proc/self/exe");
+        }
+        catch (Exception e) when (e is SecurityException or IOException or UnauthorizedAccessException)
+        {
+            throw new SecurityException($"Could not read which dynamic linker this process runs under: {e.Message}", e);
+        }
+
+        if (interpreter is null)
+            throw new SecurityException(
+                $"This process has no dynamic linker (a statically linked executable), so it can't be asked what '{library}' would load; refusing to load it.");
+
+        string trustedInterpreter;
+        try
+        {
+            trustedInterpreter = resolveTrusted(interpreter);
+        }
+        catch (Exception e) when (e is SecurityException or IOException)
+        {
+            throw new SecurityException(
+                $"This process's dynamic linker '{interpreter}' is not trusted, so it can't be asked what '{library}' would load: {e.Message}", e);
+        }
+
+        var output = ListDependencies(trustedInterpreter, library, ListingEnvironment(initialEnvironment));
+        VerifyListing(library, ParseListing(library, output), resolveTrusted);
+    }
+
+    /// <summary>
+    /// Runs <c><paramref name="interpreter"/> --list <paramref name="library"/></c> - directly, no
+    /// shell - with exactly <paramref name="environment"/>, and returns what it printed.
+    /// </summary>
+    /// <exception cref="SecurityException">The run could not start, failed or timed out.</exception>
+    [SupportedOSPlatform("linux")]
+    [ExcludeFromCodeCoverage(Justification = "Starts the real dynamic linker; exercised by the Linux-only tests.")]
+    internal static string ListDependencies(string interpreter, string library, IReadOnlyDictionary<string, string> environment)
+    {
+        var startInfo = new ProcessStartInfo(interpreter)
+        {
+            UseShellExecute = false,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8,
+        };
+        startInfo.ArgumentList.Add("--list");
+        startInfo.ArgumentList.Add(library);
+        // Starts as a copy of this process's environment; the run gets only what is listed.
+        startInfo.Environment.Clear();
+        foreach (var (name, value) in environment)
+            startInfo.Environment[name] = value;
+
+        using var process = new Process { StartInfo = startInfo };
+        try
+        {
+            process.Start();
+        }
+        catch (Exception e) when (e is Win32Exception or InvalidOperationException)
+        {
+            throw new SecurityException($"The dynamic linker '{interpreter}' could not be started to say what '{library}' would load: {e.Message}", e);
+        }
+
+        process.StandardInput.Close();
+        // Both pipes are drained concurrently, so neither can fill and stall the run.
+        var stdout = process.StandardOutput.ReadToEndAsync();
+        var stderr = process.StandardError.ReadToEndAsync();
+
+        if (!process.WaitForExit(ListingTimeout))
+        {
+            try
+            {
+                process.Kill(entireProcessTree: true);
+            }
+            catch (Exception e) when (e is InvalidOperationException or Win32Exception)
+            {
+                // It exited on its own in the meantime.
+            }
+
+            process.WaitForExit();
+            throw new SecurityException($"The dynamic linker did not say within {ListingTimeout.TotalSeconds:0} seconds what '{library}' would load; refusing to load it.");
+        }
+
+        process.WaitForExit(); // lets the redirected streams reach their end
+        var output = stdout.GetAwaiter().GetResult();
+        var errors = stderr.GetAwaiter().GetResult();
+        if (process.ExitCode != 0)
+            throw new SecurityException(
+                $"The dynamic linker could not say what '{library}' would load (exit status {process.ExitCode}: {errors.Trim()}); refusing to load it.");
+
+        return output;
+    }
+
+    /// <summary>
+    /// The whole environment the dynamic linker's list mode runs with: the LD_LIBRARY_PATH and
+    /// LD_PRELOAD the process started with - what dlopen itself uses, since the linker reads them
+    /// once at startup - and nothing else. LD_AUDIT is left out: an audit module is code the list
+    /// run would execute, and its locations were already checked before this runs. Where a
+    /// variable appears more than once, the last value is kept, as the dynamic linker does.
+    /// </summary>
+    /// <param name="initialEnvironment">/proc/self/environ's NUL-separated block, or null if it could not be read.</param>
+    /// <exception cref="SecurityException">One of the two variables is not valid UTF-8, so it can't be passed on unchanged.</exception>
+    internal static IReadOnlyDictionary<string, string> ListingEnvironment(byte[]? initialEnvironment)
+    {
+        var environment = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (initialEnvironment is null)
+            return environment;
+
+        var strict = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+        var prefixes = new[] { LibraryPathVariable, PreloadVariable }.Select(n => (Name: n, Prefix: Encoding.ASCII.GetBytes(n + "="))).ToArray();
+        ReadOnlySpan<byte> block = initialEnvironment;
+        while (!block.IsEmpty)
+        {
+            var end = block.IndexOf((byte)0);
+            var entry = end < 0 ? block : block[..end];
+            block = end < 0 ? ReadOnlySpan<byte>.Empty : block[(end + 1)..];
+
+            foreach (var (name, prefix) in prefixes)
+            {
+                if (!entry.StartsWith(prefix))
+                    continue;
+
+                try
+                {
+                    environment[name] = strict.GetString(entry[prefix.Length..]);
+                }
+                catch (DecoderFallbackException e)
+                {
+                    throw new SecurityException($"{name} in this process's startup environment is not valid UTF-8, so the dynamic linker can't be asked what it would load under it; refusing to load the HkdfGuard native library.", e);
+                }
+            }
+        }
+
+        return environment;
+    }
+
+    /// <summary>
+    /// Every file path in the output of the dynamic linker's list mode, in order. Its lines are
+    /// "\tname => /path (0xaddress)", "\t/path (0xaddress)" (the linker itself and preloaded
+    /// objects) and "\tname (0xaddress)" (the vDSO, which has no file). A name it couldn't find
+    /// ("=> not found"), or any line in another form, refuses: what can't be read can't be checked.
+    /// </summary>
+    /// <param name="library">The library that was listed, for messages.</param>
+    /// <exception cref="SecurityException">A dependency was not found, or a line can't be read.</exception>
+    internal static IReadOnlyList<string> ParseListing(string library, string output)
+    {
+        const string NotFound = " => not found";
+        var paths = new List<string>();
+        foreach (var rawLine in output.Split('\n'))
+        {
+            var line = rawLine.Trim();
+            if (line.Length == 0)
+                continue;
+
+            if (line.EndsWith(NotFound, StringComparison.Ordinal))
+                throw new SecurityException($"The dynamic linker can't find '{line[..^NotFound.Length]}', which '{library}' needs; refusing to load it.");
+
+            var open = line.LastIndexOf(" (0x", StringComparison.Ordinal);
+            if (open < 0 || !line.EndsWith(')'))
+                throw new SecurityException($"The dynamic linker's list of what '{library}' would load has a line this loader doesn't understand ('{line}'); refusing to load it.");
+
+            var entry = line[..open];
+            var arrow = entry.IndexOf(" => ", StringComparison.Ordinal);
+            if (arrow >= 0)
+                entry = entry[(arrow + " => ".Length)..];
+
+            if (!entry.StartsWith('/'))
+            {
+                if (entry.Contains('/') || entry.Contains(' '))
+                    throw new SecurityException($"The dynamic linker would load '{entry}' for '{library}', which is not an absolute path; refusing to load it.");
+                continue; // the vDSO: in the kernel, not a file
+            }
+
+            paths.Add(entry);
+        }
+
+        return paths;
+    }
+
+    /// <summary>Requires every path the dynamic linker's list mode reported to pass the path checks.</summary>
+    /// <param name="library">The library that was listed, for messages.</param>
+    /// <param name="paths">What <see cref="ParseListing"/> returned.</param>
+    /// <param name="resolveTrusted">Resolves a path, throwing unless it passes the path checks.</param>
+    /// <exception cref="SecurityException">A path is not trusted; the first one is named.</exception>
+    internal static void VerifyListing(string library, IReadOnlyList<string> paths, Func<string, string> resolveTrusted)
+    {
+        foreach (var path in paths)
+        {
+            try
+            {
+                resolveTrusted(path);
+            }
+            catch (Exception e) when (e is SecurityException or IOException)
+            {
+                throw new SecurityException($"Loading '{library}' would also load '{path}', which is not trusted; nothing was loaded: {e.Message}", e);
+            }
+        }
+    }
 
     /// <summary>Requires that the file the dynamic linker reports having loaded is the one that was verified.</summary>
     /// <param name="expectedPath">The verified path that was passed to dlopen.</param>

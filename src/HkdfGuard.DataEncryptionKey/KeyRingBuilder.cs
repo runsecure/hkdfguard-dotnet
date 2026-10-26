@@ -180,6 +180,14 @@ public sealed class KeyRingBuilder
     /// DEK is revealed each time, and it stays in memory until the ring is disposed. Together with
     /// <see cref="MaxRefreshFailures"/> it sets how quickly a revoked KEK stops a running process -
     /// about MaxRefreshFailures × KeyRefreshInterval.
+    /// <para>
+    /// It is also each refresh's deadline: a reveal that takes longer than one interval counts as a
+    /// failed refresh, so a hung key wrapper can't keep a revoked KEK's key in use. A short interval
+    /// is therefore a short deadline. A TPM-backed KEK can take more than a second to answer, longer
+    /// while other processes share the TPM, and a locked macOS keychain stalls the call; under the
+    /// default fail-closed policy, MaxRefreshFailures slow answers in a row suspend the key though
+    /// the KEK is healthy. Keep it at 10 seconds or more for TPM-backed keys.
+    /// </para>
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">keyRefreshInterval is not between 1 and 300</exception>
     public KeyRingBuilder WithKeyRefreshInterval(int keyRefreshInterval)
