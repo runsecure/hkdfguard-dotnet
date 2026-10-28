@@ -107,7 +107,12 @@ internal static unsafe partial class UnixNative
         return new UnixFileStatus(uid, gid, (UnixFileMode)(mode & PermissionMask), type);
     }
 
+    // Without AssemblyDirectory the runtime calls dlopen with the bare name, which matches the
+    // libc.so.6 the process already has; its default would first try one beside this assembly by
+    // absolute path, which a copy planted in the application folder could answer. (lstat below is
+    // already an absolute path.)
     [LibraryImport(LinuxLibC, EntryPoint = "statx", StringMarshalling = StringMarshalling.Utf8, SetLastError = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
     private static partial int statx(int dirfd, string path, int flags, uint mask, byte* buffer);
 
     [LibraryImport(MacOsLibSystem, EntryPoint = "lstat", StringMarshalling = StringMarshalling.Utf8, SetLastError = true)]

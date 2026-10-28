@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="HkdfGuard.KeyWrapping.GoogleKms.Test" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HkdfGuard.Abstractions\HkdfGuard.Abstractions.csproj" />
+    <ProjectReference Include="..\HkdfGuard.SecureFile\HkdfGuard.SecureFile.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Google.Cloud.Kms.V1" />
+  </ItemGroup>
+
+</Project>

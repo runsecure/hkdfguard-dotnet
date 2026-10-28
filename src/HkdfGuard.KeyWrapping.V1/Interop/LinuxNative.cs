@@ -11,7 +11,11 @@ namespace HkdfGuard.KeyWrapping.V1.Interop;
 /// dependency came from. Every import is in glibc's libc.so.6 (2.34 or later, which the native
 /// package itself requires). The process has already loaded libc.so.6, and the dynamic linker
 /// matches an already-loaded library by name before it searches anywhere, so LD_LIBRARY_PATH
-/// cannot substitute it.
+/// cannot substitute it. Each import carries DefaultDllImportSearchPaths without AssemblyDirectory: the
+/// runtime's default would first try libc.so.6 beside this assembly by absolute path, which
+/// bypasses that match, so a copy planted in the application folder could answer every check.
+/// Without AssemblyDirectory the runtime calls dlopen with the bare name; the other flags in the
+/// value have no meaning on Linux.
 /// </summary>
 [SupportedOSPlatform("linux")]
 [ExcludeFromCodeCoverage(Justification = "Thin P/Invoke bindings to glibc; the policy they feed is covered by LinuxNativeLibraryLoaderTests on every platform, and these run against the real filesystem in its Linux-only tests.")]
@@ -146,17 +150,22 @@ internal static unsafe partial class LinuxNative
     }
 
     [LibraryImport(LibC, EntryPoint = "statx", StringMarshalling = StringMarshalling.Utf8, SetLastError = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
     private static partial int statx(int dirfd, string path, int flags, uint mask, byte* buffer);
 
     [LibraryImport(LibC)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
     private static partial int dladdr(IntPtr address, IntPtr* info);
 
     [LibraryImport(LibC, StringMarshalling = StringMarshalling.Utf8)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
     private static partial IntPtr dlopen(string file, int mode);
 
     [LibraryImport(LibC)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
     private static partial int dlinfo(IntPtr handle, int request, IntPtr* info);
 
     [LibraryImport(LibC)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
     private static partial int dlclose(IntPtr handle);
 }

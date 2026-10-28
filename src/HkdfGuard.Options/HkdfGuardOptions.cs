@@ -20,7 +20,10 @@ public sealed class HkdfGuardOptions
     /// still available. A revocation check, not a limit on how long the DEK stays in memory: the
     /// same DEK is revealed each time, and it stays in memory until the ring is disposed. Together
     /// with MaxRefreshFailures it sets how quickly a revoked KEK stops a running process - about
-    /// MaxRefreshFailures × KeyRefreshInterval.
+    /// MaxRefreshFailures × KeyRefreshInterval. It is also each refresh's deadline: a reveal slower
+    /// than one interval counts as a failed refresh, so keep it at 10 seconds or more for a
+    /// TPM-backed KEK, which can be slow to answer while busy (see
+    /// KeyRingBuilder.WithKeyRefreshInterval).
     /// </summary>
     public int? KeyRefreshInterval { get; set; }
 

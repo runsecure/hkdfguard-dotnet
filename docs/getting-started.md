@@ -131,7 +131,9 @@ What happened:
   encrypted by one protector never decrypts under a protector with another name.
 - `WithKeyRefreshInterval(60)` makes the library re-check the KEK every 60 seconds. If the KEK
   stops being available (it was deleted, or your account lost access), encryption stops after
-  three failed checks, about three minutes, until access returns.
+  three failed checks, about three minutes, until access returns. The interval is also each
+  check's deadline: a check that takes longer counts as failed, so don't go below about 10
+  seconds on a TPM, which can be slow to answer when it is busy.
 
 **The catch:** an ephemeral key exists only in this process. Run the program again and the first
 value can't be decrypted, because that key is gone. That's right for short-lived data such as

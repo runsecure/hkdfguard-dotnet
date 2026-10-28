@@ -23,6 +23,9 @@
     <PackageVersion Include="Azure.Security.KeyVault.Keys" Version="4.10.2" />
     <PackageVersion Include="Azure.Identity" Version="1.21.0" />
 
+    <!-- Google Cloud (HkdfGuard.KeyWrapping.GoogleKms) -->
+    <PackageVersion Include="Google.Cloud.Kms.V1" Version="3.27.0" />
+
     <!-- Test infrastructure -->
     <PackageVersion Include="coverlet.collector" Version="6.0.4" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
