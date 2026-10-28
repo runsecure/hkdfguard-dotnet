@@ -15,10 +15,21 @@ namespace HkdfGuard.Cache.HashiCorpVault.Test;
 /// Without HKDFGUARD_TEST_VAULT_SECRET_NAME every test here is reported as skipped - never as passed.
 /// HKDFGUARD_TEST_VAULT_CACERT is needed only for a server certificate the operating system doesn't
 /// trust. The token needs only read on that secret's path; the tests never list, write or delete.
+/// <para>
+/// To check what the secret holds, not just that it holds something, set
+/// HKDFGUARD_TEST_VAULT_SECRET_JSON to the JSON object of keys it is expected to hold: each is then
+/// read as "path#key", the path being HKDFGUARD_TEST_VAULT_SECRET_NAME's, and compared with it.
+/// </para>
 /// </summary>
 public class HashiCorpVaultSecretCacheIntegrationTests
 {
     public const string SecretNameVariable = "HKDFGUARD_TEST_VAULT_SECRET_NAME";
+    public const string ExpectedJsonVariable = "HKDFGUARD_TEST_VAULT_SECRET_JSON";
+
+    private static System.Text.Json.Nodes.JsonObject Expected => ExpectedSecret.Read(ExpectedJsonVariable)!;
+
+    // The secret's path: the configured name without its key, if it has one.
+    private static string SecretPath => SecretName.Split('#')[0];
 
     private static string SecretName => Environment.GetEnvironmentVariable(SecretNameVariable)!;
 
@@ -70,6 +81,25 @@ public class HashiCorpVaultSecretCacheIntegrationTests
         Assert.True(await cache.DecryptAsync(SecretName, new byte[max].AsMemory()) > 0);
     }
 
+    [HashiCorpVaultJsonFact]
+    public async Task Decrypt_RevealsEveryKeyTheSecretHolds()
+    {
+        using var cache = await CreateAsync();
+
+        foreach (var (key, value) in ExpectedSecret.Members(Expected))
+            Assert.Equal(value, ExpectedSecret.Decrypt(cache, $"{SecretPath}#{key}"));
+        Assert.Equal(0, cache.Decrypt($"{SecretPath}#no-such-key", new byte[16]));
+    }
+
+    [HashiCorpVaultJsonFact]
+    public async Task DecryptAsync_RevealsEveryKeyTheSecretHolds()
+    {
+        using var cache = await CreateAsync();
+
+        foreach (var (key, value) in ExpectedSecret.Members(Expected))
+            Assert.Equal(value, await ExpectedSecret.DecryptAsync(cache, $"{SecretPath}#{key}"));
+    }
+
     [HashiCorpVaultFact]
     public async Task Decrypt_OfASecretThatDoesNotExist_ReturnsZero()
     {
@@ -89,5 +119,20 @@ public sealed class HashiCorpVaultFactAttribute : FactAttribute
     {
         if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable(HashiCorpVaultSecretCacheIntegrationTests.SecretNameVariable)))
             Skip = $"Set {HashiCorpVaultSecretCacheIntegrationTests.SecretNameVariable} (with HKDFGUARD_TEST_VAULT_ADDR and HKDFGUARD_TEST_VAULT_TOKEN) to a secret's path#key to run Vault cache integration tests.";
+    }
+}
+
+/// <summary>
+/// A test that checks a real Vault secret's keys; reported as skipped unless
+/// <see cref="HashiCorpVaultSecretCacheIntegrationTests.SecretNameVariable"/> and
+/// <see cref="HashiCorpVaultSecretCacheIntegrationTests.ExpectedJsonVariable"/> are set.
+/// </summary>
+public sealed class HashiCorpVaultJsonFactAttribute : FactAttribute
+{
+    public HashiCorpVaultJsonFactAttribute()
+    {
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable(HashiCorpVaultSecretCacheIntegrationTests.SecretNameVariable))
+            || string.IsNullOrEmpty(Environment.GetEnvironmentVariable(HashiCorpVaultSecretCacheIntegrationTests.ExpectedJsonVariable)))
+            Skip = $"Set {HashiCorpVaultSecretCacheIntegrationTests.SecretNameVariable} and {HashiCorpVaultSecretCacheIntegrationTests.ExpectedJsonVariable} to check a secret's keys.";
     }
 }
