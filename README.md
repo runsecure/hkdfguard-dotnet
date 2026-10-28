@@ -278,7 +278,7 @@ Node/Python mirror this layering, adding their own consumer branches as they cat
 | Project | Purpose |
 |---|---|
 | `HkdfGuard.Diagnostics` | Every library's telemetry, centralized: `HkdfGuardTelemetry` (one `ComponentTelemetry` per component - `ActivitySource`, `Meter`, `EnableSensitiveLogging`, `RecordException`, `LogSensitiveOperation`), `ActivityNames`/`AttributeNames`/`EventNames`/`MetricNames` (OpenTelemetry semantic-convention-style names, e.g. `hkdfguard.cache.add`), `CacheMetrics`, and `HkdfGuardLoggerExtensions` (`[LoggerMessage]`-generated `ILogger` extensions). No dependency on any other project in this solution - the lowest layer, designed so its naming/shape can be ported identically into a Java/Node/Python/Go implementation. |
-| `HkdfGuard.Abstractions` | Interfaces and pure data types only (`IKeyRing`, `IKeyWrapper`, `ICryptoProvider`, `ICryptoProviderFactory`, `IDataEncryptionKey`, `IDataProtector`, `IProtectedCache`/`IProtectedReadOnlyCache`, `IEncryptedFormatProvider`, `KeyTrackingValue`, `ArrayUtility`, `ProtectedCacheBase`). Depends only on `HkdfGuard.Diagnostics`. |
+| `HkdfGuard.Abstractions` | Interfaces and pure data types only (`IKeyRing`, `IKeyWrapper`, `ICryptoProvider`, `ICryptoProviderFactory`, `IDataEncryptionKey`, `IDataProtector`, `IProtectedCache`/`IProtectedReadOnlyCache` - the latter with `DecryptAsync`/`GetMaxDecryptedLengthAsync` defaulting to its synchronous members, `IEncryptedFormatProvider`, `KeyTrackingValue`, `ArrayUtility`, `ProtectedCacheBase`). Depends only on `HkdfGuard.Diagnostics`. |
 | `HkdfGuard.CryptoProvider.AesGcm256` | `AesGcmCryptoSession` (internal, key-bound at construction) wrapped directly by the public `AesGcmCryptoProvider` (an `ICryptoProvider` that reveals/refreshes it from an `IKeyWrapper` + wrapped bytes, and only ever holds one active session at a time; also exposes `GetEncryptedAllocationLength`/`GetDecryptedAllocationLength` for sizing buffers), minted via `AesGcmCryptoProviderFactory` (an `ICryptoProviderFactory`); plus `AesGcmPipelineDataProtector` (an `IPipelineDataProtector` over one in-memory key, for protecting values in a pipeline before a durable KEK exists - see below). Depends on `HkdfGuard.Abstractions`/`HkdfGuard.Diagnostics`; its `HkdfGuardTelemetry.CryptoProviderAesGcm256` component keeps its own independent `EnableSensitiveLogging` flag rather than sharing `Root`'s. |
 | `HkdfGuard.KeyWrapping.V1` | `NativeHkdfKeyWrapperV1` (an `IKeyWrapper`, whose async methods complete synchronously) and `NativeHost`, which resolve and bind the current OS's native KMS library (Linux/.so, macOS/.dylib, Windows/.dll - see `Interop/`) to wrap and unwrap a 32-byte DEK under a service-identified KEK held entirely outside this process. |
 | `HkdfGuard.SecureFile` | `TrustedKeyFile.ReadAsync` and `KeyFileTrust` - the managed equivalent of the native library's `hkdfguard_open_file`, for key wrappers with no native library to read key files through (network KMS providers). Refuses a key file unless it, and every folder above it, is owned and modifiable only by the operating system's administrators and the principals a `KeyFileTrust` adds (Windows ACLs and final-path check; Linux/macOS ownership and mode bits, following only trusted symbolic links), and refuses contents that look like an unwrapped key. Depends on `HkdfGuard.Abstractions`. |
@@ -286,11 +286,15 @@ Node/Python mirror this layering, adding their own consumer branches as they cat
 | `HkdfGuard.KeyWrapping.AzureKeyVault` | `AzureKeyVaultKeyWrapper` - an `IKeyWrapper` over two Azure Key Vault keys: an RSA key wraps each DEK (RSA-OAEP-256) and a separate EC P-256 key signs each wrapped DEK (ES256), verified before every unwrap, so only principals allowed to sign can create a key file it accepts. Both keys pinned by name, rotation-safe by version; an optional context bound into the signature; key files read through `HkdfGuard.SecureFile`. Depends on `HkdfGuard.Abstractions`, `HkdfGuard.SecureFile` and `Azure.Security.KeyVault.Keys`. |
 | `HkdfGuard.KeyWrapping.GoogleKms` | `GoogleKmsKeyWrapper` - an `IKeyWrapper` over one symmetric Google Cloud KMS key (`Encrypt`/`Decrypt`, the key pinned on every `Decrypt`, a fixed HkdfGuard label and an optional context bound as AAD, CRC32C checksums on every request and response), reading key files through `HkdfGuard.SecureFile`. Depends on `HkdfGuard.Abstractions`, `HkdfGuard.SecureFile` and `Google.Cloud.Kms.V1`. |
 | `HkdfGuard.DataEncryptionKey` | The application-facing API: `KeyRing`/`KeyRingBuilder`, `IDataProtector`/`DataProtector`, `DataEncryptionKey` (the `IDataEncryptionKey` over an `ICryptoProvider` - output sizing and telemetry; disposing it disposes its provider), and the default `enc::v{version}::{base64}` wire format. Depends on `HkdfGuard.Abstractions`/`HkdfGuard.Diagnostics`. |
-| `HkdfGuard.Cache` | `ProtectedCache` (an `IProtectedCache` backed by an `IKeyRing` - encrypts under the ring's current key on Add/AddOrUpdate and records its version, reveals under that version on Decrypt, so it follows key rotation; nothing held as plaintext beyond a single call; each value is bound to its name as AAD, so a ciphertext under any other name fails authentication, and names match ignoring ASCII case only) and `ProtectedCacheCollection` (aggregates multiple `IProtectedReadOnlyCache` sources behind one read-only surface, checked in registration order). |
+| `HkdfGuard.Cache` | `ProtectedCache` (an `IProtectedCache` backed by an `IKeyRing` - encrypts under the ring's current key on Add/AddOrUpdate and records its version, reveals under that version on Decrypt, so it follows key rotation; nothing held as plaintext beyond a single call; each value is bound to its name as AAD, so a ciphertext under any other name fails authentication, and names match ignoring ASCII case only) `ProtectedCacheCollection` (aggregates multiple `IProtectedReadOnlyCache` sources behind one read-only surface, checked in registration order), and `RemoteSecretCache` (the shared base of the secret-store caches below: fetch-on-miss of one named secret through a `SecretValueSink` bound to that name - its whole value and, by `secret#key`, the keys it holds, all from one fetch - one fetch per secret at a time, missing values not remembered, exact or ASCII-case-insensitive name matching, and telemetry - a subclass supplies only `IsValidName` and `Fetch`) with `SecretJsonBody` (takes a secret out of a JSON response body into pinned memory and returns the body with it blanked, for an SDK to parse). |
+| `HkdfGuard.Cache.AzureKeyVault` | `AzureKeyVaultSecretCache` - a `RemoteSecretCache` over one Azure Key Vault's secrets: on a miss it reads just the requested secret with `GetSecret`, taking the value out of the response body in pinned memory (a pipeline policy) so `SecretClient` never holds it as a string, encrypts it under the ring's current key bound to its name, and caches the ciphertext. Never lists the vault (needs only `get` on secrets); names Key Vault can't hold are reported missing without a call. Depends on `HkdfGuard.Cache` and `Azure.Security.KeyVault.Secrets`. |
+| `HkdfGuard.Cache.AwsSecretsManager` | `AwsSecretsManagerSecretCache` - a `RemoteSecretCache` over AWS Secrets Manager: on a miss it reads just the requested secret with `GetSecretValue`, taking the value out of the response body in pinned memory (a pipeline handler ahead of unmarshalling) so the SDK never holds it as a string, encrypts it under the ring's current key bound to its name, and caches the ciphertext. Never lists secrets (needs only `secretsmanager:GetSecretValue`); names match exactly, as Secrets Manager's do; names it can't hold are reported missing without a call. Depends on `HkdfGuard.Cache` and `AWSSDK.SecretsManager`. |
+| `HkdfGuard.Cache.GoogleSecretManager` | `GoogleSecretManagerSecretCache` - a `RemoteSecretCache` over one Google Cloud project's Secret Manager: on a miss it reads just the requested secret's latest version with `AccessSecretVersion`, checks its CRC32C and that the response names that secret, encrypts it under the ring's current key bound to its name, zeroes the payload and gRPC's pooled receive buffer, and caches the ciphertext. Never lists secrets (needs only `secretmanager.versions.access`); IDs match exactly, as Secret Manager's do; names it can't hold are reported missing without a call. Depends on `HkdfGuard.Cache` and `Google.Cloud.SecretManager.V1`. |
+| `HkdfGuard.Cache.HashiCorpVault` | `HashiCorpVaultSecretCache` - a `RemoteSecretCache` over one HashiCorp Vault KV secrets engine (version 2 or 1): on a miss it reads just the requested secret's path (`path#key` picks the key) over Vault's HTTP API, reading the unbuffered response body into pinned memory so the value is never a string, encrypts it under the ring's current key bound to its name, and caches the ciphertext. Never lists secrets (the token needs only `read`); paths match exactly, as Vault's do; names that aren't a path and key are reported missing without a call. Authentication is left to an `IVaultTokenProvider` (`StaticVaultToken` for a token you hold). No dependency beyond `HkdfGuard.Cache`. |
 | `HkdfGuard.EncryptedConfiguration` | `ProtectedConfigurationRoot` (an `IProtectedConfigurationRoot`) - wraps an `IConfigurationRoot`, revealing values formatted as protected secrets via a `KeyRing`; configuration itself only ever holds ciphertext, and `Decrypt` reads fresh from the underlying root every time so `Reload` takes effect immediately. Each value is bound to its own configuration key (`ProtectedConfigurationPurpose`), so a value copied to another key fails to decrypt. |
 | `HkdfGuard.DependencyInjection` | `AddKeyRingAsync` - builds a `KeyRing` asynchronously at registration and registers it as a singleton in an `IServiceCollection`. |
 | `HkdfGuard.Options` | `HkdfGuardOptions`/`HkdfGuardOptionsValidator`/`HkdfGuardOptionsExtensions.ApplyTo` - a plain-data mirror of `KeyRingBuilder`'s configuration surface (`ServiceName`, `KeyRefreshInterval`, `MaxRefreshFailures`/`FailOpenOnRefreshFailure`, key files, ephemeral keys), for binding a `KeyRing`'s identity/policy/key files from configuration. |
-| `HkdfGuard.Diagnostics.Test`, `HkdfGuard.Abstractions.Test`, `HkdfGuard.CryptoProvider.AesGcm256.Test`, `HkdfGuard.KeyWrapping.V1.Test`, `HkdfGuard.SecureFile.Test`, `HkdfGuard.KeyWrapping.AwsKms.Test`, `HkdfGuard.KeyWrapping.AzureKeyVault.Test`, `HkdfGuard.KeyWrapping.GoogleKms.Test`, `HkdfGuard.DataEncryptionKey.Test`, `HkdfGuard.Cache.Test`, `HkdfGuard.EncryptedConfiguration.Test`, `HkdfGuard.DependencyInjection.Test`, `HkdfGuard.Options.Test` | xUnit test suites, maintained at full line/branch coverage for their respective projects. |
+| `HkdfGuard.Diagnostics.Test`, `HkdfGuard.Abstractions.Test`, `HkdfGuard.CryptoProvider.AesGcm256.Test`, `HkdfGuard.KeyWrapping.V1.Test`, `HkdfGuard.SecureFile.Test`, `HkdfGuard.KeyWrapping.AwsKms.Test`, `HkdfGuard.KeyWrapping.AzureKeyVault.Test`, `HkdfGuard.KeyWrapping.GoogleKms.Test`, `HkdfGuard.DataEncryptionKey.Test`, `HkdfGuard.Cache.Test`, `HkdfGuard.Cache.AzureKeyVault.Test`, `HkdfGuard.Cache.AwsSecretsManager.Test`, `HkdfGuard.Cache.GoogleSecretManager.Test`, `HkdfGuard.Cache.HashiCorpVault.Test`, `HkdfGuard.EncryptedConfiguration.Test`, `HkdfGuard.DependencyInjection.Test`, `HkdfGuard.Options.Test` | xUnit test suites, maintained at full line/branch coverage for their respective projects. |
 
 Requires **.NET 10** (`net10.0`).
 
@@ -684,6 +688,222 @@ await using var ephemeralKey = new DataEncryptionKey(provider);
 `HkdfGuard.*` namespace must write it fully qualified (`HkdfGuard.DataEncryptionKey.DataEncryptionKey`);
 application code outside `HkdfGuard.*` can use the short name with
 `using HkdfGuard.DataEncryptionKey;`.
+
+### Caching Azure Key Vault secrets
+
+`AzureKeyVaultSecretCache` (package `HkdfGuard.Cache.AzureKeyVault`) is an
+`IProtectedReadOnlyCache` over the secrets in one vault. Nothing is fetched up front: the first
+`Decrypt` or `TryGetMaxDecryptedLength` for a name reads that one secret with `GetSecret`,
+encrypts it under the ring's current key, and caches only the ciphertext; later lookups never call
+Key Vault. It never lists the vault, so the application needs only the **Key Vault Secrets User**
+role (`get` on secrets), never `list`:
+
+```csharp
+var secrets = new AzureKeyVaultSecretCache(
+    new Uri("https://myvault.vault.azure.net/"), new DefaultAzureCredential(), ring);
+
+Span<char> buffer = stackalloc char[256];
+int written = secrets.Decrypt("Db-Password", buffer); // 0 if the secret doesn't exist
+```
+
+A missing (404) or empty secret returns 0 and is looked up again next time; any other failure
+(access denied, a disabled secret, the vault unreachable) throws the Azure exception. A name Key
+Vault can't hold (anything but 1-127 ASCII letters, digits and hyphens, e.g.
+`ConnectionStrings:Admin`) returns 0 without a call, so the cache can go last in a
+`ProtectedCacheCollection` behind other sources. A cached value isn't refreshed: a new secret
+version is picked up by a new cache instance.
+
+**A secret never becomes a `string`.** Every SDK here would hand a secret over as a `string` (Key
+Vault, Secrets Manager) or leave it in a pooled buffer (gRPC, HttpClient's buffered responses),
+none of which can be zeroed. So each cache makes its own client and takes the value out below the
+SDK: Key Vault and Secrets Manager responses are read off the network into pinned memory by a
+pipeline policy or handler, the value is passed to the cache as bytes (`SecretJsonBody`), and the
+SDK parses a copy of the response with the value blanked; Vault's unbuffered response is read the
+same way, with no SDK above it; Google's protobuf payload is encrypted from the bytes it was deserialized into,
+and both those bytes and gRPC's pooled receive buffer are zeroed. Every buffer that held a value is
+zeroed once it is encrypted. What no library above the HTTP stack can reach are that stack's own
+buffers (TLS decryption, socket reads). For the same reason, the Key Vault cache refuses client
+options that log response content.
+
+To use your own transport, retries or timeouts, pass them in the options each cache takes
+(`SecretClientOptions`, `AmazonSecretsManagerConfig`, or a gRPC `CallInvoker`) rather than a
+ready-made client.
+
+### Caching AWS Secrets Manager secrets
+
+`AwsSecretsManagerSecretCache` (package `HkdfGuard.Cache.AwsSecretsManager`) does the same over
+AWS Secrets Manager: the first lookup of a name calls `GetSecretValue` for that one secret
+(`AWSCURRENT`), and only the ciphertext is cached. It never calls `ListSecrets` or
+`BatchGetSecretValue`, so the application needs only `secretsmanager:GetSecretValue` on the
+secrets it reads (plus `kms:Decrypt` on a customer managed key that encrypts them):
+
+```csharp
+using var secrets = new AwsSecretsManagerSecretCache(ring); // region and credentials from the SDK's defaults
+
+Span<char> buffer = stackalloc char[256];
+int written = secrets.Decrypt("prod/Db-Password", buffer); // 0 if the secret doesn't exist
+```
+
+Names are matched exactly, as Secrets Manager matches them, so `prod/Db` and `prod/db` are separate
+secrets and separate entries. Look secrets up by name, not ARN: anything but 1-512 ASCII letters,
+digits and `/_+=.@-` returns 0 without a call. A `SecretString` is cached as UTF-8 bytes and a
+`SecretBinary` as its bytes. The AWS SDK is async-only and the cache interface is synchronous, so a
+first lookup blocks until AWS answers; set timeouts on the `AmazonSecretsManagerConfig` the cache
+takes. The cache owns its client, so dispose it. Missing, empty, failure and refresh behavior are
+as for Key Vault above.
+
+### Caching Google Cloud Secret Manager secrets
+
+`GoogleSecretManagerSecretCache` (package `HkdfGuard.Cache.GoogleSecretManager`) does the same over
+one project's Secret Manager: the first lookup of a name calls `AccessSecretVersion` for that one
+secret's `latest` version, and only the ciphertext is cached. It never lists secrets or versions,
+so the application needs only the **Secret Manager Secret Accessor** role
+(`secretmanager.versions.access`):
+
+```csharp
+using var secrets = GoogleSecretManagerSecretCache.Create(
+    "my-project", await GoogleCredential.GetApplicationDefaultAsync(), ring);
+
+Span<char> buffer = stackalloc char[256];
+int written = secrets.Decrypt("Db-Password", buffer); // 0 if the secret doesn't exist
+```
+
+Secret IDs are matched exactly, as Secret Manager matches them, so `Db` and `db` are separate
+secrets and separate entries; anything but 1-255 ASCII letters, digits, hyphens and underscores
+returns 0 without a call. The payload is cached as its bytes. `Create` makes and owns a channel;
+to use your own, pass its `CallInvoker` to the constructor instead. A payload whose
+CRC32C doesn't match the checksum Google returns, or a response naming a different secret, is
+refused with a `CryptographicException`. A secret that doesn't exist or has no versions returns 0;
+a disabled or destroyed latest version, like any other failure, throws the gRPC `RpcException`.
+Refresh behavior is as for Key Vault above.
+
+### Caching HashiCorp Vault secrets
+
+`HashiCorpVaultSecretCache` (package `HkdfGuard.Cache.HashiCorpVault`) does the same over one KV
+secrets engine: the first lookup of a name reads that one secret's path (for KV version 2, its
+latest version), and only the ciphertext is cached. It never lists, so the token's policy needs
+only `read` on the paths it reads. A Vault secret holds several keys, so a name is the secret's
+path with the key after `#`, and a name without one reads `DefaultKey` (`value` unless set). One
+read caches every key the secret holds (see [Secrets holding several keys](#secrets-holding-several-keys)):
+
+```csharp
+using var secrets = new HashiCorpVaultSecretCache(
+    new Uri("https://vault.example.com:8200"),
+    new StaticVaultToken(Environment.GetEnvironmentVariable("VAULT_TOKEN")!),
+    ring,
+    new HashiCorpVaultSecretCacheOptions { MountPath = "secret" }); // KV version 2 unless KvVersion says 1
+
+Span<char> buffer = stackalloc char[256];
+int written = secrets.Decrypt("myapp/db#password", buffer); // 0 if there's no such secret or key
+```
+
+Authentication isn't the cache's: every fetch asks its `IVaultTokenProvider` for a token, so a
+provider can log in (AppRole, Kubernetes, a certificate) and renew or replace its token however it
+likes. `StaticVaultToken` uses a token you already hold, which nothing renews: once it expires
+every fetch fails with 403. The address must be https except on loopback, and the cache's own HTTP
+handler follows no redirects, which would carry the token elsewhere; to trust a private CA or use a
+proxy, pass a handler in the options (it must not follow redirects either). `Namespace` sets
+`X-Vault-Namespace` for Vault Enterprise.
+
+Paths match exactly, as Vault's do. A name whose path segments aren't ASCII letters, digits, `-`,
+`_` and `.` - or that holds a `.`/`..` segment, e.g. `ConnectionStrings:Admin` - returns 0
+without a call. A secret that doesn't exist (404 with no errors), whose latest version is deleted
+or destroyed, or that lacks the key or holds no value there that is cached, returns 0 and is
+looked up again next time. Any other answer (403, a 404 naming an error such as a missing
+mount, a sealed Vault) throws an `HttpRequestException` carrying Vault's status and errors, never
+the token. A fetch blocks until Vault answers or `Timeout` passes. Dispose the cache to release its
+connections. Refresh behavior is as for Key Vault above.
+
+### Secrets holding several keys
+
+A secret often holds a set of credentials rather than one: an AWS Secrets Manager key/value
+secret (stored as a JSON object in its `SecretString`), a JSON object kept in a Key Vault secret or
+a Google payload by convention, or any Vault KV secret. Every cache reads one key of such a secret
+by name, as `secret#key`:
+
+```csharp
+// The AWS secret "prod/app" holds {"api-credential-21":"...","test-credential-1":"...","port":5432}.
+int written = secrets.Decrypt("prod/app#api-credential-21", buffer);
+written = secrets.Decrypt("prod/app#port", buffer);  // "5432"
+written = secrets.Decrypt("prod/app", buffer);       // the whole JSON text, as before
+```
+
+The first lookup of any of a secret's keys fetches the secret once and caches its whole value and
+every key it holds, each encrypted on its own and bound to its own name; the rest are served from
+the cache, and concurrent lookups of different keys share that one fetch. Each value is unescaped
+into pinned memory and zeroed once encrypted, like a whole value - never a string. A string member
+is cached as its UTF-8 bytes; a number, `true` or `false` as its JSON text; `null`, an object, an
+array, an empty string, or a member whose name isn't a key (1-256 printable ASCII characters other
+than space, `!` and `#`) is left out. A value that isn't exactly one JSON object (plain text, an
+array, malformed JSON) is cached whole only; an object naming a member twice is refused with
+`InvalidDataException`. An AWS `SecretBinary` is never split.
+
+Keys match exactly, even in Key Vault, whose secret names ignore case: `App-Login#user` and
+`app-login#user` are the same key, `App-Login#User` is another. A key the secret doesn't hold
+returns 0 and costs a fetch each time it is asked for. A later fetch of a secret adds keys that
+weren't cached yet but never replaces one that was; as for whole values, a new secret version is
+picked up by a new cache instance.
+
+### Reading asynchronously
+
+Every `IProtectedReadOnlyCache` also has `DecryptAsync` (into a `Memory<byte>` or `Memory<char>`)
+and `GetMaxDecryptedLengthAsync`. On a secret-store cache they fetch a missing secret without
+blocking a thread - with `GetSecretAsync`, `GetSecretValueAsync`, `AccessSecretVersionAsync`, or
+Vault's HTTP API, the response body read asynchronously into the same pinned memory - where
+`Decrypt` and `TryGetMaxDecryptedLength` block until the store answers. In ASP.NET Core and other
+async code, prefer them for anything that may miss:
+
+```csharp
+var max = await secrets.GetMaxDecryptedLengthAsync("prod/app#api-key", cancellationToken); // 0 if missing
+var buffer = ArrayUtility.AllocatePinned<char>(max);
+try
+{
+    var written = await secrets.DecryptAsync("prod/app#api-key", buffer.AsMemory(), cancellationToken);
+    Use(buffer.AsSpan(0, written));
+}
+finally
+{
+    ArrayUtility.ZeroMemory(buffer.AsSpan());
+}
+```
+
+An async method can't take a `Span`, so the plaintext lands in memory the caller provides: pass a
+pinned array, never a pooled one, and zero it once used. Decryption itself is the same as
+`Decrypt`'s; only the fetch is asynchronous. `ProtectedCacheCollection` awaits each source in turn,
+so a secret-store cache in a collection doesn't block either. Every other cache - `ProtectedCache`,
+`IProtectedConfigurationRoot`, any implementation written before these members existed - gets them
+from the interface, where they simply call the synchronous members.
+
+Synchronous and asynchronous lookups of the same uncached secret share one fetch. The token
+cancels a lookup's wait, and the fetch itself only if that lookup started it; a lookup whose fetch
+was cancelled by another caller starts a new one rather than failing.
+
+All four derive from `RemoteSecretCache` (in `HkdfGuard.Cache`), which owns fetching, caching,
+encryption, name matching and telemetry. Another secret store needs only a subclass that says which
+names it can hold and reads one secret by name - and, if its client is asynchronous, how to read it
+without blocking:
+
+```csharp
+public sealed class MySecretStoreCache(MyClient client, IKeyRing ring)
+    : RemoteSecretCache(ring, SecretNameMatching.Exact)
+{
+    protected override bool IsValidName(string name) => name.All(char.IsAsciiLetterOrDigit);
+
+    // Hand the value to the sink, or return without doing so if the secret doesn't exist.
+    protected override void Fetch(string name, SecretValueSink value)
+    {
+        if (client.TryGet(name, out var secret))
+            value.SetText(secret);
+    }
+
+    // Optional: without it, DecryptAsync calls Fetch. Hand values over between awaits.
+    protected override async ValueTask FetchAsync(string name, SecretValueSink value, CancellationToken cancellationToken)
+    {
+        if (await client.GetAsync(name, cancellationToken) is { } secret)
+            value.SetText(secret);
+    }
+}
+```
 
 ### Pipeline protection - encrypt now, wrap later
 

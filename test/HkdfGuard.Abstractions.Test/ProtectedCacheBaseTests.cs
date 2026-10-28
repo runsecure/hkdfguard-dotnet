@@ -144,6 +144,137 @@ public class ProtectedCacheBaseTests
         }
     }
 
+    [Fact]
+    public async Task DecryptAsync_ForAStoredName_RevealsTheValueForBothOverloads()
+    {
+        var cache = new TestCache();
+        cache.StoreChars("item", "h\u00e9llo".ToCharArray());
+
+        var bytes = new byte[16];
+        Assert.Equal("h\u00e9llo"u8.ToArray(), bytes[..await cache.DecryptAsync("ITEM", bytes.AsMemory())]);
+        var chars = new char[16];
+        Assert.Equal("h\u00e9llo", new string(chars, 0, await cache.DecryptAsync("item", chars.AsMemory())));
+        Assert.Equal(6, await cache.GetMaxDecryptedLengthAsync("item"));
+        Assert.Empty(cache.PopulateRequests);
+    }
+
+    [Fact]
+    public async Task DecryptAsync_ForAMissingName_ReturnsZero_AfterAskingTryPopulateByDefault()
+    {
+        var cache = new TestCache();
+
+        Assert.Equal(0, await cache.DecryptAsync("missing", new byte[16].AsMemory()));
+        Assert.Equal(0, await cache.DecryptAsync("missing", new char[16].AsMemory()));
+        Assert.Equal(0, await cache.GetMaxDecryptedLengthAsync("missing"));
+        Assert.Equal(["missing", "missing", "missing"], cache.PopulateRequests);
+    }
+
+    [Fact]
+    public async Task DecryptAsync_OnAMiss_PopulatesThroughTryPopulateAsync_WhenOverridden()
+    {
+        var cache = new TestCache();
+        cache.OnTryPopulateAsync = async (name, _) =>
+        {
+            await Task.Yield();
+            cache.Store(name, "fetched"u8.ToArray());
+            return true;
+        };
+
+        var result = new byte[16];
+        Assert.Equal("fetched"u8.ToArray(), result[..await cache.DecryptAsync("remote", result.AsMemory())]);
+        Assert.Empty(cache.PopulateRequests);
+    }
+
+    [Fact]
+    public async Task DecryptAsync_WhenTryPopulateClaimsSuccessButStoresNothing_ReturnsZero()
+    {
+        var cache = new TestCache { OnTryPopulate = _ => true };
+
+        Assert.Equal(0, await cache.DecryptAsync("remote", new byte[16].AsMemory()));
+        Assert.Equal(0, await cache.GetMaxDecryptedLengthAsync("remote"));
+    }
+
+    [Fact]
+    public async Task DecryptAsync_OnAMiss_WithACancelledToken_IsCancelled()
+    {
+        var cache = new TestCache();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => cache.DecryptAsync("missing", new byte[16].AsMemory(), new CancellationToken(canceled: true)).AsTask());
+        Assert.Empty(cache.PopulateRequests);
+    }
+
+    [Fact]
+    public async Task DecryptAsync_WhenTheKeyFails_RethrowsForBothOverloads()
+    {
+        var cache = new TestCache(new MaskingKey { ThrowOnDecrypt = true });
+        cache.Store("item", "value"u8.ToArray());
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => cache.DecryptAsync("item", new byte[16].AsMemory()).AsTask());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => cache.DecryptAsync("item", new char[16].AsMemory()).AsTask());
+    }
+
+    [Fact]
+    public async Task DecryptAsync_WithSensitiveLoggingEnabled_StillWorks()
+    {
+        var original = HkdfGuardTelemetry.Root.EnableSensitiveLogging;
+        HkdfGuardTelemetry.Root.EnableSensitiveLogging = true;
+        try
+        {
+            var cache = new TestCache();
+            cache.Store("item", "value"u8.ToArray());
+
+            Assert.Equal(5, await cache.DecryptAsync("item", new byte[16].AsMemory()));
+        }
+        finally
+        {
+            HkdfGuardTelemetry.Root.EnableSensitiveLogging = original;
+        }
+    }
+
+    [Fact]
+    public async Task TheInterfacesDefaultAsyncMembers_CallTheSynchronousOnes()
+    {
+        IProtectedReadOnlyCache cache = new SyncOnlyCache();
+
+        var bytes = new byte[16];
+        Assert.Equal("bytes"u8.ToArray(), bytes[..await cache.DecryptAsync("item", bytes.AsMemory())]);
+        var chars = new char[16];
+        Assert.Equal("chars", new string(chars, 0, await cache.DecryptAsync("item", chars.AsMemory())));
+        Assert.Equal(42, await cache.GetMaxDecryptedLengthAsync("item"));
+        Assert.Equal(0, await cache.GetMaxDecryptedLengthAsync("missing"));
+    }
+
+    [Fact]
+    public async Task TheInterfacesDefaultAsyncMembers_HonourACancelledToken()
+    {
+        IProtectedReadOnlyCache cache = new SyncOnlyCache();
+        var cancelled = new CancellationToken(canceled: true);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cache.DecryptAsync("item", new byte[16].AsMemory(), cancelled).AsTask());
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cache.DecryptAsync("item", new char[16].AsMemory(), cancelled).AsTask());
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cache.GetMaxDecryptedLengthAsync("item", cancelled).AsTask());
+    }
+
+    // An IProtectedReadOnlyCache with only the synchronous members, as one written before the
+    // asynchronous ones existed.
+    private sealed class SyncOnlyCache : IProtectedReadOnlyCache
+    {
+        public int Decrypt(string name, Span<byte> result) => Encoding.UTF8.GetBytes("bytes", result);
+
+        public int Decrypt(string name, Span<char> result)
+        {
+            "chars".CopyTo(result);
+            return 5;
+        }
+
+        public bool TryGetMaxDecryptedLength(string name, out int maxLength)
+        {
+            maxLength = name == "item" ? 42 : 0;
+            return name == "item";
+        }
+    }
+
     // The smallest concrete cache: exposes Encrypt/EncryptChars for storing, and records (and
     // optionally answers) TryPopulate calls - falling back to the base implementation otherwise.
     private sealed class TestCache(IKeyRing keyRing) : ProtectedCacheBase(keyRing)
@@ -154,6 +285,7 @@ public class ProtectedCacheBaseTests
         }
 
         public Func<string, bool>? OnTryPopulate { get; set; }
+        public Func<string, CancellationToken, ValueTask<bool>>? OnTryPopulateAsync { get; set; }
         public List<string> PopulateRequests { get; } = [];
 
         public void Store(string name, byte[] plaintext) => Data[name] = Encrypt(name, plaintext);
@@ -171,6 +303,9 @@ public class ProtectedCacheBaseTests
             PopulateRequests.Add(name);
             return OnTryPopulate?.Invoke(name) ?? base.TryPopulate(name);
         }
+
+        protected override ValueTask<bool> TryPopulateAsync(string name, CancellationToken cancellationToken)
+            => OnTryPopulateAsync?.Invoke(name, cancellationToken) ?? base.TryPopulateAsync(name, cancellationToken);
     }
 
     // A reversible stand-in for real AEAD: XORs every byte with a fixed mask, same length out as in.
