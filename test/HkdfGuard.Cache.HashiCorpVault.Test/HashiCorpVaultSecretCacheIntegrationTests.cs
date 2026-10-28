@@ -25,8 +25,10 @@ public class HashiCorpVaultSecretCacheIntegrationTests
     private static async Task<HashiCorpVaultSecretCache> CreateAsync()
     {
         var address = new Uri(Environment.GetEnvironmentVariable("HKDFGUARD_TEST_VAULT_ADDR") ?? "https://127.0.0.1:8200");
-        var token = new StaticVaultToken(Environment.GetEnvironmentVariable("HKDFGUARD_TEST_VAULT_TOKEN")!);
-        return new HashiCorpVaultSecretCache(address, token, await TestRing.CreateAsync(),
+        var ring = await TestRing.CreateAsync();
+        var protector = ring.CreateProtector(HashiCorpVaultSecretCache.TokenPurpose);
+        var token = StaticVaultToken.Protect(protector, Environment.GetEnvironmentVariable("HKDFGUARD_TEST_VAULT_TOKEN"));
+        return new HashiCorpVaultSecretCache(address, token, protector, ring,
             new HashiCorpVaultSecretCacheOptions { HttpMessageHandler = Handler });
     }
 

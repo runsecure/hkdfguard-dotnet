@@ -790,9 +790,11 @@ path with the key after `#`, and a name without one reads `DefaultKey` (`value` 
 read caches every key the secret holds (see [Secrets holding several keys](#secrets-holding-several-keys)):
 
 ```csharp
+var tokenProtector = ring.CreateProtector(HashiCorpVaultSecretCache.TokenPurpose);
 using var secrets = new HashiCorpVaultSecretCache(
     new Uri("https://vault.example.com:8200"),
-    new StaticVaultToken(Environment.GetEnvironmentVariable("VAULT_TOKEN")!),
+    StaticVaultToken.Protect(tokenProtector, Environment.GetEnvironmentVariable("VAULT_TOKEN")), // held encrypted
+    tokenProtector,
     ring,
     new HashiCorpVaultSecretCacheOptions { MountPath = "secret" }); // KV version 2 unless KvVersion says 1
 
@@ -802,7 +804,16 @@ int written = secrets.Decrypt("myapp/db#password", buffer); // 0 if there's no s
 
 Authentication isn't the cache's: every fetch asks its `IVaultTokenProvider` for a token, so a
 provider can log in (AppRole, Kubernetes, a certificate) and renew or replace its token however it
-likes. `StaticVaultToken` uses a token you already hold, which nothing renews: once it expires
+likes. The provider hands the token over protected - encrypted by the token protector, a protector
+on the key ring created with `HashiCorpVaultSecretCache.TokenPurpose`, as
+`tokenProtector.Encrypt(token)` - and a fetch given a token that isn't protected so (plain text,
+another purpose, another ring, a key version the ring no longer holds) fails with
+`InvalidOperationException`, without calling Vault or quoting what it was given. The cache decrypts
+the token only as each request is built, into stack or pinned memory, then into the one string the
+`X-Vault-Token` header needs - an HTTP header can only be a string - and zeroes that string's
+memory as soon as the request has been sent, so the token's plaintext lives for one request.
+What's beyond reach is the HTTP stack's own write and TLS buffers. `StaticVaultToken.Protect`
+holds a token you already hold only in that protected form; nothing renews it, so once it expires
 every fetch fails with 403. The address must be https except on loopback, and the cache's own HTTP
 handler follows no redirects, which would carry the token elsewhere; to trust a private CA or use a
 proxy, pass a handler in the options. A `SocketsHttpHandler` or `HttpClientHandler` follows
@@ -817,8 +828,13 @@ without a call. A secret that doesn't exist (404 with no errors), whose latest v
 or destroyed, or that lacks the key or holds no value there that is cached, returns 0 and is
 looked up again next time. Any other answer (403, a 404 naming an error such as a missing
 mount, a sealed Vault) throws an `HttpRequestException` carrying Vault's status and errors, never
-the token. A fetch blocks until Vault answers or `Timeout` passes. Dispose the cache to release its
-connections. Refresh behavior is as for Key Vault above.
+the token. A request that fails transiently - no answer (connection refused or reset, DNS), a
+connection lost mid-response, an attempt that took longer than `Timeout`, or 429 or a 5xx other than
+501 (Vault answers 503 while sealed or electing a leader) - is retried `RetryCount` times (3 to 10,
+default 3). The first retry waits `RetryDelay` (default 200 ms), each after it twice as long, up to
+10 seconds, and every wait adds a random 0-100 ms, so many devices reconnecting at once after an
+outage don't retry in lockstep. Anything else, the token provider's failures and your own
+cancellation included, isn't retried. Dispose the cache to release its connections. Refresh behavior is as for Key Vault above.
 
 ### Secrets holding several keys
 

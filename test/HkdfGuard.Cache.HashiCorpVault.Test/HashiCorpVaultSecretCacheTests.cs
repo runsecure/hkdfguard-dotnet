@@ -2,6 +2,8 @@ using System.Net;
 using System.Text;
 using HkdfGuard.Abstractions;
 using HkdfGuard.Cache.HashiCorpVault.Test.TestHelpers;
+using HkdfGuard.DataEncryptionKey;
+using HkdfGuard.DataEncryptionKey.FormatProvider;
 using HkdfGuard.Diagnostics;
 using Microsoft.Extensions.Logging;
 
@@ -15,9 +17,22 @@ public class HashiCorpVaultSecretCacheTests
         IVaultTokenProvider? tokens = null, Uri? address = null, ILogger<HashiCorpVaultSecretCache>? logger = null)
     {
         vault ??= new FakeVault();
-        var cacheOptions = options?.Invoke(vault) ?? new HashiCorpVaultSecretCacheOptions { HttpMessageHandler = vault };
-        return (new HashiCorpVaultSecretCache(address ?? FakeVault.Address, tokens ?? new StaticVaultToken(FakeVault.Token),
-            await TestRing.CreateAsync(), cacheOptions, logger), vault);
+        // No backoff, only each retry's 0-100 ms of jitter, so a test that meets a 5xx stays quick.
+        var cacheOptions = options?.Invoke(vault) ?? new HashiCorpVaultSecretCacheOptions { HttpMessageHandler = vault, RetryDelay = TimeSpan.Zero };
+        var ring = await TestRing.CreateAsync();
+        var protector = ring.CreateProtector(HashiCorpVaultSecretCache.TokenPurpose);
+        if (tokens is FakeTokenProvider fake)
+            fake.Protector ??= protector;
+
+        return (new HashiCorpVaultSecretCache(address ?? FakeVault.Address, tokens ?? StaticVaultToken.Protect(protector, FakeVault.Token),
+            protector, ring, cacheOptions, logger), vault);
+    }
+
+    // A cache on ring, given the fake's token protected for it.
+    private static HashiCorpVaultSecretCache NewCache(Uri address, KeyRing ring, HashiCorpVaultSecretCacheOptions? options = null)
+    {
+        var protector = ring.CreateProtector(HashiCorpVaultSecretCache.TokenPurpose);
+        return new HashiCorpVaultSecretCache(address, StaticVaultToken.Protect(protector, FakeVault.Token), protector, ring, options);
     }
 
     private static string DecryptString(IProtectedReadOnlyCache cache, string name)
@@ -197,7 +212,6 @@ public class HashiCorpVaultSecretCacheTests
     }
 
     [Theory]
-    [InlineData("")]
     [InlineData("has space")]
     [InlineData("tab\tinside")]
     [InlineData("café")]
@@ -207,6 +221,243 @@ public class HashiCorpVaultSecretCacheTests
 
         Assert.Throws<InvalidOperationException>(() => cache.Decrypt("item", new byte[16]));
         Assert.Empty(vault.Reads);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(FakeVault.Token)]
+    [InlineData("enc::v1::not base64!")]
+    [InlineData("enc::v1")]
+    public async Task AnUnprotectedToken_IsRefused_WithoutCallingVault_OrQuotingIt(string handedOver)
+    {
+        var (cache, vault) = await CreateAsync(tokens: new FakeTokenProvider { Unprotected = true, Next = (_, _) => ValueTask.FromResult(handedOver) });
+
+        var e = Assert.Throws<InvalidOperationException>(() => cache.Decrypt("item", new byte[16]));
+
+        Assert.Null(e.InnerException);
+        if (handedOver.Length > 0)
+            Assert.DoesNotContain(handedOver, e.Message, StringComparison.Ordinal);
+        Assert.Empty(vault.Reads);
+    }
+
+    public static TheoryData<string> ForeignProtections => ["another purpose", "another ring", "a version not on the ring"];
+
+    [Theory]
+    [MemberData(nameof(ForeignProtections))]
+    public async Task ATokenProtectedWithAnotherKeyOrPurpose_IsRefused_WithoutCallingVault(string how)
+    {
+        var vault = new FakeVault();
+        var ring = await TestRing.CreateAsync();
+        var protector = ring.CreateProtector(HashiCorpVaultSecretCache.TokenPurpose);
+        var foreign = how switch
+        {
+            "another purpose" => ring.CreateProtector("Some.Other.Purpose"),
+            "another ring" => (await TestRing.CreateAsync()).CreateProtector(HashiCorpVaultSecretCache.TokenPurpose),
+            _ => await RingAtVersion7Async(),
+        };
+        using var cache = new HashiCorpVaultSecretCache(FakeVault.Address, new StaticVaultToken(foreign.Encrypt(FakeVault.Token)), protector, ring,
+            new HashiCorpVaultSecretCacheOptions { HttpMessageHandler = vault });
+
+        var e = Assert.Throws<InvalidOperationException>(() => cache.Decrypt("item", new byte[16]));
+
+        Assert.Null(e.InnerException);
+        Assert.Empty(vault.Reads);
+
+        static async Task<IDataProtector> RingAtVersion7Async()
+        {
+            var other = new KeyRing(new DefaultFormatProvider());
+            other.Add(7, await TestRing.NewKeyAsync());
+            return other.CreateProtector(HashiCorpVaultSecretCache.TokenPurpose);
+        }
+    }
+
+    [Fact]
+    public async Task TheTokenIsDecryptedForEachRequest_AndItsHeaderStringIsZeroedOnceSent()
+    {
+        var (cache, vault) = await CreateAsync();
+        vault.Set("a", "1");
+        vault.Set("b", "2");
+
+        Assert.Equal("1", DecryptString(cache, "a"));
+        Assert.Equal("2", DecryptString(cache, "b"));
+
+        // Vault saw the token in each request...
+        Assert.Equal([FakeVault.Token, FakeVault.Token], vault.Tokens);
+
+        // ...and each header's string was zeroed in place once the request had gone.
+        Assert.Equal(2, vault.TokenHeaders.Count);
+        Assert.All(vault.TokenHeaders, header =>
+        {
+            Assert.Equal(FakeVault.Token.Length, header.Length);
+            Assert.All(header, c => Assert.Equal('\0', c));
+        });
+    }
+
+    [Fact]
+    public async Task ATokenTooLongForTheStack_IsDecryptedIntoPinnedMemory_AndSentWhole()
+    {
+        var longToken = "hvs." + new string('x', ArrayUtility.MaxStackChars + 100);
+        var (cache, vault) = await CreateAsync(tokens: new FakeTokenProvider { Next = (_, _) => ValueTask.FromResult(longToken) });
+
+        // Not the fake's token, so Vault refuses it - after receiving it intact.
+        Assert.Throws<HttpRequestException>(() => cache.Decrypt("item", new byte[16]));
+
+        Assert.Equal([longToken], vault.Tokens);
+        Assert.All(Assert.Single(vault.TokenHeaders), c => Assert.Equal('\0', c));
+    }
+
+    [Fact]
+    public async Task TheTokensHeaderString_IsZeroedEvenWhenTheRequestFails()
+    {
+        var (cache, vault) = await CreateAsync();
+        vault.OnRead = () => throw new HttpRequestException("The connection was reset.");
+
+        Assert.Throws<HttpRequestException>(() => cache.Decrypt("item", new byte[16]));
+
+        // One header per attempt - the first and its retries - each zeroed.
+        Assert.Equal(1 + HashiCorpVaultSecretCacheOptions.MinRetryCount, vault.TokenHeaders.Count);
+        Assert.All(vault.TokenHeaders, header => Assert.All(header, c => Assert.Equal('\0', c)));
+    }
+
+    // A cache retrying with no backoff, so only each retry's 0-100 ms of jitter is waited.
+    private static Task<(HashiCorpVaultSecretCache Cache, FakeVault Vault)> CreateRetryingAsync(int retryCount = HashiCorpVaultSecretCacheOptions.MinRetryCount,
+        FakeTokenProvider? tokens = null)
+        => CreateAsync(options: h => new() { HttpMessageHandler = h, RetryCount = retryCount, RetryDelay = TimeSpan.Zero }, tokens: tokens);
+
+    [Theory]
+    [InlineData(HttpStatusCode.ServiceUnavailable, """{"errors":["Vault is sealed"]}""")]
+    [InlineData(HttpStatusCode.TooManyRequests, """{"errors":["request path \"secret/data/item\": rate limit quota exceeded"]}""")]
+    [InlineData(HttpStatusCode.InternalServerError, """{"errors":["internal error"]}""")]
+    [InlineData(HttpStatusCode.BadGateway, "<html>Bad Gateway</html>")]
+    [InlineData(HttpStatusCode.GatewayTimeout, "")]
+    public async Task ATransientAnswer_IsRetried_UntilVaultAnswers(HttpStatusCode status, string body)
+    {
+        var tokens = new FakeTokenProvider();
+        var (cache, vault) = await CreateRetryingAsync(tokens: tokens);
+        vault.Set("item", "value");
+        vault.Answer = (status, body);
+        vault.OnRead = () =>
+        {
+            if (vault.Reads.Count == 3)
+                vault.Answer = null;
+        };
+
+        Assert.Equal("value", DecryptString(cache, "item"));
+
+        Assert.Equal(3, vault.Reads.Count);
+        Assert.Equal(1, tokens.Calls);
+    }
+
+    [Theory]
+    [InlineData(HashiCorpVaultSecretCacheOptions.MinRetryCount)]
+    [InlineData(HashiCorpVaultSecretCacheOptions.MaxRetryCount)]
+    public async Task ATransientAnswer_IsRetriedRetryCountTimes_ThenPropagates(int retryCount)
+    {
+        var (cache, vault) = await CreateRetryingAsync(retryCount);
+        vault.Answer = (HttpStatusCode.ServiceUnavailable, """{"errors":["Vault is sealed"]}""");
+
+        var e = Assert.Throws<HttpRequestException>(() => cache.Decrypt("item", new byte[16]));
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, e.StatusCode);
+        Assert.Equal(1 + retryCount, vault.Reads.Count);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Forbidden, """{"errors":["permission denied"]}""")]
+    [InlineData(HttpStatusCode.NotFound, """{"errors":["no handler for route"]}""")]
+    [InlineData(HttpStatusCode.BadRequest, """{"errors":["bad request"]}""")]
+    [InlineData(HttpStatusCode.NotImplemented, """{"errors":["unsupported operation"]}""")]
+    [InlineData(HttpStatusCode.TemporaryRedirect, "")]
+    public async Task AnAnswerThatWouldRepeat_IsNotRetried(HttpStatusCode status, string body)
+    {
+        var (cache, vault) = await CreateRetryingAsync();
+        vault.Answer = (status, body);
+
+        Assert.Throws<HttpRequestException>(() => cache.Decrypt("item", new byte[16]));
+
+        Assert.Single(vault.Reads);
+    }
+
+    public static TheoryData<string> LostConnections => ["no answer", "dropped mid-response", "attempt timed out"];
+
+    [Theory]
+    [MemberData(nameof(LostConnections))]
+    public async Task ALostConnection_IsRetried(string how)
+    {
+        var (cache, vault) = await CreateRetryingAsync();
+        vault.Set("item", "value");
+        vault.OnRead = () =>
+        {
+            if (vault.Reads.Count <= 2)
+            {
+                throw how switch
+                {
+                    "no answer" => new HttpRequestException("No connection could be made because the target machine actively refused it."),
+                    "dropped mid-response" => new IOException("The response ended prematurely."),
+                    _ => new TaskCanceledException("The attempt timed out."),
+                };
+            }
+        };
+
+        Assert.Equal("value", DecryptString(cache, "item"));
+        Assert.Equal(3, vault.Reads.Count);
+    }
+
+    [Fact]
+    public async Task TheCallersCancellation_IsNotRetried()
+    {
+        var (cache, vault) = await CreateRetryingAsync();
+        using var cancel = new CancellationTokenSource();
+        vault.OnRead = () =>
+        {
+            cancel.Cancel();
+            throw new TaskCanceledException("Cancelled by the caller.");
+        };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cache.DecryptAsync("item", new byte[16].AsMemory(), cancel.Token).AsTask());
+        Assert.Single(vault.Reads);
+    }
+
+    [Fact]
+    public async Task ATokenProviderFailure_IsNotRetried()
+    {
+        var tokens = new FakeTokenProvider { Next = (_, _) => throw new HttpRequestException("The login endpoint is unreachable.") };
+        var (cache, vault) = await CreateRetryingAsync(tokens: tokens);
+
+        Assert.Throws<HttpRequestException>(() => cache.Decrypt("item", new byte[16]));
+
+        Assert.Equal(1, tokens.Calls);
+        Assert.Empty(vault.Reads);
+    }
+
+    [Theory]
+    [InlineData(200, 0, 0, 200)]
+    [InlineData(200, 1, 0, 400)]
+    [InlineData(200, 2, 0, 800)]
+    [InlineData(200, 5, 0, 6400)]
+    [InlineData(200, 6, 0, 10_000)]
+    [InlineData(200, 9, 0, 10_000)]
+    [InlineData(200, 0, 100, 300)]
+    [InlineData(200, 9, 100, 10_100)]
+    [InlineData(0, 3, 37, 37)]
+    [InlineData(10_000, 0, 0, 10_000)]
+    public void RetryDelay_Doubles_UpToTheMaximum_PlusTheJitter(int baseMilliseconds, int retry, int jitter, int expectedMilliseconds)
+        => Assert.Equal(TimeSpan.FromMilliseconds(expectedMilliseconds),
+            HashiCorpVaultSecretCache.RetryDelay(TimeSpan.FromMilliseconds(baseMilliseconds), retry, jitter));
+
+    [Fact]
+    public async Task TheRetryOptions_AreChecked()
+    {
+        var ring = await TestRing.CreateAsync();
+        HashiCorpVaultSecretCache Create(HashiCorpVaultSecretCacheOptions options) => NewCache(FakeVault.Address, ring, options);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => Create(new() { RetryCount = HashiCorpVaultSecretCacheOptions.MinRetryCount - 1 }));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Create(new() { RetryCount = HashiCorpVaultSecretCacheOptions.MaxRetryCount + 1 }));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Create(new() { RetryDelay = TimeSpan.FromMilliseconds(-1) }));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Create(new() { RetryDelay = HashiCorpVaultSecretCacheOptions.MaxRetryDelay + TimeSpan.FromTicks(1) }));
+
+        using var fewest = Create(new() { RetryCount = HashiCorpVaultSecretCacheOptions.MinRetryCount, RetryDelay = TimeSpan.Zero });
+        using var most = Create(new() { RetryCount = HashiCorpVaultSecretCacheOptions.MaxRetryCount, RetryDelay = HashiCorpVaultSecretCacheOptions.MaxRetryDelay });
     }
 
     [Fact]
@@ -419,7 +670,7 @@ public class HashiCorpVaultSecretCacheTests
     {
         var vault = new FakeVault();
         await using var ring = await TestRing.CreateAsync();
-        using var cache = new HashiCorpVaultSecretCache(FakeVault.Address, new StaticVaultToken(FakeVault.Token), ring,
+        using var cache = NewCache(FakeVault.Address, ring,
             new HashiCorpVaultSecretCacheOptions { HttpMessageHandler = vault });
         vault.Set("before", "v1 value");
         vault.Set("after", "v2 value");
@@ -489,7 +740,7 @@ public class HashiCorpVaultSecretCacheTests
     [Fact]
     public async Task TheDefaults_MakeNoCallUntilASecretIsRequested()
     {
-        using var cache = new HashiCorpVaultSecretCache(new Uri("http://127.0.0.1:8200"), new StaticVaultToken(FakeVault.Token), await TestRing.CreateAsync());
+        using var cache = NewCache(new Uri("http://127.0.0.1:8200"), await TestRing.CreateAsync());
 
         Assert.Equal(0, cache.Decrypt("not:a:path", new byte[16]));
     }
@@ -506,19 +757,21 @@ public class HashiCorpVaultSecretCacheTests
     {
         var ring = await TestRing.CreateAsync();
 
-        Assert.Throws<ArgumentException>(() => new HashiCorpVaultSecretCache(new Uri(address, UriKind.RelativeOrAbsolute), new StaticVaultToken(FakeVault.Token), ring));
+        Assert.Throws<ArgumentException>(() => NewCache(new Uri(address, UriKind.RelativeOrAbsolute), ring));
     }
 
     [Fact]
     public async Task TheConstructor_RejectsInvalidOptions()
     {
         var ring = await TestRing.CreateAsync();
-        var token = new StaticVaultToken(FakeVault.Token);
-        HashiCorpVaultSecretCache Create(HashiCorpVaultSecretCacheOptions options) => new(FakeVault.Address, token, ring, options);
+        var protector = ring.CreateProtector(HashiCorpVaultSecretCache.TokenPurpose);
+        var token = StaticVaultToken.Protect(protector, FakeVault.Token);
+        HashiCorpVaultSecretCache Create(HashiCorpVaultSecretCacheOptions options) => new(FakeVault.Address, token, protector, ring, options);
 
-        Assert.Throws<ArgumentNullException>(() => new HashiCorpVaultSecretCache(null!, token, ring));
-        Assert.Throws<ArgumentNullException>(() => new HashiCorpVaultSecretCache(FakeVault.Address, null!, ring));
-        Assert.Throws<ArgumentNullException>(() => new HashiCorpVaultSecretCache(FakeVault.Address, token, null!));
+        Assert.Throws<ArgumentNullException>(() => new HashiCorpVaultSecretCache(null!, token, protector, ring));
+        Assert.Throws<ArgumentNullException>(() => new HashiCorpVaultSecretCache(FakeVault.Address, null!, protector, ring));
+        Assert.Throws<ArgumentNullException>(() => new HashiCorpVaultSecretCache(FakeVault.Address, token, null!, ring));
+        Assert.Throws<ArgumentNullException>(() => new HashiCorpVaultSecretCache(FakeVault.Address, token, protector, null!));
         Assert.Throws<ArgumentException>(() => Create(new() { MountPath = "" }));
         Assert.Throws<ArgumentException>(() => Create(new() { MountPath = "../sys" }));
         Assert.Throws<ArgumentException>(() => Create(new() { MountPath = null! }));
@@ -546,7 +799,7 @@ public class HashiCorpVaultSecretCacheTests
         var ring = await TestRing.CreateAsync();
         using var handler = Handler(kind);
 
-        var e = Assert.Throws<ArgumentException>(() => new HashiCorpVaultSecretCache(FakeVault.Address, new StaticVaultToken(FakeVault.Token), ring,
+        var e = Assert.Throws<ArgumentException>(() => NewCache(FakeVault.Address, ring,
             new HashiCorpVaultSecretCacheOptions { HttpMessageHandler = handler }));
         Assert.Contains("AllowRedirects", e.Message, StringComparison.Ordinal);
     }
@@ -556,7 +809,7 @@ public class HashiCorpVaultSecretCacheTests
     public async Task AHandlerThatFollowsNoRedirects_IsAccepted(string kind)
     {
         using var handler = Handler(kind, redirects: false);
-        using var cache = new HashiCorpVaultSecretCache(FakeVault.Address, new StaticVaultToken(FakeVault.Token), await TestRing.CreateAsync(),
+        using var cache = NewCache(FakeVault.Address, await TestRing.CreateAsync(),
             new HashiCorpVaultSecretCacheOptions { HttpMessageHandler = handler });
 
         Assert.Equal(0, cache.Decrypt("not:a:path", new byte[16]));
@@ -567,7 +820,7 @@ public class HashiCorpVaultSecretCacheTests
     public async Task AHandlerThatFollowsRedirects_IsAccepted_WhenExplicitlyAllowed(string kind)
     {
         using var handler = Handler(kind);
-        using var cache = new HashiCorpVaultSecretCache(FakeVault.Address, new StaticVaultToken(FakeVault.Token), await TestRing.CreateAsync(),
+        using var cache = NewCache(FakeVault.Address, await TestRing.CreateAsync(),
             new HashiCorpVaultSecretCacheOptions { HttpMessageHandler = handler, AllowRedirects = true });
 
         Assert.Equal(0, cache.Decrypt("not:a:path", new byte[16]));
@@ -580,9 +833,9 @@ public class HashiCorpVaultSecretCacheTests
         using var unchained = new PassThrough(null);
         using var custom = new FakeVault();
 
-        using var first = new HashiCorpVaultSecretCache(FakeVault.Address, new StaticVaultToken(FakeVault.Token), ring,
+        using var first = NewCache(FakeVault.Address, ring,
             new HashiCorpVaultSecretCacheOptions { HttpMessageHandler = unchained });
-        using var second = new HashiCorpVaultSecretCache(FakeVault.Address, new StaticVaultToken(FakeVault.Token), ring,
+        using var second = NewCache(FakeVault.Address, ring,
             new HashiCorpVaultSecretCacheOptions { HttpMessageHandler = custom });
     }
 
@@ -596,15 +849,37 @@ public class HashiCorpVaultSecretCacheTests
     }
 
     [Theory]
+    [InlineData("")]
+    [InlineData("hvs.with space")]
+    [InlineData("hvs.line\nbreak")]
+    [InlineData("caf\u00e9")]
+    public async Task StaticVaultToken_Protect_RejectsATokenThatCantBeSent(string token)
+    {
+        var protector = (await TestRing.CreateAsync()).CreateProtector(HashiCorpVaultSecretCache.TokenPurpose);
+
+        Assert.Throws<ArgumentException>(() => StaticVaultToken.Protect(protector, token));
+    }
+
+    [Fact]
+    public void StaticVaultToken_Protect_RejectsANullProtector()
+        => Assert.Throws<ArgumentNullException>(() => StaticVaultToken.Protect(null!, FakeVault.Token));
+
+    [Theory]
     [InlineData(null)]
     [InlineData("")]
     [InlineData(" ")]
-    [InlineData("hvs.with space")]
-    [InlineData("hvs.line\nbreak")]
-    public void StaticVaultToken_RejectsATokenThatCantBeSent(string? token)
-        => Assert.ThrowsAny<ArgumentException>(() => new StaticVaultToken(token!));
+    public void StaticVaultToken_RejectsAnEmptyProtectedToken(string? protectedToken)
+        => Assert.ThrowsAny<ArgumentException>(() => new StaticVaultToken(protectedToken!));
 
     [Fact]
-    public async Task StaticVaultToken_ReturnsItsToken()
-        => Assert.Equal(FakeVault.Token, await new StaticVaultToken(FakeVault.Token).GetTokenAsync(CancellationToken.None));
+    public async Task StaticVaultToken_Protect_HoldsOnlyTheProtectedToken()
+    {
+        var protector = (await TestRing.CreateAsync()).CreateProtector(HashiCorpVaultSecretCache.TokenPurpose);
+
+        var held = await StaticVaultToken.Protect(protector, FakeVault.Token).GetTokenAsync(CancellationToken.None);
+
+        Assert.DoesNotContain(FakeVault.Token, held, StringComparison.Ordinal);
+        var token = new char[64];
+        Assert.Equal(FakeVault.Token, new string(token, 0, protector.Decrypt(held, token)));
+    }
 }

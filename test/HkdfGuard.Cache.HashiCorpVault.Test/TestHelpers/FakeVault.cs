@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using HkdfGuard.Abstractions;
 
 namespace HkdfGuard.Cache.HashiCorpVault.Test.TestHelpers;
 
@@ -33,8 +34,11 @@ internal sealed class FakeVault : HttpMessageHandler
     /// <summary>Every secret path read, in order.</summary>
     public ConcurrentQueue<string> Reads { get; } = new();
 
-    /// <summary>Every token a read was made with, in order.</summary>
+    /// <summary>Every token a read was made with, in order: copies, taken as each request arrived.</summary>
     public ConcurrentQueue<string> Tokens { get; } = new();
+
+    /// <summary>The X-Vault-Token header string of every read itself, to check what became of it.</summary>
+    public ConcurrentQueue<string> TokenHeaders { get; } = new();
 
     /// <summary>The X-Vault-Namespace header of every read, or null where it had none.</summary>
     public ConcurrentQueue<string?> Namespaces { get; } = new();
@@ -70,7 +74,9 @@ internal sealed class FakeVault : HttpMessageHandler
         }
 
         Assert.Equal("true", Assert.Single(request.Headers.GetValues("X-Vault-Request")));
-        var token = request.Headers.TryGetValues("X-Vault-Token", out var tokens) ? Assert.Single(tokens) : "";
+        var header = request.Headers.TryGetValues("X-Vault-Token", out var tokens) ? Assert.Single(tokens) : "";
+        TokenHeaders.Enqueue(header);
+        var token = new string(header.AsSpan());
         Namespaces.Enqueue(request.Headers.TryGetValues("X-Vault-Namespace", out var namespaces) ? Assert.Single(namespaces) : null);
         Tokens.Enqueue(token);
 
@@ -147,7 +153,11 @@ internal sealed class FakeVault : HttpMessageHandler
     }
 }
 
-/// <summary>A token provider that counts its calls, and can hand out any token or fail.</summary>
+/// <summary>
+/// A token provider that counts its calls, and can hand out any token or fail. Each token Next
+/// gives is protected by <see cref="Protector"/>, as a real provider's is, unless
+/// <see cref="Unprotected"/>.
+/// </summary>
 internal sealed class FakeTokenProvider : IVaultTokenProvider
 {
     private int _calls;
@@ -156,5 +166,15 @@ internal sealed class FakeTokenProvider : IVaultTokenProvider
 
     public Func<int, CancellationToken, ValueTask<string>> Next { get; set; } = (_, _) => ValueTask.FromResult(FakeVault.Token);
 
-    public ValueTask<string> GetTokenAsync(CancellationToken cancellationToken) => Next(Interlocked.Increment(ref _calls), cancellationToken);
+    /// <summary>Protects every token handed out; the tests set it to the cache's own token protector.</summary>
+    public IDataProtector? Protector { get; set; }
+
+    /// <summary>Hands tokens out exactly as Next gives them, as a provider that doesn't protect them would.</summary>
+    public bool Unprotected { get; init; }
+
+    public async ValueTask<string> GetTokenAsync(CancellationToken cancellationToken)
+    {
+        var token = await Next(Interlocked.Increment(ref _calls), cancellationToken);
+        return Unprotected || Protector is null ? token : Protector.Encrypt(token);
+    }
 }

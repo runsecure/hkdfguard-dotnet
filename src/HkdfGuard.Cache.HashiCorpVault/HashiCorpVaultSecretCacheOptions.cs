@@ -29,8 +29,38 @@ public sealed class HashiCorpVaultSecretCacheOptions
     /// the root namespace. Sent as X-Vault-Namespace, as VAULT_NAMESPACE is.</summary>
     public string? Namespace { get; init; }
 
-    /// <summary>How long one fetch may take, its token and Vault's whole response included. Default 30 seconds.</summary>
+    /// <summary>The fewest retries <see cref="RetryCount"/> allows.</summary>
+    public const int MinRetryCount = 3;
+
+    /// <summary>The most retries <see cref="RetryCount"/> allows.</summary>
+    public const int MaxRetryCount = 10;
+
+    /// <summary>The longest wait between retries, before the random 0-100 ms each adds.</summary>
+    public static readonly TimeSpan MaxRetryDelay = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// How long one attempt may take: getting the token, or one request and Vault's whole response.
+    /// Default 30 seconds. A fetch that keeps failing transiently makes up to
+    /// <see cref="RetryCount"/> + 1 attempts, with the waits between them.
+    /// </summary>
     public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How many times a request that failed transiently is retried: one that got no answer
+    /// (connection refused or reset, DNS), lost its connection mid-response, timed out, or was
+    /// answered 429 or a 5xx other than 501 (Vault answers 503 while sealed or electing a leader).
+    /// Anything else - 403, a 404 naming an error, a token provider's failure, the caller's
+    /// cancellation - isn't retried. <see cref="MinRetryCount"/>-<see cref="MaxRetryCount"/>; default 3.
+    /// </summary>
+    public int RetryCount { get; init; } = MinRetryCount;
+
+    /// <summary>
+    /// The wait before the first retry, doubling before each retry after it, up to
+    /// <see cref="MaxRetryDelay"/>. Every wait also adds a random 0-100 ms, so many clients
+    /// reconnecting at once - after a network outage, say - don't all retry together. Zero to
+    /// <see cref="MaxRetryDelay"/>; default 200 ms.
+    /// </summary>
+    public TimeSpan RetryDelay { get; init; } = TimeSpan.FromMilliseconds(200);
 
     /// <summary>
     /// Sends every request, e.g. a SocketsHttpHandler trusting a private CA, or a proxy. It must not
