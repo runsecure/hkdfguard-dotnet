@@ -34,9 +34,22 @@ public sealed class HashiCorpVaultSecretCacheOptions
 
     /// <summary>
     /// Sends every request, e.g. a SocketsHttpHandler trusting a private CA, or a proxy. It must not
-    /// follow redirects, which would carry the token wherever they point, nor log response content.
-    /// Not disposed by the cache. Null for the cache's own handler, which follows no redirects and
-    /// trusts the operating system's certificate store.
+    /// log response content. Not disposed by the cache. Null for the cache's own handler, which
+    /// follows no redirects and trusts the operating system's certificate store.
+    /// <para>
+    /// A handler that follows redirects is refused unless <see cref="AllowRedirects"/> is set: when
+    /// .NET follows a redirect it drops only the Authorization header, so X-Vault-Token would go
+    /// wherever the redirect points. Set AllowAutoRedirect to false on a SocketsHttpHandler or
+    /// HttpClientHandler - both default to true. The handler at the bottom of a chain of
+    /// DelegatingHandlers is the one checked; one of another type can't be, and is accepted.
+    /// </para>
     /// </summary>
     public HttpMessageHandler? HttpMessageHandler { get; init; }
+
+    /// <summary>
+    /// Accepts an <see cref="HttpMessageHandler"/> that follows redirects, sending the Vault token
+    /// along to every redirect target. Set it only when every address a redirect could lead to may
+    /// see the token. Default false.
+    /// </summary>
+    public bool AllowRedirects { get; init; }
 }

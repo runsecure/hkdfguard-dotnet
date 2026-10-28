@@ -124,7 +124,8 @@ public static class SecretJsonBody
             }
             catch (JsonException e)
             {
-                throw new InvalidDataException("The response body isn't valid JSON.", e);
+                // Not chained: the reader's message quotes the byte it rejected, which may be in the secret.
+                throw new InvalidDataException($"The response body isn't valid JSON (at byte {e.BytePositionInLine} of line {e.LineNumber}).");
             }
 
             return target.TextProperty is null ? [] : Redact(json, target.Secrets);

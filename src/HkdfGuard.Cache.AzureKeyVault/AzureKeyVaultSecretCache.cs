@@ -49,7 +49,12 @@ public sealed class AzureKeyVaultSecretCache : RemoteSecretCache
     /// <param name="keyRing">Supplies the key every fetched secret is encrypted under. Owned by the
     /// caller: the cache never disposes keys.</param>
     /// <param name="options">Options for the cache's Key Vault client; null for the defaults. The
-    /// cache adds its own pipeline policy to them.</param>
+    /// cache adds its own pipeline policy (SecretCapturePolicy) to this instance - the SDK has no way
+    /// to copy one - so the caller's object is changed. The policy acts only on the cache's own
+    /// fetches: another SecretClient built from the same options reads secrets as usual. Each cache
+    /// built from the same options adds the policy again; the extra copies find the value already
+    /// blanked and do nothing, so prefer a fresh instance per cache. Changes made to the options
+    /// after the constructor returns don't reach the cache's client.</param>
     /// <param name="logger">Optional; see RemoteSecretCache.</param>
     /// <exception cref="ArgumentNullException">vaultUri, credential or keyRing is null</exception>
     /// <exception cref="ArgumentException">options log response content, which would log every

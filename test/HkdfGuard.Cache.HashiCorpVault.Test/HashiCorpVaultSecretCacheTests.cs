@@ -529,6 +529,72 @@ public class HashiCorpVaultSecretCacheTests
         Assert.Throws<ArgumentOutOfRangeException>(() => Create(new() { Timeout = TimeSpan.Zero }));
     }
 
+    public static TheoryData<string> RedirectingHandlers => ["sockets", "client", "wrapped"];
+
+    // A handler of each kind, with its default AllowAutoRedirect (true) unless redirects is given.
+    private static HttpMessageHandler Handler(string kind, bool? redirects = null) => kind switch
+    {
+        "sockets" => new SocketsHttpHandler { AllowAutoRedirect = redirects ?? true },
+        "client" => new HttpClientHandler { AllowAutoRedirect = redirects ?? true },
+        _ => new PassThrough(new PassThrough(Handler("sockets", redirects))),
+    };
+
+    [Theory]
+    [MemberData(nameof(RedirectingHandlers))]
+    public async Task AHandlerThatFollowsRedirects_IsRefused(string kind)
+    {
+        var ring = await TestRing.CreateAsync();
+        using var handler = Handler(kind);
+
+        var e = Assert.Throws<ArgumentException>(() => new HashiCorpVaultSecretCache(FakeVault.Address, new StaticVaultToken(FakeVault.Token), ring,
+            new HashiCorpVaultSecretCacheOptions { HttpMessageHandler = handler }));
+        Assert.Contains("AllowRedirects", e.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [MemberData(nameof(RedirectingHandlers))]
+    public async Task AHandlerThatFollowsNoRedirects_IsAccepted(string kind)
+    {
+        using var handler = Handler(kind, redirects: false);
+        using var cache = new HashiCorpVaultSecretCache(FakeVault.Address, new StaticVaultToken(FakeVault.Token), await TestRing.CreateAsync(),
+            new HashiCorpVaultSecretCacheOptions { HttpMessageHandler = handler });
+
+        Assert.Equal(0, cache.Decrypt("not:a:path", new byte[16]));
+    }
+
+    [Theory]
+    [MemberData(nameof(RedirectingHandlers))]
+    public async Task AHandlerThatFollowsRedirects_IsAccepted_WhenExplicitlyAllowed(string kind)
+    {
+        using var handler = Handler(kind);
+        using var cache = new HashiCorpVaultSecretCache(FakeVault.Address, new StaticVaultToken(FakeVault.Token), await TestRing.CreateAsync(),
+            new HashiCorpVaultSecretCacheOptions { HttpMessageHandler = handler, AllowRedirects = true });
+
+        Assert.Equal(0, cache.Decrypt("not:a:path", new byte[16]));
+    }
+
+    [Fact]
+    public async Task ADelegatingHandlerWithNoInnerHandler_OrOfAnotherType_CantBeChecked_AndIsAccepted()
+    {
+        var ring = await TestRing.CreateAsync();
+        using var unchained = new PassThrough(null);
+        using var custom = new FakeVault();
+
+        using var first = new HashiCorpVaultSecretCache(FakeVault.Address, new StaticVaultToken(FakeVault.Token), ring,
+            new HashiCorpVaultSecretCacheOptions { HttpMessageHandler = unchained });
+        using var second = new HashiCorpVaultSecretCache(FakeVault.Address, new StaticVaultToken(FakeVault.Token), ring,
+            new HashiCorpVaultSecretCacheOptions { HttpMessageHandler = custom });
+    }
+
+    private sealed class PassThrough : DelegatingHandler
+    {
+        public PassThrough(HttpMessageHandler? inner)
+        {
+            if (inner is not null)
+                InnerHandler = inner;
+        }
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("")]

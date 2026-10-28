@@ -76,7 +76,8 @@ public sealed class HashiCorpVaultSecretCache : RemoteSecretCache, IDisposable
     /// <param name="logger">Optional; see RemoteSecretCache.</param>
     /// <exception cref="ArgumentNullException">address, tokenProvider or keyRing is null</exception>
     /// <exception cref="ArgumentException">address isn't https (or http on loopback), or holds
-    /// credentials, a query or a fragment; or the mount path, default key or namespace isn't one</exception>
+    /// credentials, a query or a fragment; or the mount path, default key or namespace isn't one; or
+    /// the HttpMessageHandler follows redirects without AllowRedirects</exception>
     /// <exception cref="ArgumentOutOfRangeException">The KV version isn't one, or the timeout isn't positive</exception>
     public HashiCorpVaultSecretCache(Uri address, IVaultTokenProvider tokenProvider, IKeyRing keyRing,
         HashiCorpVaultSecretCacheOptions? options = null, ILogger<HashiCorpVaultSecretCache>? logger = null)
@@ -95,6 +96,10 @@ public sealed class HashiCorpVaultSecretCache : RemoteSecretCache, IDisposable
         if (!Enum.IsDefined(options.KvVersion))
             throw new ArgumentOutOfRangeException(nameof(options), options.KvVersion, "The KV version must be V1 or V2.");
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(options.Timeout, TimeSpan.Zero, nameof(options));
+        if (options.HttpMessageHandler is { } supplied && !options.AllowRedirects && FollowsRedirects(supplied))
+            throw new ArgumentException(
+                "The HttpMessageHandler follows redirects, which would send the Vault token wherever they point. Set its AllowAutoRedirect to false, or set AllowRedirects if every redirect target may see the token.",
+                nameof(options));
 
         _tokenProvider = tokenProvider;
         _timeout = options.Timeout;
@@ -220,6 +225,21 @@ public sealed class HashiCorpVaultSecretCache : RemoteSecretCache, IDisposable
             throw new ArgumentException($"Vault's address '{address}' must not hold credentials, a query or a fragment.", nameof(address));
 
         return new Uri(address.GetLeftPart(UriPartial.Path).TrimEnd('/') + "/v1/");
+    }
+
+    // Whether the handler at the bottom of handler's DelegatingHandler chain follows redirects. One
+    // of a type other than SocketsHttpHandler or HttpClientHandler can't be told, so counts as not.
+    private static bool FollowsRedirects(HttpMessageHandler handler)
+    {
+        while (handler is DelegatingHandler { InnerHandler: { } inner })
+            handler = inner;
+
+        return handler switch
+        {
+            SocketsHttpHandler sockets => sockets.AllowAutoRedirect,
+            HttpClientHandler client => client.AllowAutoRedirect,
+            _ => false,
+        };
     }
 
     // '/'-separated segments, none empty, "." or "..": a path that stays where it's put.

@@ -274,10 +274,11 @@ public class SecretKeysTests
     public async Task ADuplicatedKey_IsRefused_AndNothingIsCached()
     {
         var cache = await CreateAsync();
-        cache.OnFetch = (_, sink) => SetJson(sink, """{"k":"a","other":"b","k":"c"}""");
+        cache.OnFetch = (_, sink) => SetJson(sink, """{"dup-key-name":"a","other":"b","dup-key-name":"c"}""");
 
+        // The key is part of a name, which is logged only with sensitive logging on; an error log carries the message.
         var e = Assert.Throws<InvalidDataException>(() => cache.Decrypt("s#other", new byte[16]));
-        Assert.Contains("'k'", e.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("dup-key-name", e.Message, StringComparison.Ordinal);
 
         cache.OnFetch = null;
         Assert.Equal(0, cache.Decrypt("s", new byte[16]));

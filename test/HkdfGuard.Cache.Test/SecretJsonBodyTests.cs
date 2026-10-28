@@ -100,6 +100,20 @@ public class SecretJsonBodyTests
         Assert.Equal(0, cache.Decrypt("item", new byte[16]));
     }
 
+    [Theory]
+    [InlineData("""{"value":"s3cr\qt"}""", 15)]
+    [InlineData("{\"value\":\"s3cr\u0001t\"}", 14)]
+    public async Task AMalformedSecret_IsReportedByPositionOnly_NeverByTheByteRejected(string body, long position)
+    {
+        var cache = await CreateCacheAsync();
+        cache.OnFetch = (_, sink) => SecretJsonBody.Capture(new MemoryStream(Encoding.UTF8.GetBytes(body)), sink, "value");
+
+        var e = Assert.Throws<InvalidDataException>(() => cache.Decrypt("item", new byte[16]));
+
+        Assert.Equal($"The response body isn't valid JSON (at byte {position} of line 0).", e.Message);
+        Assert.Null(e.InnerException);
+    }
+
     [Fact]
     public async Task ABodyLargerThanTheFirstBuffer_IsReadWhole()
     {

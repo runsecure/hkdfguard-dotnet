@@ -35,8 +35,9 @@ internal static class SecretJsonKeys
         while (reader.Read() && reader.TokenType == JsonTokenType.PropertyName)
         {
             var key = reader.GetString()!;
+            // Not named: a key is part of a lookup name, logged only with sensitive logging on.
             if (!seen.Add(key))
-                throw new InvalidDataException($"The secret holds the key '{key}' more than once.");
+                throw new InvalidDataException("The secret holds a key more than once.");
 
             reader.Read();
             if (RemoteSecretCache.IsValidKey(key) && reader.TokenType is JsonTokenType.String or JsonTokenType.Number or JsonTokenType.True or JsonTokenType.False)

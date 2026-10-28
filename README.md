@@ -727,7 +727,10 @@ options that log response content.
 
 To use your own transport, retries or timeouts, pass them in the options each cache takes
 (`SecretClientOptions`, `AmazonSecretsManagerConfig`, or a gRPC `CallInvoker`) rather than a
-ready-made client.
+ready-made client. The Key Vault cache adds its capture policy to the `SecretClientOptions`
+instance you pass, since the SDK can't copy one. The policy acts only on the cache's own fetches,
+so another `SecretClient` built from the same options is unaffected; still, prefer a fresh options
+instance per cache, as each cache built from it adds the policy again.
 
 ### Caching AWS Secrets Manager secrets
 
@@ -802,7 +805,10 @@ provider can log in (AppRole, Kubernetes, a certificate) and renew or replace it
 likes. `StaticVaultToken` uses a token you already hold, which nothing renews: once it expires
 every fetch fails with 403. The address must be https except on loopback, and the cache's own HTTP
 handler follows no redirects, which would carry the token elsewhere; to trust a private CA or use a
-proxy, pass a handler in the options (it must not follow redirects either). `Namespace` sets
+proxy, pass a handler in the options. A `SocketsHttpHandler` or `HttpClientHandler` follows
+redirects by default, and .NET drops only the `Authorization` header when it does, so the cache
+refuses one with `AllowAutoRedirect` still on - set it to `false`, or set the cache's
+`AllowRedirects` if every redirect target may see the token. `Namespace` sets
 `X-Vault-Namespace` for Vault Enterprise.
 
 Paths match exactly, as Vault's do. A name whose path segments aren't ASCII letters, digits, `-`,
