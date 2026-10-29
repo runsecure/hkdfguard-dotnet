@@ -285,6 +285,7 @@ Node/Python mirror this layering, adding their own consumer branches as they cat
 | `HkdfGuard.KeyWrapping.AwsKms` | `AwsKmsKeyWrapper` - an `IKeyWrapper` over one symmetric AWS KMS key (`Encrypt`/`Decrypt`/`GenerateDataKeyWithoutPlaintext`, the key pinned on every `Decrypt`, an optional encryption context bound as AAD), reading key files through `HkdfGuard.SecureFile`. Depends on `HkdfGuard.Abstractions`, `HkdfGuard.SecureFile` and `AWSSDK.KeyManagementService`. |
 | `HkdfGuard.KeyWrapping.AzureKeyVault` | `AzureKeyVaultKeyWrapper` - an `IKeyWrapper` over two Azure Key Vault keys: an RSA key wraps each DEK (RSA-OAEP-256) and a separate EC P-256 key signs each wrapped DEK (ES256), verified before every unwrap, so only principals allowed to sign can create a key file it accepts. Both keys pinned by name, rotation-safe by version; an optional context bound into the signature; key files read through `HkdfGuard.SecureFile`. Depends on `HkdfGuard.Abstractions`, `HkdfGuard.SecureFile` and `Azure.Security.KeyVault.Keys`. |
 | `HkdfGuard.KeyWrapping.GoogleKms` | `GoogleKmsKeyWrapper` - an `IKeyWrapper` over one symmetric Google Cloud KMS key (`Encrypt`/`Decrypt`, the key pinned on every `Decrypt`, a fixed HkdfGuard label and an optional context bound as AAD, CRC32C checksums on every request and response), reading key files through `HkdfGuard.SecureFile`. Depends on `HkdfGuard.Abstractions`, `HkdfGuard.SecureFile` and `Google.Cloud.Kms.V1`. |
+| `HkdfGuard.KeyWrapping.HashiCorpVault` | `HashiCorpVaultTransitKeyWrapper` - an `IKeyWrapper` over one key in a HashiCorp Vault transit secrets engine (`encrypt`/`decrypt`/`datakey/wrapped` over Vault's HTTP API, the key pinned by its path, an optional context bound as `associated_data` and never silently dropped), with retries, no redirects, and the token supplied by an `IVaultTokenSource` into pinned memory and zeroed after each request. Reads key files through `HkdfGuard.SecureFile`. Depends on `HkdfGuard.Abstractions` and `HkdfGuard.SecureFile` only. |
 | `HkdfGuard.DataEncryptionKey` | The application-facing API: `KeyRing`/`KeyRingBuilder`, `IDataProtector`/`DataProtector`, `DataEncryptionKey` (the `IDataEncryptionKey` over an `ICryptoProvider` - output sizing and telemetry; disposing it disposes its provider), and the default `enc::v{version}::{base64}` wire format. Depends on `HkdfGuard.Abstractions`/`HkdfGuard.Diagnostics`. |
 | `HkdfGuard.Cache` | `ProtectedCache` (an `IProtectedCache` backed by an `IKeyRing` - encrypts under the ring's current key on Add/AddOrUpdate and records its version, reveals under that version on Decrypt, so it follows key rotation; nothing held as plaintext beyond a single call; each value is bound to its name as AAD, so a ciphertext under any other name fails authentication, and names match ignoring ASCII case only) `ProtectedCacheCollection` (aggregates multiple `IProtectedReadOnlyCache` sources behind one read-only surface, checked in registration order), and `RemoteSecretCache` (the shared base of the secret-store caches below: fetch-on-miss of one named secret through a `SecretValueSink` bound to that name - its whole value and, by `secret#key`, the keys it holds, all from one fetch - one fetch per secret at a time, missing values not remembered, exact or ASCII-case-insensitive name matching, and telemetry - a subclass supplies only `IsValidName` and `Fetch`) with `SecretJsonBody` (takes a secret out of a JSON response body into pinned memory and returns the body with it blanked, for an SDK to parse). |
 | `HkdfGuard.Cache.AzureKeyVault` | `AzureKeyVaultSecretCache` - a `RemoteSecretCache` over one Azure Key Vault's secrets: on a miss it reads just the requested secret with `GetSecret`, taking the value out of the response body in pinned memory (a pipeline policy) so `SecretClient` never holds it as a string, encrypts it under the ring's current key bound to its name, and caches the ciphertext. Never lists the vault (needs only `get` on secrets); names Key Vault can't hold are reported missing without a call. Depends on `HkdfGuard.Cache` and `Azure.Security.KeyVault.Secrets`. |
@@ -294,7 +295,7 @@ Node/Python mirror this layering, adding their own consumer branches as they cat
 | `HkdfGuard.EncryptedConfiguration` | `ProtectedConfigurationRoot` (an `IProtectedConfigurationRoot`) - wraps an `IConfigurationRoot`, revealing values formatted as protected secrets via a `KeyRing`; configuration itself only ever holds ciphertext, and `Decrypt` reads fresh from the underlying root every time so `Reload` takes effect immediately. Each value is bound to its own configuration key (`ProtectedConfigurationPurpose`), so a value copied to another key fails to decrypt. |
 | `HkdfGuard.DependencyInjection` | `AddKeyRingAsync` - builds a `KeyRing` asynchronously at registration and registers it as a singleton in an `IServiceCollection`. |
 | `HkdfGuard.Options` | `HkdfGuardOptions`/`HkdfGuardOptionsValidator`/`HkdfGuardOptionsExtensions.ApplyTo` - a plain-data mirror of `KeyRingBuilder`'s configuration surface (`ServiceName`, `KeyRefreshInterval`, `MaxRefreshFailures`/`FailOpenOnRefreshFailure`, key files, ephemeral keys), for binding a `KeyRing`'s identity/policy/key files from configuration. |
-| `HkdfGuard.Diagnostics.Test`, `HkdfGuard.Abstractions.Test`, `HkdfGuard.CryptoProvider.AesGcm256.Test`, `HkdfGuard.KeyWrapping.V1.Test`, `HkdfGuard.SecureFile.Test`, `HkdfGuard.KeyWrapping.AwsKms.Test`, `HkdfGuard.KeyWrapping.AzureKeyVault.Test`, `HkdfGuard.KeyWrapping.GoogleKms.Test`, `HkdfGuard.DataEncryptionKey.Test`, `HkdfGuard.Cache.Test`, `HkdfGuard.Cache.AzureKeyVault.Test`, `HkdfGuard.Cache.AwsSecretsManager.Test`, `HkdfGuard.Cache.GoogleSecretManager.Test`, `HkdfGuard.Cache.HashiCorpVault.Test`, `HkdfGuard.EncryptedConfiguration.Test`, `HkdfGuard.DependencyInjection.Test`, `HkdfGuard.Options.Test` | xUnit test suites, maintained at full line/branch coverage for their respective projects. |
+| `HkdfGuard.Diagnostics.Test`, `HkdfGuard.Abstractions.Test`, `HkdfGuard.CryptoProvider.AesGcm256.Test`, `HkdfGuard.KeyWrapping.V1.Test`, `HkdfGuard.SecureFile.Test`, `HkdfGuard.KeyWrapping.AwsKms.Test`, `HkdfGuard.KeyWrapping.AzureKeyVault.Test`, `HkdfGuard.KeyWrapping.GoogleKms.Test`, `HkdfGuard.KeyWrapping.HashiCorpVault.Test`, `HkdfGuard.DataEncryptionKey.Test`, `HkdfGuard.Cache.Test`, `HkdfGuard.Cache.AzureKeyVault.Test`, `HkdfGuard.Cache.AwsSecretsManager.Test`, `HkdfGuard.Cache.GoogleSecretManager.Test`, `HkdfGuard.Cache.HashiCorpVault.Test`, `HkdfGuard.EncryptedConfiguration.Test`, `HkdfGuard.DependencyInjection.Test`, `HkdfGuard.Options.Test` | xUnit test suites, maintained at full line/branch coverage for their respective projects. |
 
 Requires **.NET 10** (`net10.0`).
 
@@ -583,6 +584,34 @@ As with AWS KMS, any principal allowed to encrypt under the key can create a key
 accepts: give the application `roles/cloudkms.cryptoKeyDecrypter` only.
 [Wrap keys with Google Cloud KMS](docs/how-to/use-google-kms.md) covers creating the key, the role
 for each identity, and rotation.
+
+### Wrapping under HashiCorp Vault transit instead
+
+`HashiCorpVaultTransitKeyWrapper` (package `HkdfGuard.KeyWrapping.HashiCorpVault`) is an
+`IKeyWrapper` over one key in a Vault transit secrets engine, called over Vault's HTTP API with no
+SDK. The key is pinned by its path on every request; an optional context is bound as
+`associated_data`. The token comes from an `IVaultTokenSource` (`StaticVaultTokenSource` for one you
+hold), copied into pinned memory and zeroed once each request is sent:
+
+```csharp
+using var token = new StaticVaultTokenSource(Environment.GetEnvironmentVariable("VAULT_TOKEN"));
+using var wrapper = new HashiCorpVaultTransitKeyWrapper(
+    new Uri("https://vault.example.com:8200"), "myapp-kek", token, context: "my.service");
+```
+
+- `WrapAsync` calls `encrypt` and `UnwrapAsync` calls `decrypt`. Without a context,
+  `GenerateAndWrapAsync` calls `datakey/wrapped`, so the plaintext DEK never leaves Vault; with one it
+  generates the DEK locally and calls `encrypt`, because `datakey/wrapped` ignores `associated_data`.
+  A response saying Vault ignored a parameter is refused, so a context is never silently dropped.
+- Give each role `update`, never `create`, on just the paths it calls: with `create`, `encrypt` on a
+  mistyped key name makes a new key. A process that only reads key files needs only `decrypt`.
+- The address must be https except on loopback; the wrapper follows no redirects, and retries
+  transient failures (no answer, 429, 5xx other than 501) with backoff and jitter.
+- Failures surface as `CryptographicException` naming Vault's status and errors; a failed unwrap
+  zeroes the caller's buffer. Key files are read through `HkdfGuard.SecureFile`, as for AWS KMS.
+
+[Wrap keys with HashiCorp Vault transit](docs/how-to/use-hashicorp-vault-transit.md) covers creating
+the key, the policy for each role, tokens and options.
 
 ### 2. Build a `KeyRing`
 

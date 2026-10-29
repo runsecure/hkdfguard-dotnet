@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="HkdfGuard.KeyWrapping.HashiCorpVault.Test" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HkdfGuard.Abstractions\HkdfGuard.Abstractions.csproj" />
+    <ProjectReference Include="..\HkdfGuard.SecureFile\HkdfGuard.SecureFile.csproj" />
+  </ItemGroup>
+
+</Project>
