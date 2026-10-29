@@ -12,6 +12,7 @@ public static class ActivityNames
         public const string Add = "hkdfguard.cache.add";
         public const string AddOrUpdate = "hkdfguard.cache.add_or_update";
         public const string Decrypt = "hkdfguard.cache.decrypt";
+        public const string Populate = "hkdfguard.cache.populate";
     }
 
     public static class DataProtection

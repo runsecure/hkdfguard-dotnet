@@ -4,8 +4,10 @@ namespace HkdfGuard.Diagnostics;
 
 /// <summary>
 /// Cache component instruments, built on HkdfGuardTelemetry.Cache.Meter. Operations counts every
-/// ProtectedCache Add/AddOrUpdate call, tagged with AttributeNames.OperationName (which
-/// ActivityNames.Cache constant ran) and AttributeNames.Result ("success" or "error").
+/// ProtectedCache Add/AddOrUpdate call and every fetch a populating cache (e.g.
+/// AzureKeyVaultSecretCache, AwsSecretsManagerSecretCache, GoogleSecretManagerSecretCache) makes on a miss, tagged with AttributeNames.OperationName (which
+/// ActivityNames.Cache constant ran) and AttributeNames.Result ("success" or "error", or
+/// "not_found" for a fetch whose source has no such value).
 /// </summary>
 public static class CacheMetrics
 {

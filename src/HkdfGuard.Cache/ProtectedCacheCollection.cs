@@ -90,4 +90,73 @@ public sealed class ProtectedCacheCollection : IProtectedReadOnlyCache
         maxLength = 0;
         return false;
     }
+
+    /// <inheritdoc/>
+    /// <remarks>Each source is asked with its own DecryptAsync, so one that fetches over the network
+    /// doesn't block.</remarks>
+    public async ValueTask<int> DecryptAsync(string name, Memory<byte> result, CancellationToken cancellationToken = default)
+    {
+        using var activity = StartDecryptActivity(name);
+        try
+        {
+            foreach (var source in _sources)
+            {
+                var written = await source.DecryptAsync(name, result, cancellationToken).ConfigureAwait(false);
+                if (written > 0)
+                    return written;
+            }
+
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            ComponentTelemetry.RecordException(activity, ex);
+            throw;
+        }
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>Each source is asked with its own DecryptAsync, so one that fetches over the network
+    /// doesn't block.</remarks>
+    public async ValueTask<int> DecryptAsync(string name, Memory<char> result, CancellationToken cancellationToken = default)
+    {
+        using var activity = StartDecryptActivity(name);
+        try
+        {
+            foreach (var source in _sources)
+            {
+                var written = await source.DecryptAsync(name, result, cancellationToken).ConfigureAwait(false);
+                if (written > 0)
+                    return written;
+            }
+
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            ComponentTelemetry.RecordException(activity, ex);
+            throw;
+        }
+    }
+
+    /// <inheritdoc/>
+    public async ValueTask<int> GetMaxDecryptedLengthAsync(string name, CancellationToken cancellationToken = default)
+    {
+        foreach (var source in _sources)
+        {
+            var maxLength = await source.GetMaxDecryptedLengthAsync(name, cancellationToken).ConfigureAwait(false);
+            if (maxLength > 0)
+                return maxLength;
+        }
+
+        return 0;
+    }
+
+    private static System.Diagnostics.Activity? StartDecryptActivity(string name)
+    {
+        var activity = HkdfGuardTelemetry.Cache.ActivitySource.StartActivity(ActivityNames.Cache.Decrypt);
+        if (HkdfGuardTelemetry.Cache.EnableSensitiveLogging)
+            HkdfGuardTelemetry.Cache.LogSensitiveOperation(activity, ActivityNames.Cache.Decrypt, (AttributeNames.Name, name));
+        return activity;
+    }
 }

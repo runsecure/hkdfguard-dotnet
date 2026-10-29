@@ -83,25 +83,27 @@ public abstract class ProtectedCacheBase(IKeyRing keyRing) : IProtectedReadOnlyC
     /// <returns>True if name was successfully populated into Data as a result of this call</returns>
     protected virtual bool TryPopulate(string name) => false;
 
+    /// <summary>
+    /// <see cref="TryPopulate"/> for DecryptAsync/GetMaxDecryptedLengthAsync: override it too, to do
+    /// the same without blocking. The default implementation calls <see cref="TryPopulate"/>.
+    /// </summary>
+    /// <param name="name">The name that was missing from Data</param>
+    /// <param name="cancellationToken">Cancels the population</param>
+    /// <returns>True if name was successfully populated into Data as a result of this call</returns>
+    protected virtual ValueTask<bool> TryPopulateAsync(string name, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(TryPopulate(name));
+    }
+
     /// <inheritdoc/>
     /// <exception cref="KeyNotFoundException">The entry's key version is no longer in the ring</exception>
     public int Decrypt(string name, Span<byte> result)
     {
-        using var activity = HkdfGuardTelemetry.Root.ActivitySource.StartActivity(ActivityNames.Cache.Decrypt);
-        if (HkdfGuardTelemetry.Root.EnableSensitiveLogging)
-            HkdfGuardTelemetry.Root.LogSensitiveOperation(activity, ActivityNames.Cache.Decrypt, (AttributeNames.Name, name));
-
+        using var activity = StartDecryptActivity(name);
         try
         {
-            if (!TryGetEntry(name, out var entry))
-                return 0;
-
-            var key = keyRing.Get(entry.KeyVersion);
-            var aadLength = AadLength(name);
-            Span<byte> aad = aadLength <= MaxStackAadBytes ? stackalloc byte[aadLength] : new byte[aadLength];
-            WriteAad(name, aad);
-
-            return key.Decrypt(entry.Value, aad, result);
+            return TryGetEntry(name, out var entry) ? DecryptEntry(name, entry, result) : 0;
         }
         catch (Exception ex)
         {
@@ -114,37 +116,46 @@ public abstract class ProtectedCacheBase(IKeyRing keyRing) : IProtectedReadOnlyC
     /// <exception cref="KeyNotFoundException">The entry's key version is no longer in the ring</exception>
     public int Decrypt(string name, Span<char> result)
     {
-        using var activity = HkdfGuardTelemetry.Root.ActivitySource.StartActivity(ActivityNames.Cache.Decrypt);
-        if (HkdfGuardTelemetry.Root.EnableSensitiveLogging)
-            HkdfGuardTelemetry.Root.LogSensitiveOperation(activity, ActivityNames.Cache.Decrypt, (AttributeNames.Name, name));
-
+        using var activity = StartDecryptActivity(name);
         try
         {
-            if (!TryGetEntry(name, out var entry))
-                return 0;
+            return TryGetEntry(name, out var entry) ? DecryptEntry(name, entry, result) : 0;
+        }
+        catch (Exception ex)
+        {
+            ComponentTelemetry.RecordException(activity, ex);
+            throw;
+        }
+    }
 
-            var key = keyRing.Get(entry.KeyVersion);
-            var aadLength = AadLength(name);
-            Span<byte> aad = aadLength <= MaxStackAadBytes ? stackalloc byte[aadLength] : new byte[aadLength];
-            WriteAad(name, aad);
+    /// <inheritdoc/>
+    /// <exception cref="KeyNotFoundException">The entry's key version is no longer in the ring</exception>
+    public async ValueTask<int> DecryptAsync(string name, Memory<byte> result, CancellationToken cancellationToken = default)
+    {
+        using var activity = StartDecryptActivity(name);
+        try
+        {
+            return await GetEntryAsync(name, cancellationToken).ConfigureAwait(false) is { } entry
+                ? DecryptEntry(name, entry, result.Span)
+                : 0;
+        }
+        catch (Exception ex)
+        {
+            ComponentTelemetry.RecordException(activity, ex);
+            throw;
+        }
+    }
 
-            // AEAD ciphertext is always at least as long as the plaintext it encloses, so
-            // entry.Value.Length is a safe upper bound for the decrypted UTF8 byte count. On the
-            // stack, or pinned when too large: never somewhere the GC can copy it, nor a pooled
-            // array another caller would later be handed.
-            var encrypted = entry.Value;
-            Span<byte> plaintextBytes = encrypted.Length <= ArrayUtility.MaxStackBytes
-                ? stackalloc byte[encrypted.Length]
-                : ArrayUtility.AllocatePinned<byte>(encrypted.Length);
-            try
-            {
-                var decryptedLength = key.Decrypt(encrypted, aad, plaintextBytes);
-                return Encoding.UTF8.GetChars(plaintextBytes[..decryptedLength], result);
-            }
-            finally
-            {
-                ArrayUtility.ZeroMemory(plaintextBytes);
-            }
+    /// <inheritdoc/>
+    /// <exception cref="KeyNotFoundException">The entry's key version is no longer in the ring</exception>
+    public async ValueTask<int> DecryptAsync(string name, Memory<char> result, CancellationToken cancellationToken = default)
+    {
+        using var activity = StartDecryptActivity(name);
+        try
+        {
+            return await GetEntryAsync(name, cancellationToken).ConfigureAwait(false) is { } entry
+                ? DecryptEntry(name, entry, result.Span)
+                : 0;
         }
         catch (Exception ex)
         {
@@ -166,6 +177,49 @@ public abstract class ProtectedCacheBase(IKeyRing keyRing) : IProtectedReadOnlyC
         return false;
     }
 
+    /// <inheritdoc/>
+    public async ValueTask<int> GetMaxDecryptedLengthAsync(string name, CancellationToken cancellationToken = default)
+        => (await GetEntryAsync(name, cancellationToken).ConfigureAwait(false))?.Value.Length ?? 0;
+
+    private static System.Diagnostics.Activity? StartDecryptActivity(string name)
+    {
+        var activity = HkdfGuardTelemetry.Root.ActivitySource.StartActivity(ActivityNames.Cache.Decrypt);
+        if (HkdfGuardTelemetry.Root.EnableSensitiveLogging)
+            HkdfGuardTelemetry.Root.LogSensitiveOperation(activity, ActivityNames.Cache.Decrypt, (AttributeNames.Name, name));
+        return activity;
+    }
+
+    private int DecryptEntry(string name, KeyTrackingValue entry, Span<byte> result)
+    {
+        var key = keyRing.Get(entry.KeyVersion);
+        var aadLength = AadLength(name);
+        Span<byte> aad = aadLength <= MaxStackAadBytes ? stackalloc byte[aadLength] : new byte[aadLength];
+        WriteAad(name, aad);
+
+        return key.Decrypt(entry.Value, aad, result);
+    }
+
+    private int DecryptEntry(string name, KeyTrackingValue entry, Span<char> result)
+    {
+        // AEAD ciphertext is always at least as long as the plaintext it encloses, so
+        // entry.Value.Length is a safe upper bound for the decrypted UTF8 byte count. On the
+        // stack, or pinned when too large: never somewhere the GC can copy it, nor a pooled
+        // array another caller would later be handed.
+        var encrypted = entry.Value;
+        Span<byte> plaintextBytes = encrypted.Length <= ArrayUtility.MaxStackBytes
+            ? stackalloc byte[encrypted.Length]
+            : ArrayUtility.AllocatePinned<byte>(encrypted.Length);
+        try
+        {
+            var decryptedLength = DecryptEntry(name, entry, plaintextBytes);
+            return Encoding.UTF8.GetChars(plaintextBytes[..decryptedLength], result);
+        }
+        finally
+        {
+            ArrayUtility.ZeroMemory(plaintextBytes);
+        }
+    }
+
     private bool TryGetEntry(string name, out KeyTrackingValue entry)
     {
         if (Data.TryGetValue(name, out entry!))
@@ -176,6 +230,16 @@ public abstract class ProtectedCacheBase(IKeyRing keyRing) : IProtectedReadOnlyC
 
         entry = null!;
         return false;
+    }
+
+    private async ValueTask<KeyTrackingValue?> GetEntryAsync(string name, CancellationToken cancellationToken)
+    {
+        if (Data.TryGetValue(name, out var entry))
+            return entry;
+
+        return await TryPopulateAsync(name, cancellationToken).ConfigureAwait(false) && Data.TryGetValue(name, out entry)
+            ? entry
+            : null;
     }
 
     /// <summary>
