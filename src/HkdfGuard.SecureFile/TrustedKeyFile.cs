@@ -1,6 +1,3 @@
-using System.Diagnostics.CodeAnalysis;
-using System.Runtime.Versioning;
-using System.Security.AccessControl;
 using System.Security.Cryptography;
 using HkdfGuard.Abstractions;
 
@@ -8,9 +5,9 @@ namespace HkdfGuard.SecureFile;
 
 /// <summary>
 /// Reads a key file only after its location passes the platform's checks (WindowsKeyFileChecks,
-/// UnixKeyFileChecks): the managed equivalent of the native library's hkdfguard_open_file, for an
-/// <see cref="IKeyWrapper.ReadKeyFileAsync"/> with no native library to read through - a network
-/// KMS's key wrapper, say. The contents are then held to the same rules: 1 to
+/// UnixKeyFileChecks, opened through <see cref="TrustedFile"/>): the managed equivalent of the
+/// native library's hkdfguard_open_file, for an <see cref="IKeyWrapper.ReadKeyFileAsync"/> with no
+/// native library to read through - a network KMS's key wrapper, say. The contents are then held to the same rules: 1 to
 /// <see cref="WrappedKeyLimits.MaxBytes"/> bytes, never more than one byte past that read, and not
 /// something that looks like an unwrapped key.
 /// </summary>
@@ -37,73 +34,14 @@ public static class TrustedKeyFile
     /// <exception cref="IOException">It can't be read, or another process has it open for writing.</exception>
     /// <exception cref="ArgumentException"><paramref name="path"/> is empty, or <paramref name="trust"/> names a principal that can't be trusted.</exception>
     /// <exception cref="PlatformNotSupportedException">Not Windows, Linux or an Apple silicon Mac.</exception>
-    [ExcludeFromCodeCoverage(Justification = "Dispatches to one platform's wiring; each is exercised by the real-file tests on its own platform.")]
-    public static ValueTask<byte[]> ReadAsync(string path, KeyFileTrust trust, CancellationToken cancellationToken = default)
+    public static async ValueTask<byte[]> ReadAsync(string path, KeyFileTrust trust, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
         ArgumentNullException.ThrowIfNull(trust);
 
-        if (OperatingSystem.IsWindows())
-            return ReadWindowsAsync(path, trust, cancellationToken);
-        if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
-            return ReadUnixAsync(path, trust, cancellationToken);
-
-        throw new PlatformNotSupportedException("Key files are read on Windows, Linux and macOS only.");
-    }
-
-    [SupportedOSPlatform("windows")]
-    [ExcludeFromCodeCoverage(Justification = "Wires the covered WindowsKeyFileChecks policy to real files; exercised by the Windows-only real-file tests.")]
-    private static async ValueTask<byte[]> ReadWindowsAsync(string path, KeyFileTrust trust, CancellationToken cancellationToken)
-    {
-        var trusted = WindowsKeyFileChecks.TrustedPrincipals(trust);
-        var fullPath = Path.GetFullPath(path);
-        WindowsKeyFileChecks.VerifyPathForm(fullPath,
-            fullPath.StartsWith(@"\\", StringComparison.Ordinal) ? DriveType.Network : new DriveInfo(Path.GetPathRoot(fullPath)!).DriveType);
-
-        // FileShare.Read: refused if another process has it open for writing, and no one can open
-        // it for writing while it's read.
-        await using var stream = Open(fullPath);
-        WindowsKeyFileChecks.VerifyFinalPath(fullPath, WindowsNative.GetFinalPath(stream.SafeFileHandle));
-
-        // The file through its own handle; the folders by path, which the final-path check ties to
-        // the folders it was opened through, and which no untrusted principal can then change.
-        WindowsKeyFileChecks.VerifyTrustedOnly(stream.GetAccessControl(), fullPath, fullPath, WindowsKeyFileChecks.GuardedRights, trusted);
-        for (var folder = new FileInfo(fullPath).Directory; folder is not null; folder = folder.Parent)
-        {
-            var security = folder.GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access);
-            if (folder.Parent is null)
-            {
-                WindowsKeyFileChecks.VerifyTrustedOnly(security, fullPath, folder.FullName, WindowsKeyFileChecks.GuardedRootRights, trusted);
-                break;
-            }
-
-            WindowsKeyFileChecks.VerifyNotReparsePoint(folder.Attributes, fullPath, folder.FullName);
-            WindowsKeyFileChecks.VerifyTrustedOnly(security, fullPath, folder.FullName, WindowsKeyFileChecks.GuardedRights, trusted);
-        }
-
-        return await ReadContentsAsync(stream, fullPath, cancellationToken).ConfigureAwait(false);
-    }
-
-    [SupportedOSPlatform("linux")]
-    [SupportedOSPlatform("macos")]
-    [ExcludeFromCodeCoverage(Justification = "Wires the covered UnixKeyFileChecks policy to real files; exercised by the Unix-only real-file tests.")]
-    private static async ValueTask<byte[]> ReadUnixAsync(string path, KeyFileTrust trust, CancellationToken cancellationToken)
-    {
-        // The working directory is already a resolved path; ResolveTrusted handles ".." itself.
-        var absolute = path.StartsWith('/') ? path : Path.Join(Directory.GetCurrentDirectory(), path);
-        var resolved = UnixKeyFileChecks.ResolveTrusted(absolute, trust, UnixNative.GetStatusOrNull, UnixNative.ReadLink);
-
-        await using var stream = Open(resolved);
+        await using var stream = TrustedFile.OpenTrusted(path, trust);
         return await ReadContentsAsync(stream, path, cancellationToken).ConfigureAwait(false);
     }
-
-    private static FileStream Open(string path) => new(path, new FileStreamOptions
-    {
-        Mode = FileMode.Open,
-        Access = FileAccess.Read,
-        Share = FileShare.Read,
-        Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
-    });
 
     /// <summary>
     /// Reads at most one byte past <see cref="WrappedKeyLimits.MaxBytes"/> from <paramref name="stream"/>

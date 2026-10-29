@@ -122,7 +122,8 @@
         "type": "Project",
         "dependencies": {
           "HkdfGuard.Abstractions": "[1.0.0, )",
-          "HkdfGuard.Diagnostics": "[1.0.0, )"
+          "HkdfGuard.Diagnostics": "[1.0.0, )",
+          "HkdfGuard.SecureFile": "[1.0.0, )"
         }
       },
       "hkdfguard.cryptoprovider.aesgcm256": {
@@ -159,6 +160,12 @@
         "dependencies": {
           "HkdfGuard.Abstractions": "[1.0.0, )",
           "HkdfGuard.Diagnostics": "[1.0.0, )"
+        }
+      },
+      "hkdfguard.securefile": {
+        "type": "Project",
+        "dependencies": {
+          "HkdfGuard.Abstractions": "[1.0.0, )"
         }
       },
       "Microsoft.Extensions.Configuration": {

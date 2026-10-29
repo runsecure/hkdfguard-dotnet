@@ -1,7 +1,8 @@
 namespace HkdfGuard.SecureFile;
 
 /// <summary>
-/// Decides whether a key file's path on Linux or macOS can be trusted: resolves it the way the
+/// Decides whether a file's path on Linux or macOS can be trusted (a key file's, or any file
+/// TrustedFile reads): resolves it the way the
 /// kernel would, from <c>/</c>, checking everything it passes through. Every directory and the file
 /// itself must be owned by root or a <see cref="KeyFileTrust.UnixUserIds"/> user, must not be
 /// writable by others, and may be writable by its group only if that is a
@@ -49,7 +50,7 @@ internal static class UnixKeyFileChecks
                 continue;
 
             if (resolvedType != UnixFileType.Directory)
-                throw new FileNotFoundException($"Key file '{path}' runs through '{resolved}', which is not a directory.", path);
+                throw new FileNotFoundException($"'{path}' runs through '{resolved}', which is not a directory.", path);
 
             if (name == "..")
             {
@@ -60,7 +61,7 @@ internal static class UnixKeyFileChecks
 
             var candidate = resolved == "/" ? $"/{name}" : $"{resolved}/{name}";
             if (getStatus(candidate) is not { } status)
-                throw new FileNotFoundException($"Key file '{path}' was not found ('{candidate}' does not exist).", path);
+                throw new FileNotFoundException($"'{path}' was not found ('{candidate}' does not exist).", path);
 
             if (status.Type == UnixFileType.SymbolicLink)
             {
@@ -102,7 +103,7 @@ internal static class UnixKeyFileChecks
     private static bool IsTrustedUser(uint uid, KeyFileTrust trust) => uid == 0 || trust.UnixUserIds.Contains(uid);
 
     private static UnauthorizedAccessException Untrusted(string path, string why)
-        => new($"Key file '{path}' is not trusted: {why}. Keep key files where only root (or a trusted deployer, see KeyFileTrust) can write, all the way up from /.");
+        => new($"'{path}' is not trusted: {why}. Keep it where only root (or a trusted deployer, see KeyFileTrust) can write, all the way up from /.");
 
     private static void PushComponents(Stack<string> pending, string path)
     {
