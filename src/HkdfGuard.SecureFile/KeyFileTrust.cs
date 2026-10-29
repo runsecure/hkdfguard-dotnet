@@ -13,6 +13,10 @@ namespace HkdfGuard.SecureFile;
 /// as, unless it is a developer machine: an application that can rewrite its own key files can be
 /// made to roll back to an older one.
 /// </para>
+/// <para>
+/// <see cref="TrustedFile"/> holds secret files, certificates and any other file it reads to the
+/// same rules, with the same trust.
+/// </para>
 /// </summary>
 public sealed class KeyFileTrust
 {

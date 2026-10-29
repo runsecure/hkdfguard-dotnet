@@ -5,8 +5,8 @@ using System.Security.Principal;
 namespace HkdfGuard.SecureFile;
 
 /// <summary>
-/// Decides whether a key file on Windows can be trusted, by the native library's
-/// (hkdfguard_open_file's) rules:
+/// Decides whether a file on Windows - a key file, or any file TrustedFile reads - can be trusted,
+/// by the native library's (hkdfguard_open_file's) rules:
 /// <list type="bullet">
 /// <item>The path names a file on a local fixed drive. UNC paths, device paths (\\?\, \\.\) and
 /// network drives are refused before anything is opened, so no server named in a path is ever
@@ -91,7 +91,7 @@ internal static class WindowsKeyFileChecks
 
             if (Array.IndexOf(NeverTrusted, sid) >= 0)
                 throw new ArgumentException(
-                    $"KeyFileTrust.WindowsPrincipals holds {Describe(sid)}, which every account (or every signed-in one) is in; trusting it would trust anyone to replace a key file.");
+                    $"KeyFileTrust.WindowsPrincipals holds {Describe(sid)}, which every account (or every signed-in one) is in; trusting it would trust anyone to replace a trusted file.");
             trusted.Add(sid);
         }
 
@@ -107,10 +107,10 @@ internal static class WindowsKeyFileChecks
     internal static void VerifyPathForm(string fullPath, DriveType driveType)
     {
         if (fullPath.StartsWith(@"\\", StringComparison.Ordinal) || fullPath.StartsWith("//", StringComparison.Ordinal))
-            throw Untrusted(fullPath, "it is a UNC or device path; key files are only read from a local drive");
+            throw Untrusted(fullPath, "it is a UNC or device path; trusted files are only read from a local drive");
 
         if (driveType != DriveType.Fixed)
-            throw Untrusted(fullPath, $"it is on a {driveType} drive; key files are only read from a local fixed drive");
+            throw Untrusted(fullPath, $"it is on a {driveType} drive; trusted files are only read from a local fixed drive");
     }
 
     /// <summary>
@@ -163,7 +163,7 @@ internal static class WindowsKeyFileChecks
     }
 
     private static UnauthorizedAccessException Untrusted(string path, string why)
-        => new($"Key file '{path}' is not trusted: {why}. Keep key files in a folder of their own that only administrators (or a trusted deployer, see KeyFileTrust) can modify, with inherited permissions removed.");
+        => new($"'{path}' is not trusted: {why}. Keep it in a folder of its own that only administrators (or a trusted deployer, see KeyFileTrust) can modify, with inherited permissions removed.");
 
     private static string Describe(IdentityReference? identity)
     {

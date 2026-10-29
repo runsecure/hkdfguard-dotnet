@@ -29,7 +29,7 @@ internal static unsafe partial class WindowsNative
                 length = GetFinalPathNameByHandleW(handle, path, (uint)buffer.Length, Flags);
 
             if (length == 0)
-                throw new IOException("Could not read the opened key file's final path.", new Win32Exception(Marshal.GetLastPInvokeError()));
+                throw new IOException("Could not read the opened file's final path.", new Win32Exception(Marshal.GetLastPInvokeError()));
             if (length < buffer.Length)
                 return new string(buffer, 0, (int)length);
 

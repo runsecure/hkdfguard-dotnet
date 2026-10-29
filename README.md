@@ -281,13 +281,13 @@ Node/Python mirror this layering, adding their own consumer branches as they cat
 | `HkdfGuard.Abstractions` | Interfaces and pure data types only (`IKeyRing`, `IKeyWrapper`, `ICryptoProvider`, `ICryptoProviderFactory`, `IDataEncryptionKey`, `IDataProtector`, `IProtectedCache`/`IProtectedReadOnlyCache` - the latter with `DecryptAsync`/`GetMaxDecryptedLengthAsync` defaulting to its synchronous members, `IEncryptedFormatProvider`, `KeyTrackingValue`, `ArrayUtility`, `ProtectedCacheBase`). Depends only on `HkdfGuard.Diagnostics`. |
 | `HkdfGuard.CryptoProvider.AesGcm256` | `AesGcmCryptoSession` (internal, key-bound at construction) wrapped directly by the public `AesGcmCryptoProvider` (an `ICryptoProvider` that reveals/refreshes it from an `IKeyWrapper` + wrapped bytes, and only ever holds one active session at a time; also exposes `GetEncryptedAllocationLength`/`GetDecryptedAllocationLength` for sizing buffers), minted via `AesGcmCryptoProviderFactory` (an `ICryptoProviderFactory`); plus `AesGcmPipelineDataProtector` (an `IPipelineDataProtector` over one in-memory key, for protecting values in a pipeline before a durable KEK exists - see below). Depends on `HkdfGuard.Abstractions`/`HkdfGuard.Diagnostics`; its `HkdfGuardTelemetry.CryptoProviderAesGcm256` component keeps its own independent `EnableSensitiveLogging` flag rather than sharing `Root`'s. |
 | `HkdfGuard.KeyWrapping.V1` | `NativeHkdfKeyWrapperV1` (an `IKeyWrapper`, whose async methods complete synchronously) and `NativeHost`, which resolve and bind the current OS's native KMS library (Linux/.so, macOS/.dylib, Windows/.dll - see `Interop/`) to wrap and unwrap a 32-byte DEK under a service-identified KEK held entirely outside this process. |
-| `HkdfGuard.SecureFile` | `TrustedKeyFile.ReadAsync` and `KeyFileTrust` - the managed equivalent of the native library's `hkdfguard_open_file`, for key wrappers with no native library to read key files through (network KMS providers). Refuses a key file unless it, and every folder above it, is owned and modifiable only by the operating system's administrators and the principals a `KeyFileTrust` adds (Windows ACLs and final-path check; Linux/macOS ownership and mode bits, following only trusted symbolic links), and refuses contents that look like an unwrapped key. Depends on `HkdfGuard.Abstractions`. |
+| `HkdfGuard.SecureFile` | `TrustedKeyFile.ReadAsync`, `TrustedFile.ReadAsync` and `KeyFileTrust`. `TrustedKeyFile` is the managed equivalent of the native library's `hkdfguard_open_file`, for key wrappers with no native library to read key files through (network KMS providers): it refuses a key file unless it, and every folder above it, is owned and modifiable only by the operating system's administrators and the principals a `KeyFileTrust` adds (Windows ACLs and final-path check; Linux/macOS ownership and mode bits, following only trusted symbolic links), and refuses contents that aren't a wrapped key (over `WrappedKeyLimits.MaxBytes`, or what looks like an unwrapped key). `TrustedFile` applies the same location checks to any other file - secret files, certificates - with only a caller-chosen size limit, read at most one byte past whatever the file reports; its parser overload reads into pinned memory zeroed once the parser returns, for contents that are themselves secret. Depends on `HkdfGuard.Abstractions`. |
 | `HkdfGuard.KeyWrapping.AwsKms` | `AwsKmsKeyWrapper` - an `IKeyWrapper` over one symmetric AWS KMS key (`Encrypt`/`Decrypt`/`GenerateDataKeyWithoutPlaintext`, the key pinned on every `Decrypt`, an optional encryption context bound as AAD), reading key files through `HkdfGuard.SecureFile`. Depends on `HkdfGuard.Abstractions`, `HkdfGuard.SecureFile` and `AWSSDK.KeyManagementService`. |
 | `HkdfGuard.KeyWrapping.AzureKeyVault` | `AzureKeyVaultKeyWrapper` - an `IKeyWrapper` over two Azure Key Vault keys: an RSA key wraps each DEK (RSA-OAEP-256) and a separate EC P-256 key signs each wrapped DEK (ES256), verified before every unwrap, so only principals allowed to sign can create a key file it accepts. Both keys pinned by name, rotation-safe by version; an optional context bound into the signature; key files read through `HkdfGuard.SecureFile`. Depends on `HkdfGuard.Abstractions`, `HkdfGuard.SecureFile` and `Azure.Security.KeyVault.Keys`. |
 | `HkdfGuard.KeyWrapping.GoogleKms` | `GoogleKmsKeyWrapper` - an `IKeyWrapper` over one symmetric Google Cloud KMS key (`Encrypt`/`Decrypt`, the key pinned on every `Decrypt`, a fixed HkdfGuard label and an optional context bound as AAD, CRC32C checksums on every request and response), reading key files through `HkdfGuard.SecureFile`. Depends on `HkdfGuard.Abstractions`, `HkdfGuard.SecureFile` and `Google.Cloud.Kms.V1`. |
 | `HkdfGuard.KeyWrapping.HashiCorpVault` | `HashiCorpVaultTransitKeyWrapper` - an `IKeyWrapper` over one key in a HashiCorp Vault transit secrets engine (`encrypt`/`decrypt`/`datakey/wrapped` over Vault's HTTP API, the key pinned by its path, an optional context bound as `associated_data` and never silently dropped), with retries, no redirects, and the token supplied by an `IVaultTokenSource` into pinned memory and zeroed after each request. Reads key files through `HkdfGuard.SecureFile`. Depends on `HkdfGuard.Abstractions` and `HkdfGuard.SecureFile` only. |
 | `HkdfGuard.DataEncryptionKey` | The application-facing API: `KeyRing`/`KeyRingBuilder`, `IDataProtector`/`DataProtector`, `DataEncryptionKey` (the `IDataEncryptionKey` over an `ICryptoProvider` - output sizing and telemetry; disposing it disposes its provider), and the default `enc::v{version}::{base64}` wire format. Depends on `HkdfGuard.Abstractions`/`HkdfGuard.Diagnostics`. |
-| `HkdfGuard.Cache` | `ProtectedCache` (an `IProtectedCache` backed by an `IKeyRing` - encrypts under the ring's current key on Add/AddOrUpdate and records its version, reveals under that version on Decrypt, so it follows key rotation; nothing held as plaintext beyond a single call; each value is bound to its name as AAD, so a ciphertext under any other name fails authentication, and names match ignoring ASCII case only) `ProtectedCacheCollection` (aggregates multiple `IProtectedReadOnlyCache` sources behind one read-only surface, checked in registration order), and `RemoteSecretCache` (the shared base of the secret-store caches below: fetch-on-miss of one named secret through a `SecretValueSink` bound to that name - its whole value and, by `secret#key`, the keys it holds, all from one fetch - one fetch per secret at a time, missing values not remembered, exact or ASCII-case-insensitive name matching, and telemetry - a subclass supplies only `IsValidName` and `Fetch`) with `SecretJsonBody` (takes a secret out of a JSON response body into pinned memory and returns the body with it blanked, for an SDK to parse). |
+| `HkdfGuard.Cache` | `ProtectedCache` (an `IProtectedCache` backed by an `IKeyRing` - encrypts under the ring's current key on Add/AddOrUpdate and records its version, reveals under that version on Decrypt, so it follows key rotation; nothing held as plaintext beyond a single call; each value is bound to its name as AAD, so a ciphertext under any other name fails authentication, and names match ignoring ASCII case only) `ProtectedCacheCollection` (aggregates multiple `IProtectedReadOnlyCache` sources behind one read-only surface, checked in registration order), `FilePerSecretCache` (an `IProtectedReadOnlyCache` over a local folder of one already-encrypted file per secret, each read through `TrustedFile` on its first lookup and cached still encrypted, as the file holds it; each value bound to its file name through `ProtectedConfigurationPurpose`, and names that can't be a file name inside the folder reported missing), and `RemoteSecretCache` (the shared base of the secret-store caches below: fetch-on-miss of one named secret through a `SecretValueSink` bound to that name - its whole value and, by `secret#key`, the keys it holds, all from one fetch - one fetch per secret at a time, missing values not remembered, exact or ASCII-case-insensitive name matching, and telemetry - a subclass supplies only `IsValidName` and `Fetch`) with `SecretJsonBody` (takes a secret out of a JSON response body into pinned memory and returns the body with it blanked, for an SDK to parse). Depends on `HkdfGuard.Abstractions`, `HkdfGuard.Diagnostics` and `HkdfGuard.SecureFile`. |
 | `HkdfGuard.Cache.AzureKeyVault` | `AzureKeyVaultSecretCache` - a `RemoteSecretCache` over one Azure Key Vault's secrets: on a miss it reads just the requested secret with `GetSecret`, taking the value out of the response body in pinned memory (a pipeline policy) so `SecretClient` never holds it as a string, encrypts it under the ring's current key bound to its name, and caches the ciphertext. Never lists the vault (needs only `get` on secrets); names Key Vault can't hold are reported missing without a call. Depends on `HkdfGuard.Cache` and `Azure.Security.KeyVault.Secrets`. |
 | `HkdfGuard.Cache.AwsSecretsManager` | `AwsSecretsManagerSecretCache` - a `RemoteSecretCache` over AWS Secrets Manager: on a miss it reads just the requested secret with `GetSecretValue`, taking the value out of the response body in pinned memory (a pipeline handler ahead of unmarshalling) so the SDK never holds it as a string, encrypts it under the ring's current key bound to its name, and caches the ciphertext. Never lists secrets (needs only `secretsmanager:GetSecretValue`); names match exactly, as Secrets Manager's do; names it can't hold are reported missing without a call. Depends on `HkdfGuard.Cache` and `AWSSDK.SecretsManager`. |
 | `HkdfGuard.Cache.GoogleSecretManager` | `GoogleSecretManagerSecretCache` - a `RemoteSecretCache` over one Google Cloud project's Secret Manager: on a miss it reads just the requested secret's latest version with `AccessSecretVersion`, checks its CRC32C and that the response names that secret, encrypts it under the ring's current key bound to its name, zeroes the payload and gRPC's pooled receive buffer, and caches the ciphertext. Never lists secrets (needs only `secretmanager.versions.access`); IDs match exactly, as Secret Manager's do; names it can't hold are reported missing without a call. Depends on `HkdfGuard.Cache` and `Google.Cloud.SecretManager.V1`. |
@@ -591,10 +591,11 @@ for each identity, and rotation.
 `IKeyWrapper` over one key in a Vault transit secrets engine, called over Vault's HTTP API with no
 SDK. The key is pinned by its path on every request; an optional context is bound as
 `associated_data`. The token comes from an `IVaultTokenSource` (`StaticVaultTokenSource` for one you
-hold), copied into pinned memory and zeroed once each request is sent:
+hold), copied into pinned memory and zeroed once each request is sent. Pass in the token however
+your application is given it:
 
 ```csharp
-using var token = new StaticVaultTokenSource(Environment.GetEnvironmentVariable("VAULT_TOKEN"));
+using var token = new StaticVaultTokenSource(vaultToken); // the Vault token, passed in or configured
 using var wrapper = new HashiCorpVaultTransitKeyWrapper(
     new Uri("https://vault.example.com:8200"), "myapp-kek", token, context: "my.service");
 ```
@@ -718,6 +719,43 @@ await using var ephemeralKey = new DataEncryptionKey(provider);
 application code outside `HkdfGuard.*` can use the short name with
 `using HkdfGuard.DataEncryptionKey;`.
 
+### Reading secrets from a folder, one file per secret
+
+`FilePerSecretCache` (package `HkdfGuard.Cache`) is an `IProtectedReadOnlyCache` over a local
+folder holding one file per secret: the file named `Db-Password` holds that secret's value, already
+encrypted and formatted (`enc::v3::...`). Nothing is read up front: the first lookup of a name
+reads that one file, checks its value authenticates, and caches it in memory still encrypted,
+exactly as the file holds it. Every later lookup is served from memory:
+
+```csharp
+var deployers = new KeyFileTrust { WindowsPrincipals = ["S-1-5-21-...-1005"] }; // the account that deploys secrets
+var secrets = new FilePerSecretCache(@"C:\HkdfGuardSecrets\myapp", deployers, ring, new DefaultFormatProvider());
+
+Span<char> buffer = stackalloc char[256];
+int written = secrets.Decrypt("Db-Password", buffer); // 0 if there's no such file
+```
+
+Each file must be encrypted for its own name, with the purpose
+`ProtectedConfigurationPurpose.For(name)`. That is what
+[pipeline protection](#pipeline-protection---encrypt-now-wrap-later) writes for the secret
+identifier `name`, and what `ring.CreateProtector(ProtectedConfigurationPurpose.For(name))`
+writes. A file copied under another name fails with a `CryptographicException` when it is
+loaded, and isn't cached, so a corrected file is read on the next lookup.
+
+Every file is read through `TrustedFile`, so it is refused, with an `UnauthorizedAccessException`,
+unless it and every folder above it are owned and modifiable only by the operating system's
+administrators and the principals the `KeyFileTrust` adds. Add the account that deploys secrets,
+never the one the application runs as: one that can rewrite its own secrets can be made to roll
+one back.
+
+A name is a file name: 1-255 ASCII letters, digits, `-`, `_` and `.`, not starting with `.`, so it
+can't reach outside the folder. Any other name (for example `ConnectionStrings:Admin`), a missing
+or empty file and a missing folder all return 0, so the cache can sit in a
+`ProtectedCacheCollection` beside other sources; a missing secret isn't remembered, so a file
+added later is found. A file over 64 KB throws `InvalidDataException`; any other read failure
+throws the I/O exception. `Decrypt` blocks while a file is loaded; `DecryptAsync` doesn't. A cached value isn't refreshed: a changed file is picked up by a new
+cache instance.
+
 ### Caching Azure Key Vault secrets
 
 `AzureKeyVaultSecretCache` (package `HkdfGuard.Cache.AzureKeyVault`) is an
@@ -822,7 +860,7 @@ read caches every key the secret holds (see [Secrets holding several keys](#secr
 var tokenProtector = ring.CreateProtector(HashiCorpVaultSecretCache.TokenPurpose);
 using var secrets = new HashiCorpVaultSecretCache(
     new Uri("https://vault.example.com:8200"),
-    StaticVaultToken.Protect(tokenProtector, Environment.GetEnvironmentVariable("VAULT_TOKEN")), // held encrypted
+    StaticVaultToken.Protect(tokenProtector, vaultToken), // the Vault token, passed in or configured; held encrypted
     tokenProtector,
     ring,
     new HashiCorpVaultSecretCacheOptions { MountPath = "secret" }); // KV version 2 unless KvVersion says 1
@@ -1098,8 +1136,8 @@ Every library is at 100% line and branch coverage, with two documented exception
   everywhere: the Windows checks run against the real installed DLL on Windows, the macOS and
   Linux checks run against simulated filesystems on every platform, and the Linux checks also run
   against the real filesystem and the installed package on Linux. `NativeProcessHardening.Apply()`
-  hardens the whole test host, so its tests (Windows and Linux) run only with
-  `HKDFGUARD_TEST_PROCESS_HARDENING=1`.
+  hardens the whole test host, so its tests (Windows and Linux) run only when a runsettings file
+  sets `HKDFGUARD_TEST_PROCESS_HARDENING` to `1`.
 - **`AesGcmCryptoProvider`'s refresh loop and `KeyRing`'s ephemeral rotation loop** each have one
   unreachable branch: the loop's exit when its `PeriodicTimer` reports it has been disposed. Each
   timer is local to its loop and disposed only after it, so this never happens; the check stays as
@@ -1108,11 +1146,26 @@ Every library is at 100% line and branch coverage, with two documented exception
 `NativeKeyWrappingIntegrationTests` make real calls against a provisioned service. They are
 reported as skipped, never passed, unless `HKDFGUARD_TEST_SERVICE` names one. Set
 `HKDFGUARD_TEST_SERVICE_OTHER` to a second provisioned service to test cross-service isolation
-against a different KEK:
+against a different KEK. Set them in a runsettings file, which `dotnet test` applies to the test
+process only; `.gitignore` excludes `*.runsettings`. Create `native.runsettings` in the repository
+root:
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<RunSettings>
+  <RunConfiguration>
+    <EnvironmentVariables>
+      <HKDFGUARD_TEST_SERVICE>hkdfguard.integrationtest</HKDFGUARD_TEST_SERVICE>
+      <!-- <HKDFGUARD_TEST_SERVICE_OTHER>[second service]</HKDFGUARD_TEST_SERVICE_OTHER> -->
+      <!-- <HKDFGUARD_TEST_PROCESS_HARDENING>1</HKDFGUARD_TEST_PROCESS_HARDENING> -->
+    </EnvironmentVariables>
+  </RunConfiguration>
+</RunSettings>
+```
 
 ```bash
 hkdfguard provision --service-name hkdfguard.integrationtest   # elevated on Windows
-HKDFGUARD_TEST_SERVICE=hkdfguard.integrationtest dotnet test test/HkdfGuard.KeyWrapping.V1.Test
+dotnet test test/HkdfGuard.KeyWrapping.V1.Test --settings native.runsettings
 ```
 
 On a Linux host with a TPM, the package installs no policy or TPM derivation secret, so nothing
@@ -1126,24 +1179,24 @@ library's own service-name and length checks, that a failed unwrap zeroes the ca
 that tampering anywhere in a payload is refused, and that a key file written by
 `hkdfguard wrap` unwraps through `NativeHkdfKeyWrapperV1`.
 
+Set `HKDFGUARD_TEST_SERVICE` in `native.runsettings` to `com.hkdfguard.integration.test.221`, then:
+
 ```bash
 sudo scripts/provision-linux-test-key.sh
-HKDFGUARD_TEST_SERVICE=com.hkdfguard.integration.test.221 \
-dotnet test test/HkdfGuard.KeyWrapping.V1.Test
+dotnet test test/HkdfGuard.KeyWrapping.V1.Test --settings native.runsettings
 ```
 
 `AwsKmsIntegrationTests` make real calls against a symmetric KMS key. They are reported as skipped,
-never passed, unless `HKDFGUARD_TEST_AWS_KMS_KEY_ID` names one. Credentials and region come from the
-SDK's usual chain. The tests never create, alter or delete a key:
+never passed, unless `HKDFGUARD_TEST_AWS_KMS_KEY_ID` names one, which the git-ignored
+`aws.runsettings` does. Credentials and region come from the SDK's usual chain (for example the
+profile `aws configure` writes). The tests never create, alter or delete a key:
 
-```bash
-HKDFGUARD_TEST_AWS_KMS_KEY_ID=arn:aws:kms:us-east-1:111122223333:key/... AWS_REGION=us-east-1 \
-dotnet test test/HkdfGuard.KeyWrapping.AwsKms.Test
+```powershell
+dotnet test test/HkdfGuard.KeyWrapping.AwsKms.Test --settings aws.runsettings
 ```
 
 [Run the AWS KMS integration tests](docs/how-to/run-aws-kms-integration-tests.md) sets up a test
-key and a low-privilege IAM user, and keeps the key ARN in a git-ignored runsettings file instead
-of the environment.
+key, a low-privilege IAM user and the runsettings file.
 
 `AzureKeyVaultIntegrationTests` make real calls against an RSA wrapping key and an EC P-256
 signing key. They are reported as skipped, never passed, unless `HKDFGUARD_TEST_AZURE_WRAP_KEY_ID`
@@ -1202,7 +1255,8 @@ passed - where its platform, library or service isn't there:
   hang.
 
 `NativeProcessHardeningTests` harden the test host itself, so they also need
-`HKDFGUARD_TEST_PROCESS_HARDENING=1`, and are best run one at a time.
+`HKDFGUARD_TEST_PROCESS_HARDENING` set to `1` in the runsettings file, and are best run one at a
+time.
 
 Native release artifacts are never committed: `.gitignore` excludes every `runtimes/` folder.
 

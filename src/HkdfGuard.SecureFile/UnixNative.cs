@@ -82,7 +82,7 @@ internal static unsafe partial class UnixNative
         // The x86_64 "lstat" symbol fills a different, older struct; Intel Macs aren't supported.
         if (RuntimeInformation.ProcessArchitecture != Architecture.Arm64)
             throw new PlatformNotSupportedException(
-                $"Key files are read on Apple silicon Macs only; this process is {RuntimeInformation.ProcessArchitecture}.");
+                $"Trusted files are read on Apple silicon Macs only; this process is {RuntimeInformation.ProcessArchitecture}.");
 
         var buffer = stackalloc byte[StatBufferSize];
         if (lstat(path, buffer) != 0)

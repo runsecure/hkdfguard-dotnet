@@ -236,7 +236,8 @@
         "type": "Project",
         "dependencies": {
           "HkdfGuard.Abstractions": "[1.0.0, )",
-          "HkdfGuard.Diagnostics": "[1.0.0, )"
+          "HkdfGuard.Diagnostics": "[1.0.0, )",
+          "HkdfGuard.SecureFile": "[1.0.0, )"
         }
       },
       "hkdfguard.cache.googlesecretmanager": {
@@ -265,6 +266,12 @@
         "type": "Project",
         "dependencies": {
           "Microsoft.Extensions.Logging.Abstractions": "[10.0.11, )"
+        }
+      },
+      "hkdfguard.securefile": {
+        "type": "Project",
+        "dependencies": {
+          "HkdfGuard.Abstractions": "[1.0.0, )"
         }
       },
       "Google.Cloud.SecretManager.V1": {

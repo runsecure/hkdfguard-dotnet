@@ -12,6 +12,13 @@
     <ProjectReference Include="..\..\src\HkdfGuard.Abstractions\HkdfGuard.Abstractions.csproj" />
     <ProjectReference Include="..\..\src\HkdfGuard.DataEncryptionKey\HkdfGuard.DataEncryptionKey.csproj" />
     <ProjectReference Include="..\..\src\HkdfGuard.CryptoProvider.AesGcm256\HkdfGuard.CryptoProvider.AesGcm256.csproj" />
+    <ProjectReference Include="..\..\src\HkdfGuard.SecureFile\HkdfGuard.SecureFile.csproj" />
+  </ItemGroup>
+
+  <!-- A folder TrustedFile accepts, for FilePerSecretCache; shared with SecureFile's tests. -->
+  <ItemGroup>
+    <Compile Include="..\HkdfGuard.SecureFile.Test\TestHelpers\WindowsTempDirectory.cs" Link="TestHelpers\WindowsTempDirectory.cs" />
+    <Compile Include="..\HkdfGuard.SecureFile.Test\TestHelpers\TrustedTempDirectory.cs" Link="TestHelpers\TrustedTempDirectory.cs" />
   </ItemGroup>
 
 </Project>
