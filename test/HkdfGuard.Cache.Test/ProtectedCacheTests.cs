@@ -600,7 +600,8 @@ public class ProtectedCacheTests
     [Fact]
     public async Task Add_IncrementsCacheOperationsCounter_OnSuccessAndFailure()
     {
-        var measurements = new List<(long Value, string? Operation, string? Result)>();
+        // Other tests record to the same meter from other threads while this one listens.
+        var measurements = new System.Collections.Concurrent.ConcurrentQueue<(long Value, string? Operation, string? Result)>();
         using var meterListener = new MeterListener
         {
             InstrumentPublished = (instrument, listener) =>
@@ -621,7 +622,7 @@ public class ProtectedCacheTests
                     result = tag.Value?.ToString();
             }
 
-            measurements.Add((measurement, operation, result));
+            measurements.Enqueue((measurement, operation, result));
         });
         meterListener.Start();
 

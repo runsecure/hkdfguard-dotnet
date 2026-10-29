@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\HkdfGuard.KeyWrapping.HashiCorpVault\HkdfGuard.KeyWrapping.HashiCorpVault.csproj" />
+    <!-- End-to-end tests only: a crypto provider revealing its DEK through the transit wrapper. -->
+    <ProjectReference Include="..\..\src\HkdfGuard.CryptoProvider.AesGcm256\HkdfGuard.CryptoProvider.AesGcm256.csproj" />
+  </ItemGroup>
+
+</Project>
