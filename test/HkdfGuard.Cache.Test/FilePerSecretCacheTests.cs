@@ -57,6 +57,86 @@ public sealed class FilePerSecretCacheTests : IDisposable
         Assert.Equal(max, await cache.GetMaxDecryptedLengthAsync("Db-Password"));
     }
 
+    private const int SecretCount = 20;
+
+    // Non-ASCII fragments, so each secret also exercises multi-byte UTF-8 - "🔑" as a surrogate pair.
+    private static readonly string[] NonAscii = ["café", "naïve", "日本語", "Ωμέγα", "🔑", "Größe"];
+
+    // SecretCount secrets, each a random Base64 run of random length plus random non-ASCII text,
+    // under names that differ only by number.
+    private static Dictionary<string, string> RandomSecrets()
+        => Enumerable.Range(0, SecretCount).ToDictionary(
+            i => $"Secret-{i:D2}",
+            _ => Convert.ToBase64String(RandomNumberGenerator.GetBytes(RandomNumberGenerator.GetInt32(16, 129)))
+                 + " " + NonAscii[RandomNumberGenerator.GetInt32(NonAscii.Length)]
+                 + " " + NonAscii[RandomNumberGenerator.GetInt32(NonAscii.Length)]);
+
+    // Writes every secret encrypted, and checks each file holds only the formatted ciphertext:
+    // ASCII Base64, with neither the secret's random text nor its non-ASCII text anywhere in it.
+    private void WriteAndVerifyEncrypted(KeyRing ring, Dictionary<string, string> secrets)
+    {
+        foreach (var (name, value) in secrets)
+        {
+            Write(ring, name, value);
+
+            var onDisk = File.ReadAllBytes(Path.Join(Folder, name));
+            var text = Encoding.ASCII.GetString(onDisk);
+            Assert.All(onDisk, b => Assert.True(b < 0x80, "The file holds a non-ASCII byte."));
+            Assert.Matches("^enc::v1::[A-Za-z0-9+/]+=*$", text);
+            Assert.DoesNotContain(value.Split(' ')[0], text);
+            Assert.False(onDisk.AsSpan().IndexOf(Encoding.UTF8.GetBytes(value)) >= 0);
+        }
+    }
+
+    // Checks every secret through every overload, sync and async, chars and bytes.
+    private static async Task AssertEachDecryptsAsync(FilePerSecretCache cache, Dictionary<string, string> secrets)
+    {
+        foreach (var (name, value) in secrets)
+        {
+            Assert.True(cache.TryGetMaxDecryptedLength(name, out var max));
+            Assert.Equal(max, await cache.GetMaxDecryptedLengthAsync(name));
+            Assert.True(max >= Encoding.UTF8.GetByteCount(value));
+
+            var chars = new char[max];
+            Assert.Equal(value, new string(chars, 0, cache.Decrypt(name, chars.AsSpan())));
+            Assert.Equal(value, new string(chars, 0, await cache.DecryptAsync(name, chars.AsMemory())));
+
+            var bytes = new byte[max];
+            Assert.Equal(value, Encoding.UTF8.GetString(bytes, 0, cache.Decrypt(name, bytes.AsSpan())));
+            Assert.Equal(value, Encoding.UTF8.GetString(bytes, 0, await cache.DecryptAsync(name, bytes.AsMemory())));
+        }
+    }
+
+    [Fact]
+    public async Task TwentyRandomSecrets_AreOnlyCiphertextOnDisk_AndEachDecryptsThroughEveryOverload()
+    {
+        var ring = await NewRingAsync();
+        var secrets = RandomSecrets();
+        WriteAndVerifyEncrypted(ring, secrets);
+
+        await AssertEachDecryptsAsync(CreateCache(ring), secrets);
+    }
+
+    [Fact]
+    public async Task TwentyRandomSecrets_LoadedConcurrently_AreServedFromMemoryOnceTheirFilesAreGone()
+    {
+        var ring = await NewRingAsync();
+        var secrets = RandomSecrets();
+        WriteAndVerifyEncrypted(ring, secrets);
+        var cache = CreateCache(ring);
+
+        // Every secret's first lookup at once, half of them twice, so loads also race each other.
+        var loads = secrets.Keys.Concat(secrets.Keys.Take(SecretCount / 2))
+            .Select(name => Task.Run(async () => await cache.GetMaxDecryptedLengthAsync(name)));
+        Assert.All(await Task.WhenAll(loads), max => Assert.True(max > 0));
+
+        foreach (var name in secrets.Keys)
+            File.Delete(Path.Join(Folder, name));
+        Assert.Empty(Directory.EnumerateFiles(Folder));
+
+        await AssertEachDecryptsAsync(cache, secrets);
+    }
+
     [Fact]
     public async Task SurroundingWhitespace_IsIgnored()
     {
