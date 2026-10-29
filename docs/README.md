@@ -12,7 +12,8 @@ file.
 **Using AWS KMS as the KEK** instead of the native TPM, Secure Enclave or Platform Crypto
 Provider: see [Wrap keys with AWS KMS](how-to/use-aws-kms.md). **Using Azure Key Vault:** see
 [Wrap keys with Azure Key Vault](how-to/use-azure-key-vault.md). **Using Google Cloud KMS:** see
-[Wrap keys with Google Cloud KMS](how-to/use-google-kms.md).
+[Wrap keys with Google Cloud KMS](how-to/use-google-kms.md). **Using HashiCorp Vault transit:**
+see [Wrap keys with HashiCorp Vault transit](how-to/use-hashicorp-vault-transit.md).
 
 ## Map
 
@@ -27,6 +28,8 @@ Provider: see [Wrap keys with AWS KMS](how-to/use-aws-kms.md). **Using Azure Key
 | How-to | [Run the Azure Key Vault integration tests](how-to/run-azure-key-vault-integration-tests.md) | Draft |
 | How-to | [Wrap keys with Google Cloud KMS](how-to/use-google-kms.md) | Draft |
 | How-to | [Run the Google Cloud KMS integration tests](how-to/run-google-kms-integration-tests.md) | Draft |
+| How-to | [Wrap keys with HashiCorp Vault transit](how-to/use-hashicorp-vault-transit.md) | Draft |
+| How-to | [Run the HashiCorp Vault transit integration tests](how-to/run-hashicorp-vault-transit-integration-tests.md) | Draft |
 | How-to | Rotate keys | Planned (see the README's *Key rotation* section for now) |
 | How-to | Use HkdfGuard with dependency injection and `IConfiguration` | Planned |
 | How-to | Troubleshoot | Planned |
