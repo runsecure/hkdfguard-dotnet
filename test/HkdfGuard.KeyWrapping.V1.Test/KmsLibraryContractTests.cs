@@ -26,6 +26,7 @@ public class KmsLibraryContractTests
         { AbstractHkdfGuardKmsLibrary.ErrPayloadMalformed, -10 },
         { AbstractHkdfGuardKmsLibrary.ErrPayloadAuthFailed, -11 },
         { AbstractHkdfGuardKmsLibrary.ErrPayloadUnsupported, -12 },
+        { AbstractHkdfGuardKmsLibrary.ErrPayloadVersionRefused, -13 },
         { AbstractHkdfGuardKmsLibrary.ErrKekFingerprintMismatch, -16 },
         { AbstractHkdfGuardKmsLibrary.ErrKekNotFound, -17 },
         { AbstractHkdfGuardKmsLibrary.ErrKekAccessDenied, -18 },
@@ -71,7 +72,7 @@ public class KmsLibraryContractTests
             Assert.False(string.IsNullOrEmpty(library.DescribeStatus((int)row[0])), $"{platform}: no description for {row[0]}");
 
         // Reserved and unassigned codes, and anything positive, have no meaning to describe.
-        foreach (var unassigned in new[] { -7, -13, -15, -21, -31, -40, -63, -65, -80, -95, -101, 1 })
+        foreach (var unassigned in new[] { -7, -14, -15, -21, -31, -40, -63, -65, -80, -95, -101, 1 })
             Assert.Null(library.DescribeStatus(unassigned));
     }
 
@@ -96,6 +97,15 @@ public class KmsLibraryContractTests
 
         Assert.Contains("hkdfguard provision", description);
         Assert.DoesNotContain("v1-initialize", description);
+    }
+
+    [Fact]
+    public void Windows_NamesThePolicyThatSelectsThePayloadVersion()
+    {
+        var library = new WindowsHkdfGuardKmsLibrary();
+
+        Assert.Contains("ClassicalMode", library.DescribeStatus(AbstractHkdfGuardKmsLibrary.ErrPayloadVersionRefused));
+        Assert.Contains("ClassicalMode", library.DescribeStatus(AbstractHkdfGuardKmsLibrary.ErrProviderUnavailable));
     }
 
     [Fact]
