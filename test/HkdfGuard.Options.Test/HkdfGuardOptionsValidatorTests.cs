@@ -245,7 +245,8 @@ public class HkdfGuardOptionsValidatorTests
     [InlineData(1)]
     [InlineData(24)]
     [InlineData(24 * 365)]
-    public void Validate_EphemeralKeyRetentionHoursAtLeastOne_Succeeds(int hours)
+    [InlineData(HkdfGuardOptions.MaxEphemeralKeyRetentionHours)]
+    public void Validate_EphemeralKeyRetentionHoursInRange_Succeeds(int hours)
     {
         var options = ValidOptions();
         options.EphemeralKeyRetentionHours = hours;
@@ -286,7 +287,9 @@ public class HkdfGuardOptionsValidatorTests
     [Theory]
     [InlineData(0)]
     [InlineData(-1)]
-    public void Validate_EphemeralKeyRetentionHoursBelowOne_Fails(int hours)
+    [InlineData(HkdfGuardOptions.MaxEphemeralKeyRetentionHours + 1)]
+    [InlineData(int.MaxValue)] // past what a TimeSpan holds: refused here, never an OverflowException at startup
+    public void Validate_EphemeralKeyRetentionHoursOutOfRange_Fails(int hours)
     {
         var options = ValidOptions();
         options.EphemeralKeyRetentionHours = hours;
@@ -294,7 +297,7 @@ public class HkdfGuardOptionsValidatorTests
         var result = new HkdfGuardOptionsValidator().Validate(null, options);
 
         Assert.True(result.Failed);
-        Assert.Contains(result.Failures!, f => f.Contains("EphemeralKeyRetentionHours"));
+        Assert.Contains("EphemeralKeyRetentionHours must be between 1 and 87600.", result.Failures!);
     }
 
     [Theory]

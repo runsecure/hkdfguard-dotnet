@@ -64,11 +64,18 @@ public sealed class HkdfGuardOptions
 
     /// <summary>
     /// How many hours a superseded ephemeral key stays registered for decryption after a rotation
-    /// replaces it, before the ring disposes and removes it. At least 1. Unset keeps
-    /// KeyRingBuilder's default of 24 hours. Applies only when EphemeralKeys is not empty and
-    /// rotation is on.
+    /// replaces it, before the ring disposes and removes it. 1 to
+    /// <see cref="MaxEphemeralKeyRetentionHours"/>. Unset keeps KeyRingBuilder's default of 24
+    /// hours. Applies only when EphemeralKeys is not empty and rotation is on.
     /// </summary>
     public int? EphemeralKeyRetentionHours { get; set; }
+
+    /// <summary>
+    /// Largest EphemeralKeyRetentionHours: ten years (87,600 hours), as KeyFileMaxAgeDays is capped,
+    /// and far beyond any process's lifetime. A larger value would be a typo, and past about 256
+    /// million hours it doesn't fit a TimeSpan at all.
+    /// </summary>
+    public const int MaxEphemeralKeyRetentionHours = 87_600;
 
     /// <summary>
     /// How many days after a key file was last written it stops encrypting: 1 to 3650

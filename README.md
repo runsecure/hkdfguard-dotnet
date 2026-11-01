@@ -169,7 +169,7 @@ builder.WithLogger(logger);                               // ILogger<KeyRing>: l
 
 ```jsonc
 { "EphemeralKeyRotationHours": 6 }          // 1-1193
-{ "EphemeralKeyRetentionHours": 12 }        // at least 1; default 24
+{ "EphemeralKeyRetentionHours": 12 }        // 1-87600; default 24
 { "DisableEphemeralKeyRotation": true }
 ```
 
@@ -760,7 +760,9 @@ A missing (404) or empty secret returns 0 and is looked up again next time; any 
 (access denied, a disabled secret, the vault unreachable) throws the Azure exception. A name Key
 Vault can't hold (anything but 1-127 ASCII letters, digits and hyphens, e.g.
 `ConnectionStrings:Admin`) returns 0 without a call, so the cache can go last in a
-`ProtectedCacheCollection` behind other sources. A cached value isn't refreshed: a new secret
+`ProtectedCacheCollection` behind other sources. Put it last: a collection asks its sources in
+order and a source that throws fails the lookup, so a remote cache in front of a local one makes a
+network call for every local-only name, which can be throttled into failing every lookup. A cached value isn't refreshed: a new secret
 version is picked up by a new cache instance.
 
 **A secret never becomes a `string`.** Every SDK here would hand a secret over as a `string` (Key
