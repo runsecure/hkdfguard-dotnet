@@ -91,6 +91,64 @@ public class TrustedKeyFileTests
     public void LooksLikePlaintextKey_RawKey_IsDetected()
         => Assert.True(TrustedKeyFile.LooksLikePlaintextKey(RandomNumberGenerator.GetBytes(32)));
 
+    private static byte[] RawKeyThen(string lineEnding, byte? lastKeyByte = null)
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        if (lastKeyByte is { } last)
+            key[^1] = last;
+        return [.. key, .. Encoding.ASCII.GetBytes(lineEnding)];
+    }
+
+    [Theory]
+    [InlineData("\n")]
+    [InlineData("\r\n")]
+    public void LooksLikePlaintextKey_RawKeyThenALineEnding_IsDetected(string lineEnding)
+        => Assert.True(TrustedKeyFile.LooksLikePlaintextKey(RawKeyThen(lineEnding)));
+
+    [Theory]
+    [InlineData((byte)0x0A)]
+    [InlineData((byte)0x20)]
+    [InlineData((byte)0x0D)]
+    public void LooksLikePlaintextKey_RawKeyEndingInWhitespaceThenLf_IsDetected(byte lastKeyByte)
+        => Assert.True(TrustedKeyFile.LooksLikePlaintextKey(RawKeyThen("\n", lastKeyByte)));
+
+    public static TheoryData<byte[]> RawKeysWithoutOneLineEnding()
+    {
+        // Bytes no hex or base64 key holds, so the text checks can't match either.
+        var key = Enumerable.Repeat((byte)0xFF, 32).ToArray();
+        var data = new TheoryData<byte[]>();
+        data.Add([.. key, (byte)'\r']);                         // 33 bytes, CR alone
+        data.Add([.. key, (byte)'\n', (byte)'\n']);             // 34 bytes, two LFs
+        data.Add([.. key, (byte)'\n', (byte)'\r']);             // 34 bytes, LF CR
+        data.Add([.. key[..30], (byte)'\n']);                   // 30 bytes then LF (31 in all)
+        data.Add([.. key[..29], (byte)'\r', (byte)'\n']);       // 29 bytes then CRLF (31 in all)
+        data.Add([.. key, (byte)'\r', (byte)'\n', (byte)'\n']); // 35 bytes
+        return data;
+    }
+
+    [Theory]
+    [MemberData(nameof(RawKeysWithoutOneLineEnding))]
+    public void LooksLikePlaintextKey_RawKeyWithoutExactlyOneLineEnding_IsNotDetected(byte[] contents)
+        => Assert.False(TrustedKeyFile.LooksLikePlaintextKey(contents));
+
+    [Theory]
+    [InlineData("\n")]
+    [InlineData("\r\n")]
+    public async Task ReadContents_ARawKeyThenALineEnding_IsRefused_AsExposed(string lineEnding)
+    {
+        var ex = await Assert.ThrowsAsync<InvalidDataException>(async () => await ReadContents(RawKeyThen(lineEnding, (byte)'\n')));
+        Assert.Contains("exposed", ex.Message);
+    }
+
+    [Fact]
+    public async Task ReadContents_ARawKeyThenCrAlone_IsReturned()
+    {
+        // Not a plaintext key by any rule, and nothing else this reader checks refuses it.
+        byte[] contents = [.. Enumerable.Repeat((byte)0xFF, 32), (byte)'\r'];
+
+        Assert.Equal(contents, await ReadContents(contents));
+    }
+
     public static TheoryData<string> NotPlaintextKeys() => new()
     {
         new string('a', 63),                                   // one hex digit short

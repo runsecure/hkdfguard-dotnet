@@ -141,13 +141,13 @@ public static class TrustedKeyFile
     }
 
     /// <summary>
-    /// The native library's test for a plaintext key written to disk: exactly 32 bytes, or a 32-byte
-    /// key as 64 hex digits or as base64 (standard or URL-safe, padded or not), with any surrounding
-    /// whitespace.
+    /// The native library's test for a plaintext key written to disk: 32 raw bytes, optionally
+    /// followed by one line ending (LF or CRLF), or a 32-byte key as 64 hex digits or as base64
+    /// (standard or URL-safe, padded or not), with any surrounding whitespace.
     /// </summary>
     internal static bool LooksLikePlaintextKey(ReadOnlySpan<byte> contents)
     {
-        if (contents.Length == PlaintextKeyLength)
+        if (IsRawKey(contents))
             return true;
         if (contents.Length > PlaintextTextScanLimit)
             return false;
@@ -155,6 +155,16 @@ public static class TrustedKeyFile
         var text = contents.Trim(" \t\r\n\v\f"u8);
         return IsHexKey(text) || IsBase64Key(text);
     }
+
+    // Decided by total length and the trailing line-ending bytes only, never by trimming: a raw
+    // key's own last bytes may be whitespace values. The 32 key bytes themselves aren't examined.
+    private static bool IsRawKey(ReadOnlySpan<byte> contents) => contents.Length switch
+    {
+        PlaintextKeyLength => true,
+        PlaintextKeyLength + 1 => contents[^1] == (byte)'\n',
+        PlaintextKeyLength + 2 => contents[^2] == (byte)'\r' && contents[^1] == (byte)'\n',
+        _ => false,
+    };
 
     private static bool IsHexKey(ReadOnlySpan<byte> text)
     {
