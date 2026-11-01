@@ -1,4 +1,5 @@
 using HkdfGuard.Abstractions;
+using HkdfGuard.DataEncryptionKey;
 using Microsoft.Extensions.Options;
 
 namespace HkdfGuard.Options;
@@ -6,7 +7,7 @@ namespace HkdfGuard.Options;
 /// <summary>
 /// Validates an HkdfGuardOptions instance against the same constraints KeyRingBuilder itself
 /// enforces (KeyRefreshInterval 1-300, MaxRefreshFailures 1-100, EphemeralKeyRotationHours 1-1193,
-/// EphemeralKeyRetentionHours at least 1, at least one key source), plus what
+/// EphemeralKeyRetentionHours at least 1, KeyFileMaxAgeDays 1-3650, at least one key source), plus what
 /// ApplyTo needs to hold before it ever touches a KeyRingBuilder - a valid ServiceName (see ServiceNames), every
 /// KeyFile having a path, and version numbers that don't collide across KeyFiles/EphemeralKeys
 /// (KeyRing.Add throws on a duplicate version at Build time; catching it here up front gives a
@@ -33,6 +34,9 @@ public sealed class HkdfGuardOptionsValidator : IValidateOptions<HkdfGuardOption
 
         if (options.EphemeralKeyRetentionHours is < 1)
             failures.Add("EphemeralKeyRetentionHours must be at least 1.");
+
+        if (options.KeyFileMaxAgeDays is < KeyRingBuilder.MinKeyFileMaxAgeDays or > KeyRingBuilder.MaxKeyFileMaxAgeDays)
+            failures.Add($"KeyFileMaxAgeDays must be between {KeyRingBuilder.MinKeyFileMaxAgeDays} and {KeyRingBuilder.MaxKeyFileMaxAgeDays}.");
 
         if (options.DisableEphemeralKeyRotation && options.EphemeralKeyRotationHours is not null)
             failures.Add("DisableEphemeralKeyRotation and EphemeralKeyRotationHours can't both be set: one turns rotation off, the other schedules it.");

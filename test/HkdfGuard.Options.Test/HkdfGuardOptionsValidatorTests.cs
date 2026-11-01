@@ -255,6 +255,35 @@ public class HkdfGuardOptionsValidatorTests
     }
 
     [Theory]
+    [InlineData(1)]
+    [InlineData(365)]
+    [InlineData(3650)]
+    public void Validate_KeyFileMaxAgeDaysInRange_Succeeds(int days)
+    {
+        var options = ValidOptions();
+        options.KeyFileMaxAgeDays = days;
+
+        Assert.True(new HkdfGuardOptionsValidator().Validate(null, options).Succeeded);
+        Assert.Equal(days, options.ApplyTo(new KeyRingBuilder()).KeyFileMaxAgeDays); // and the builder accepts it
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(3651)]
+    public void Validate_KeyFileMaxAgeDaysOutOfRange_Fails(int days)
+    {
+        var options = ValidOptions();
+        options.KeyFileMaxAgeDays = days;
+
+        var result = new HkdfGuardOptionsValidator().Validate(null, options);
+
+        Assert.True(result.Failed);
+        Assert.Contains("KeyFileMaxAgeDays must be between 1 and 3650.", result.Failures!);
+        Assert.Throws<ArgumentOutOfRangeException>(() => options.ApplyTo(new KeyRingBuilder()));
+    }
+
+    [Theory]
     [InlineData(0)]
     [InlineData(-1)]
     public void Validate_EphemeralKeyRetentionHoursBelowOne_Fails(int hours)

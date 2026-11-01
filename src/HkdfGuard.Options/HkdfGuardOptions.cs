@@ -71,6 +71,15 @@ public sealed class HkdfGuardOptions
     public int? EphemeralKeyRetentionHours { get; set; }
 
     /// <summary>
+    /// How many days after a key file was last written it stops encrypting: 1 to 3650
+    /// (KeyRingBuilder.MaxKeyFileMaxAgeDays). Unset keeps KeyRingBuilder's default of 365 days. A
+    /// warning is logged at 90% of the age; past it, encrypting throws EncryptionLimitReachedException
+    /// and values under the key file still decrypt. The age is the file's last write time, so copy key
+    /// files with their timestamps kept (cp -p, rsync -t). Ephemeral keys have no age limit.
+    /// </summary>
+    public int? KeyFileMaxAgeDays { get; set; }
+
+    /// <summary>
     /// Versions whose wrapped DEK is read from a file on disk.
     /// </summary>
     public List<KeyFileOptions> KeyFiles { get; set; } = [];

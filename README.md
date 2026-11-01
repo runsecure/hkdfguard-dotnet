@@ -71,7 +71,8 @@ tracking and purpose-scoped Additional Authenticated Data (AAD).
     to the native wrapper to produce the key file. Nothing is carried forward from a previous
     deployment, so keys are never rotated in place and old versions never need to stay registered.
     How often keys rotate is therefore set by how often you deploy, and the library has no
-    rotation setting of its own.
+    rotation setting of its own - only a maximum age (`WithKeyFileMaxAgeDays`, 365 days by
+    default) past which a key file stops encrypting.
   - *Runtime keys* (`WithEphemeralKey`, registered at a higher version so they become
     `CurrentVersion`) are what the running process **encrypts** with - caches and other
     in-process protected values. A runtime key is generated at startup and is gone at the next
@@ -107,7 +108,8 @@ tracking and purpose-scoped Additional Authenticated Data (AAD).
   it. **For encrypt operations, add an ephemeral key** (`WithEphemeralKey(2)` beside
   `WithKeyFile(1, ...)`) so new values are encrypted under it. If an application does encrypt
   values that must outlive the process under a key file, bound that key's use by deploying a new
-  key file at a higher version regularly.
+  key file at a higher version regularly. `WithKeyFileMaxAgeDays` (365 days by default) enforces
+  this: a current key file stops encrypting at that age, and decryption under it never stops.
 - **Purpose-scoped protectors.** `IDataProtector` binds a `name` (purpose) to every operation as
   AAD, so a value protected for one purpose can never be decrypted under another - even using the
   same underlying key.
@@ -162,7 +164,7 @@ Configure both on the builder, or in configuration through `HkdfGuardOptions`:
 builder.WithEphemeralKeyRotation(TimeSpan.FromHours(6));  // 1 hour to ~49 days; default 24 hours
 builder.WithEphemeralKeyRetention(TimeSpan.FromHours(12)); // at least 1 minute; default 24 hours
 builder.WithoutEphemeralKeyRotation();                    // keep the startup key until restart
-builder.WithLogger(logger);                               // ILogger<KeyRing>: logs each rotation, retirement and failure
+builder.WithLogger(logger);                               // ILogger<KeyRing>: logs each rotation, retirement and failure, and a current key file nearing or past its age
 ```
 
 ```jsonc
@@ -194,12 +196,31 @@ await using var ring = await new KeyRingBuilder() /* ... */ .WithEphemeralKey(10
 var cache = new ProtectedCache(ring);
 ```
 
+Key files have a maximum age instead. AES-GCM is only safe for a limited number of encryptions
+under one key, and a key file outlives the process that counts them, so a key file stops
+encrypting 365 days after it was last written. `WithKeyFileMaxAgeDays`, or `KeyFileMaxAgeDays` in
+`appsettings.json`, sets anywhere from 1 to 3650. A warning is logged at 90% of that age (event
+11, `KeyFileAgeWarning`). After it, encrypting throws `EncryptionLimitReachedException` (event 12,
+`KeyFileExpired`, is logged as critical), and values under that key file still decrypt. Only the
+current version ever encrypts, so a superseded key file is never reported. The age is the file's
+last write time, so copy key files with their timestamps kept (`cp -p`, `rsync -t`). A plain copy
+resets the clock.
+
+```csharp
+builder.WithKeyFileMaxAgeDays(90);                        // 1-3650; default 365
+```
+
+```jsonc
+{ "KeyFileMaxAgeDays": 90 }                 // 1-3650; default 365
+```
+
 What this means in practice:
 
 - **Release regularly.** A data encryption key lives exactly as long as its release, so release
   cadence is rotation cadence. If a release stays in production for a long time, schedule a
-  redeployment, even one with no code changes, to rotate its key. Compliance rules about key age
-  belong in the deployment process.
+  redeployment, even one with no code changes, to rotate its key - a key file older than
+  `KeyFileMaxAgeDays` stops encrypting. Compliance rules about key age belong in the deployment
+  process.
 - **Expect the cache to be empty after a restart.** Everything encrypted under an ephemeral key
   becomes unreadable once the process restarts, so treat cached values as rebuildable. Never
   persist them. Rotating the cache key on every restart is intended.
@@ -278,7 +299,7 @@ Node/Python mirror this layering, adding their own consumer branches as they cat
 | Project | Purpose |
 |---|---|
 | `HkdfGuard.Diagnostics` | Every library's telemetry, centralized: `HkdfGuardTelemetry` (one `ComponentTelemetry` per component - `ActivitySource`, `Meter`, `EnableSensitiveLogging`, `RecordException`, `LogSensitiveOperation`), `ActivityNames`/`AttributeNames`/`EventNames`/`MetricNames` (OpenTelemetry semantic-convention-style names, e.g. `hkdfguard.cache.add`), `CacheMetrics`, and `HkdfGuardLoggerExtensions` (`[LoggerMessage]`-generated `ILogger` extensions). No dependency on any other project in this solution - the lowest layer, designed so its naming/shape can be ported identically into a Java/Node/Python/Go implementation. |
-| `HkdfGuard.Abstractions` | Interfaces and pure data types only (`IKeyRing`, `IKeyWrapper`, `ICryptoProvider`, `ICryptoProviderFactory`, `IDataEncryptionKey`, `IDataProtector`, `IProtectedCache`/`IProtectedReadOnlyCache` - the latter with `DecryptAsync`/`GetMaxDecryptedLengthAsync` defaulting to its synchronous members, `IEncryptedFormatProvider`, `KeyTrackingValue`, `ArrayUtility`, `ProtectedCacheBase`). Depends only on `HkdfGuard.Diagnostics`. |
+| `HkdfGuard.Abstractions` | Interfaces and pure data types only (`IKeyRing`, `IKeyWrapper`, `ICryptoProvider`, `ICryptoProviderFactory`, `IDataEncryptionKey`, `IDataProtector`, `IProtectedCache`/`IProtectedReadOnlyCache` - the latter with `DecryptAsync`/`GetMaxDecryptedLengthAsync` defaulting to its synchronous members, `IEncryptedFormatProvider`, `KeyTrackingValue`, `ArrayUtility`, `ProtectedCacheBase`, `EncryptionLimitReachedException`). Depends only on `HkdfGuard.Diagnostics`. |
 | `HkdfGuard.CryptoProvider.AesGcm256` | `AesGcmCryptoSession` (internal, key-bound at construction) wrapped directly by the public `AesGcmCryptoProvider` (an `ICryptoProvider` that reveals/refreshes it from an `IKeyWrapper` + wrapped bytes, and only ever holds one active session at a time; also exposes `GetEncryptedAllocationLength`/`GetDecryptedAllocationLength` for sizing buffers), minted via `AesGcmCryptoProviderFactory` (an `ICryptoProviderFactory`); plus `AesGcmPipelineDataProtector` (an `IPipelineDataProtector` over one in-memory key, for protecting values in a pipeline before a durable KEK exists - see below). Depends on `HkdfGuard.Abstractions`/`HkdfGuard.Diagnostics`; its `HkdfGuardTelemetry.CryptoProviderAesGcm256` component keeps its own independent `EnableSensitiveLogging` flag rather than sharing `Root`'s. |
 | `HkdfGuard.KeyWrapping.V1` | `NativeHkdfKeyWrapperV1` (an `IKeyWrapper`, whose async methods complete synchronously) and `NativeHost`, which resolve and bind the current OS's native KMS library (Linux/.so, macOS/.dylib, Windows/.dll - see `Interop/`) to wrap and unwrap a 32-byte DEK under a service-identified KEK held entirely outside this process. |
 | `HkdfGuard.SecureFile` | `TrustedKeyFile.ReadAsync` and `KeyFileTrust` - the managed equivalent of the native library's `hkdfguard_open_file`, for key wrappers with no native library to read key files through (network KMS providers). Refuses a key file unless it, and every folder above it, is owned and modifiable only by the operating system's administrators and the principals a `KeyFileTrust` adds (Windows ACLs and final-path check; Linux/macOS ownership and mode bits, following only trusted symbolic links), and refuses contents that look like an unwrapped key. Depends on `HkdfGuard.Abstractions`. |
@@ -294,7 +315,7 @@ Node/Python mirror this layering, adding their own consumer branches as they cat
 | `HkdfGuard.Cache.HashiCorpVault` | `HashiCorpVaultSecretCache` - a `RemoteSecretCache` over one HashiCorp Vault KV secrets engine (version 2 or 1): on a miss it reads just the requested secret's path (`path#key` picks the key) over Vault's HTTP API, reading the unbuffered response body into pinned memory so the value is never a string, encrypts it under the ring's current key bound to its name, and caches the ciphertext. Never lists secrets (the token needs only `read`); paths match exactly, as Vault's do; names that aren't a path and key are reported missing without a call. Authentication is left to an `IVaultTokenProvider` (`StaticVaultToken` for a token you hold). No dependency beyond `HkdfGuard.Cache`. |
 | `HkdfGuard.EncryptedConfiguration` | `ProtectedConfigurationRoot` (an `IProtectedConfigurationRoot`) - wraps an `IConfigurationRoot`, revealing values formatted as protected secrets via a `KeyRing`; configuration itself only ever holds ciphertext, and `Decrypt` reads fresh from the underlying root every time so `Reload` takes effect immediately. Each value is bound to its own configuration key (`ProtectedConfigurationPurpose`), so a value copied to another key fails to decrypt. |
 | `HkdfGuard.DependencyInjection` | `AddKeyRingAsync` - builds a `KeyRing` asynchronously at registration and registers it as a singleton in an `IServiceCollection`. |
-| `HkdfGuard.Options` | `HkdfGuardOptions`/`HkdfGuardOptionsValidator`/`HkdfGuardOptionsExtensions.ApplyTo` - a plain-data mirror of `KeyRingBuilder`'s configuration surface (`ServiceName`, `KeyRefreshInterval`, `MaxRefreshFailures`/`FailOpenOnRefreshFailure`, key files, ephemeral keys), for binding a `KeyRing`'s identity/policy/key files from configuration. |
+| `HkdfGuard.Options` | `HkdfGuardOptions`/`HkdfGuardOptionsValidator`/`HkdfGuardOptionsExtensions.ApplyTo` - a plain-data mirror of `KeyRingBuilder`'s configuration surface (`ServiceName`, `KeyRefreshInterval`, `MaxRefreshFailures`/`FailOpenOnRefreshFailure`, the ephemeral rotation and retention, `KeyFileMaxAgeDays`, key files, ephemeral keys), for binding a `KeyRing`'s identity/policy/key files from configuration. |
 | `HkdfGuard.Diagnostics.Test`, `HkdfGuard.Abstractions.Test`, `HkdfGuard.CryptoProvider.AesGcm256.Test`, `HkdfGuard.KeyWrapping.V1.Test`, `HkdfGuard.SecureFile.Test`, `HkdfGuard.KeyWrapping.AwsKms.Test`, `HkdfGuard.KeyWrapping.AzureKeyVault.Test`, `HkdfGuard.KeyWrapping.GoogleKms.Test`, `HkdfGuard.KeyWrapping.HashiCorpVault.Test`, `HkdfGuard.DataEncryptionKey.Test`, `HkdfGuard.Cache.Test`, `HkdfGuard.Cache.AzureKeyVault.Test`, `HkdfGuard.Cache.AwsSecretsManager.Test`, `HkdfGuard.Cache.GoogleSecretManager.Test`, `HkdfGuard.Cache.HashiCorpVault.Test`, `HkdfGuard.EncryptedConfiguration.Test`, `HkdfGuard.DependencyInjection.Test`, `HkdfGuard.Options.Test` | xUnit test suites, maintained at full line/branch coverage for their respective projects. |
 
 Requires **.NET 10** (`net10.0`).
