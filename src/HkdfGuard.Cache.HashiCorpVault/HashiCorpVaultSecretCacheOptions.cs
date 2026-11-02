@@ -1,3 +1,5 @@
+using HkdfGuard.Integration.HashiCorpVault;
+
 namespace HkdfGuard.Cache.HashiCorpVault;
 
 /// <summary>The version of a KV secrets engine, which decides its read path and response shape.</summary>
@@ -30,13 +32,13 @@ public sealed class HashiCorpVaultSecretCacheOptions
     public string? Namespace { get; init; }
 
     /// <summary>The fewest retries <see cref="RetryCount"/> allows.</summary>
-    public const int MinRetryCount = 3;
+    public const int MinRetryCount = VaultHttp.MinRetryCount;
 
     /// <summary>The most retries <see cref="RetryCount"/> allows.</summary>
-    public const int MaxRetryCount = 10;
+    public const int MaxRetryCount = VaultHttp.MaxRetryCount;
 
     /// <summary>The longest wait between retries, before the random 0-100 ms each adds.</summary>
-    public static readonly TimeSpan MaxRetryDelay = TimeSpan.FromSeconds(10);
+    public static readonly TimeSpan MaxRetryDelay = VaultHttp.MaxRetryDelay;
 
     /// <summary>
     /// How long one attempt may take: getting the token, or one request and Vault's whole response.
@@ -82,4 +84,14 @@ public sealed class HashiCorpVaultSecretCacheOptions
     /// see the token. Default false.
     /// </summary>
     public bool AllowRedirects { get; init; }
+
+    /// <summary>
+    /// Which CA certificates Vault's certificate must chain to, and which client certificate is
+    /// presented to a Vault requiring mutual TLS: PEM, or password-protected PKCS#12 key stores whose
+    /// passwords are protected by a protector on the key ring (see <see cref="VaultTlsOptions"/>). Read
+    /// when the cache is created, and applied to its own handler, or to a supplied
+    /// <see cref="HttpMessageHandler"/> whose innermost handler is a SocketsHttpHandler. Null (the
+    /// default) for the operating system's trust store and no client certificate.
+    /// </summary>
+    public VaultTlsOptions? Tls { get; init; }
 }

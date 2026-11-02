@@ -1,29 +1,28 @@
 using HkdfGuard.Abstractions;
 
-namespace HkdfGuard.KeyWrapping.HashiCorpVault;
+namespace HkdfGuard.Integration.HashiCorpVault;
 
 /// <summary>
-/// Supplies the Vault token every transit request is made with. Getting that token - logging in
-/// with AppRole, Kubernetes or a certificate, renewing it, replacing it before it expires - is the
-/// source's job, not the wrapper's, so any auth method can sit behind it.
-/// <see cref="StaticVaultTokenSource"/> is a token you already hold.
+/// Supplies a Vault token in plaintext, for code that runs before there is a key ring to protect it
+/// with - HashiCorpVaultTransitKeyWrapper, whose key ring depends on it. Getting that token - logging
+/// in with AppRole, Kubernetes or a certificate, renewing it, replacing it before it expires - is the
+/// source's job, so any auth method can sit behind it. <see cref="StaticVaultTokenSource"/> is a token
+/// you already hold.
 /// <para>
-/// The token is copied into a buffer the wrapper owns, pinned and zeroed once the request has been
-/// sent, rather than returned as a string that would live until collected. (The cache's
-/// IVaultTokenProvider hands its token over protected by the key ring instead; a key wrapper can't,
-/// since it runs before there is a key ring.)
+/// The token is copied into a buffer the caller owns, pinned and zeroed once the request has been
+/// sent, rather than returned as a string that would live until collected. Once there is a key ring,
+/// prefer <see cref="IVaultTokenProvider"/>, which hands its token over protected by it.
 /// </para>
 /// </summary>
 public interface IVaultTokenSource
 {
     /// <summary>
-    /// Copies the token to make the next request with into destination. Asked for once per wrap,
-    /// unwrap or generate - not per retry. A token that is empty or isn't printable ASCII without
-    /// spaces fails the call.
+    /// Copies the token to make the next request with into destination. Asked for once per
+    /// operation, not per retry (the transit key wrapper asks once per wrap, unwrap or generate). A
+    /// token that is empty or isn't printable ASCII without spaces fails the operation.
     /// </summary>
-    /// <param name="destination">Where to write the token:
-    /// <see cref="HashiCorpVaultTransitKeyWrapper.MaxTokenLength"/> characters.</param>
-    /// <param name="cancellationToken">Cancelled once the wrapper's timeout has passed.</param>
+    /// <param name="destination">Where to write the token: <see cref="VaultHttp.MaxTokenLength"/> characters.</param>
+    /// <param name="cancellationToken">Cancelled once the caller's timeout has passed.</param>
     /// <returns>The number of characters written.</returns>
     ValueTask<int> CopyTokenAsync(Memory<char> destination, CancellationToken cancellationToken);
 }
@@ -39,13 +38,12 @@ public sealed class StaticVaultTokenSource : IVaultTokenSource, IDisposable
     /// <param name="token">The token, copied. It is read-only, so it isn't zeroed: clear it once
     /// this returns.</param>
     /// <exception cref="ArgumentException">token is empty, longer than
-    /// <see cref="HashiCorpVaultTransitKeyWrapper.MaxTokenLength"/>, or isn't printable ASCII
-    /// without spaces</exception>
+    /// <see cref="VaultHttp.MaxTokenLength"/>, or isn't printable ASCII without spaces</exception>
     public StaticVaultTokenSource(ReadOnlySpan<char> token)
     {
-        if (!HashiCorpVaultTransitKeyWrapper.IsValidToken(token) || token.Length > HashiCorpVaultTransitKeyWrapper.MaxTokenLength)
+        if (!VaultHttp.IsValidToken(token) || token.Length > VaultHttp.MaxTokenLength)
             throw new ArgumentException(
-                $"A Vault token is 1-{HashiCorpVaultTransitKeyWrapper.MaxTokenLength} printable ASCII characters, with no spaces.", nameof(token));
+                $"A Vault token is 1-{VaultHttp.MaxTokenLength} printable ASCII characters, with no spaces.", nameof(token));
 
         _token = ArrayUtility.AllocatePinned<char>(token.Length);
         token.CopyTo(_token);

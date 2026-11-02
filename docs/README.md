@@ -18,6 +18,9 @@ see [Wrap keys with HashiCorp Vault transit](how-to/use-hashicorp-vault-transit.
 **Filling `${name}` items in a connection string or config file** from protected caches or remote
 secret stores: see [Resolve configuration templates from protected caches](how-to/resolve-configuration-templates.md).
 
+**Calling Vault's API** from .NET (logging in, managing engines, policies, PKI): see
+[Call Vault's API with the HashiCorp Vault client](how-to/use-hashicorp-vault-client.md).
+
 ## Map
 
 | Kind | Page | Status |
@@ -34,6 +37,7 @@ secret stores: see [Resolve configuration templates from protected caches](how-t
 | How-to | [Wrap keys with HashiCorp Vault transit](how-to/use-hashicorp-vault-transit.md) | Draft |
 | How-to | [Run the HashiCorp Vault transit integration tests](how-to/run-hashicorp-vault-transit-integration-tests.md) | Draft |
 | How-to | [Resolve configuration templates from protected caches](how-to/resolve-configuration-templates.md) | Draft |
+| How-to | [Call Vault's API with the HashiCorp Vault client](how-to/use-hashicorp-vault-client.md) | Draft |
 | How-to | Rotate keys | Planned (see the README's *Key rotation* section for now) |
 | How-to | Use HkdfGuard with dependency injection and `IConfiguration` | Planned |
 | How-to | Troubleshoot | Planned |

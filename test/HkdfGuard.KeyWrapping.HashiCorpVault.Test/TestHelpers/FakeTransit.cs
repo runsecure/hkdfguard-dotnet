@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using HkdfGuard.Integration.HashiCorpVault;
 
 namespace HkdfGuard.KeyWrapping.HashiCorpVault.Test.TestHelpers;
 

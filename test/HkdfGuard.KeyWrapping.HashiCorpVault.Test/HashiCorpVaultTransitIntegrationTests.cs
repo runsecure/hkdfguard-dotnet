@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using HkdfGuard.Abstractions;
 using HkdfGuard.CryptoProvider.AesGcm256;
+using HkdfGuard.Integration.HashiCorpVault;
 using HkdfGuard.KeyWrapping.HashiCorpVault.Test.TestHelpers;
 
 namespace HkdfGuard.KeyWrapping.HashiCorpVault.Test;
