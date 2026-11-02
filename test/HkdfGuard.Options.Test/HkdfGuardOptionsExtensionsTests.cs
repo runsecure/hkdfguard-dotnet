@@ -70,6 +70,23 @@ public class HkdfGuardOptionsExtensionsTests
     }
 
     [Fact]
+    public void ApplyTo_KeyFileMaxAgeDays_SetsTheMaximumAge()
+    {
+        var builder = new HkdfGuardOptions { KeyFileMaxAgeDays = 30 }.ApplyTo(new KeyRingBuilder());
+
+        Assert.Equal(30, builder.KeyFileMaxAgeDays);
+    }
+
+    [Fact]
+    public void ApplyTo_KeyFileMaxAgeDaysUnset_KeepsTheDefault()
+    {
+        var builder = new HkdfGuardOptions().ApplyTo(new KeyRingBuilder());
+
+        Assert.Equal(KeyRingBuilder.DefaultKeyFileMaxAgeDays, builder.KeyFileMaxAgeDays);
+        Assert.Equal(365, builder.KeyFileMaxAgeDays);
+    }
+
+    [Fact]
     public void ApplyTo_RetentionUnset_KeepsTheTwentyFourHourDefault()
     {
         var builder = new HkdfGuardOptions().ApplyTo(new KeyRingBuilder());

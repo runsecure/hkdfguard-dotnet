@@ -20,4 +20,7 @@ public static class AttributeNames
     public const string EncryptionCount = "hkdfguard.encryption_count";
     public const string EncryptionLimit = "hkdfguard.encryption_limit";
     public const string ConsecutiveFailures = "hkdfguard.consecutive_failures";
+
+    /// <summary>The path of a key file - carried by the key-file age entries as their KeyFilePath value.</summary>
+    public const string KeyFilePath = "hkdfguard.key_file.path";
 }

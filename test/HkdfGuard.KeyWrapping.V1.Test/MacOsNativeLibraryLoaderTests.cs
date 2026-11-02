@@ -647,12 +647,6 @@ public class MacOsNativeLibraryLoaderTests
     [InlineData("Windows", "HkdfGuard.Kms.Windows.v1", 1)] // Windows library on Windows: the Windows loader
     [InlineData("OSX", "hkdfguard_v1", 2)]      // macOS library on macOS: the macOS loader
     [InlineData("Linux", "HkdfGuard.Kms.Linux.v1", 3)] // Linux library on Linux: the Linux loader
-    [InlineData("OSX", "HkdfGuard.Kms.Windows.v1", 0)] // a KMS library name on the wrong platform: default
-    [InlineData("Windows", "hkdfguard_v1", 0)]
-    [InlineData("Linux", "hkdfguard_v1", 0)]
-    [InlineData("Linux", "HkdfGuard.Kms.Windows.v1", 0)]
-    [InlineData("Windows", "HkdfGuard.Kms.Linux.v1", 0)]
-    [InlineData("OSX", "HkdfGuard.Kms.Linux.v1", 0)]
     [InlineData("Windows", "wintrust.dll", 0)]  // any other import: default
     [InlineData("OSX", "libSystem.B.dylib", 0)]
     [InlineData("Linux", "libc.so.6", 0)]
@@ -661,5 +655,24 @@ public class MacOsNativeLibraryLoaderTests
         var routed = NativeLibraryResolver.Route(libraryName, p => p == OSPlatform.Create(platform), () => 1, () => 2, () => 3);
 
         Assert.Equal(expected, (int)routed);
+    }
+
+    [Theory]
+    [InlineData("OSX", "HkdfGuard.Kms.Windows.v1")]
+    [InlineData("Linux", "HkdfGuard.Kms.Windows.v1")]
+    [InlineData("Windows", "hkdfguard_v1")]
+    [InlineData("Linux", "hkdfguard_v1")]
+    [InlineData("Windows", "HkdfGuard.Kms.Linux.v1")]
+    [InlineData("OSX", "HkdfGuard.Kms.Linux.v1")]
+    public void Resolver_RefusesAKmsLibraryNameOnTheWrongPlatform_InsteadOfFallingBackToTheDefaultSearch(string platform, string libraryName)
+    {
+        var loaded = false;
+        IntPtr Load() { loaded = true; return 1; }
+
+        var refused = Assert.Throws<PlatformNotSupportedException>(
+            () => NativeLibraryResolver.Route(libraryName, p => p == OSPlatform.Create(platform), Load, Load, Load));
+
+        Assert.Contains(libraryName, refused.Message);
+        Assert.False(loaded);
     }
 }

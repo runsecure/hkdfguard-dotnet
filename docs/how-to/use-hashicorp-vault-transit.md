@@ -84,12 +84,13 @@ into a pinned buffer the wrapper zeroes once the request has been sent, rather t
 string.
 
 `StaticVaultTokenSource` holds a token you already have, such as one a Vault Agent wrote to a sink
-file. Nothing renews it, so once it expires every request fails with 403:
+file. Nothing renews it, so once it expires every request fails with 403. Pass in the token however
+your application is given it:
 
 ```csharp
 using HkdfGuard.KeyWrapping.HashiCorpVault;
 
-using var token = new StaticVaultTokenSource(Environment.GetEnvironmentVariable("VAULT_TOKEN"));
+using var token = new StaticVaultTokenSource(vaultToken); // the Vault token, passed in or configured
 ```
 
 For a long-running service, prefer a Vault Agent on loopback with `use_auto_auth_token`, which

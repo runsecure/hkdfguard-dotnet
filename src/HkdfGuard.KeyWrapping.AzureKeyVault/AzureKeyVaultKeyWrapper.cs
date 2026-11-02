@@ -26,7 +26,9 @@ namespace HkdfGuard.KeyWrapping.AzureKeyVault;
 /// Both keys are pinned: a wrapped DEK records only the key versions it was made with (see
 /// WrappedDekEnvelope), and the vault and key names always come from the constructor. Rotating
 /// either key in Key Vault therefore needs nothing here - existing key files keep naming the
-/// version that made them, which must stay enabled while they're in use.
+/// version that made them, which must stay enabled while they're in use. The wrapper keeps one
+/// Key Vault client per key version, but only once a call through it succeeds, so a wrapped DEK
+/// naming a version Key Vault refuses leaves nothing behind.
 /// </para>
 /// <para>
 /// The optional context is bound into the signature, and must be given again, exactly, to reveal
@@ -105,11 +107,12 @@ public sealed class AzureKeyVaultKeyWrapper : IKeyWrapper
 
         // Pinned, so no copy is left behind by compaction before it is zeroed.
         var buffer = ArrayUtility.AllocatePinned<byte>(plaintext.Length);
-        WrapResult wrap;
+        (string Version, byte[] EncryptedKey) wrap;
         try
         {
             plaintext.Span.CopyTo(buffer);
-            wrap = await CallAsync(() => Client(_wrappingKeyId).WrapKeyAsync(KeyWrapAlgorithm.RsaOaep256, buffer, cancellationToken), "wrap", _wrappingKey)
+            wrap = await CallAsync(_wrappingKeyId, client => client.WrapKeyAsync(KeyWrapAlgorithm.RsaOaep256, buffer, cancellationToken),
+                    w => (Version: VersionOf(w.KeyId, _wrappingKey, "wrap"), w.EncryptedKey), "wrap", _wrappingKey)
                 .ConfigureAwait(false);
         }
         finally
@@ -117,15 +120,16 @@ public sealed class AzureKeyVaultKeyWrapper : IKeyWrapper
             CryptographicOperations.ZeroMemory(buffer);
         }
 
-        var unsigned = WrappedDekEnvelope.BuildUnsigned(VersionOf(wrap.KeyId, _wrappingKey, "wrap"), wrap.EncryptedKey);
+        var unsigned = WrappedDekEnvelope.BuildUnsigned(wrap.Version, wrap.EncryptedKey);
         var length = unsigned.Length + WrappedDekEnvelope.KeyVersionLength + WrappedDekEnvelope.SignatureLength;
         if (length > WrappedKeyLimits.MaxBytes)
             throw new CryptographicException(
                 $"The wrapped DEK would be {length} bytes; a wrapped DEK is at most {WrappedKeyLimits.MaxBytes}. Use a 2048- or 3072-bit RSA key for '{_wrappingKey.Name}'.");
 
-        var sign = await CallAsync(() => Client(_signingKeyId).SignDataAsync(SignatureAlgorithm.ES256, WrappedDekEnvelope.SignedData(unsigned, _context), cancellationToken), "sign", _signingKey)
+        var sign = await CallAsync(_signingKeyId, client => client.SignDataAsync(SignatureAlgorithm.ES256, WrappedDekEnvelope.SignedData(unsigned, _context), cancellationToken),
+                s => (Version: VersionOf(s.KeyId, _signingKey, "sign"), s.Signature), "sign", _signingKey)
             .ConfigureAwait(false);
-        return WrappedDekEnvelope.Write(unsigned, VersionOf(sign.KeyId, _signingKey, "sign"), sign.Signature, result.Span);
+        return WrappedDekEnvelope.Write(unsigned, sign.Version, sign.Signature, result.Span);
     }
 
     /// <inheritdoc/>
@@ -141,18 +145,19 @@ public sealed class AzureKeyVaultKeyWrapper : IKeyWrapper
 
             // The signature first: nothing reaches UnwrapKey that a principal allowed to sign didn't make.
             var signed = WrappedDekEnvelope.SignedData(wrapped.Span[..parts.UnsignedLength], _context);
-            var verify = await CallAsync(() => Client(VersionId(_signingKey, parts.SigningKeyVersion))
-                    .VerifyDataAsync(SignatureAlgorithm.ES256, signed, parts.Signature, cancellationToken), "verify", _signingKey)
+            var signingKeyVersion = parts.SigningKeyVersion;
+            await CallAsync(VersionId(_signingKey, signingKeyVersion),
+                    client => client.VerifyDataAsync(SignatureAlgorithm.ES256, signed, parts.Signature, cancellationToken),
+                    verify => verify.IsValid
+                        ? verify
+                        : throw new CryptographicException(
+                            $"The wrapped DEK's signature doesn't verify under '{_signingKey.Name}' version {signingKeyVersion}: it was tampered with, wrapped under a different context, or not made by a principal allowed to sign."),
+                    "verify", _signingKey)
                 .ConfigureAwait(false);
-            if (!verify.IsValid)
-                throw new CryptographicException(
-                    $"The wrapped DEK's signature doesn't verify under '{_signingKey.Name}' version {parts.SigningKeyVersion}: it was tampered with, wrapped under a different context, or not made by a principal allowed to sign.");
 
-            var unwrap = await CallAsync(() => Client(VersionId(_wrappingKey, parts.WrappingKeyVersion))
-                    .UnwrapKeyAsync(KeyWrapAlgorithm.RsaOaep256, parts.WrappedDek, cancellationToken), "unwrap", _wrappingKey)
+            var revealed = await CallAsync(VersionId(_wrappingKey, parts.WrappingKeyVersion),
+                    client => client.UnwrapKeyAsync(KeyWrapAlgorithm.RsaOaep256, parts.WrappedDek, cancellationToken), unwrap => unwrap.Key, "unwrap", _wrappingKey)
                 .ConfigureAwait(false);
-
-            var revealed = unwrap.Key;
             try
             {
                 if (revealed.Length > result.Length)
@@ -218,9 +223,8 @@ public sealed class AzureKeyVaultKeyWrapper : IKeyWrapper
         return keyId => new CryptographyClient(keyId, credential, options ?? new CryptographyClientOptions());
     }
 
-    // One client per key version, kept: each caches the public key it verifies with, and a ring's
-    // refresh unwraps under the same versions every interval.
-    private CryptographyClient Client(Uri keyId) => _clients.GetOrAdd(keyId, _clientFactory);
+    // The number of clients kept, for tests.
+    internal int CachedClientCount => _clients.Count;
 
     private static Uri VersionId(KeyVaultKeyIdentifier key, string version)
         => new($"{key.VaultUri.AbsoluteUri.TrimEnd('/')}/keys/{key.Name}/{version}");
@@ -245,6 +249,26 @@ public sealed class AzureKeyVaultKeyWrapper : IKeyWrapper
         if (!SameKey(used, expected) || string.IsNullOrEmpty(used.Version))
             throw new CryptographicException($"Azure Key Vault {operation} for key '{expected.Name}' reported key '{keyId}' instead.");
         return used.Version;
+    }
+
+    // Makes one Key Vault call through the client for keyId, and returns what accept makes of its
+    // response (accept throws to refuse it). One client per key version is kept: each caches the
+    // public key it verifies with, and a ring's refresh unwraps under the same versions every
+    // interval. But a client is kept only once a call through it succeeds and its response is
+    // accepted: the versions unwrap uses come from the wrapped DEK, so a payload naming a version
+    // Key Vault refuses, or whose signature doesn't verify, leaves nothing behind. CryptographyClient
+    // holds nothing to dispose, so a client that isn't kept - refused, or another call cached one for
+    // the same key first - is simply dropped.
+    private async Task<TResult> CallAsync<T, TResult>(Uri keyId, Func<CryptographyClient, Task<T>> call, Func<T, TResult> accept,
+        string operation, KeyVaultKeyIdentifier key)
+    {
+        if (_clients.TryGetValue(keyId, out var cached))
+            return accept(await CallAsync(() => call(cached), operation, key).ConfigureAwait(false));
+
+        var client = _clientFactory(keyId);
+        var result = accept(await CallAsync(() => call(client), operation, key).ConfigureAwait(false));
+        _clients.TryAdd(keyId, client);
+        return result;
     }
 
     // Turns Azure failures - service refusals (RequestFailedException) and client-side ones such as

@@ -97,7 +97,7 @@ internal abstract class AbstractHkdfGuardKmsLibrary
         ErrFileIo => "the key file is not a regular file, is in use by a writer, or could not be read",
         ErrFileTooShort => "the key file is shorter than a wrapped DEK",
         ErrFileTooLong => "the key file is longer than a wrapped DEK",
-        ErrFilePlaintextKey => "the key file holds what looks like an UNWRAPPED key (32 raw bytes, or its hex or base64): treat it as a key exposure",
+        ErrFilePlaintextKey => "the key file holds what looks like an UNWRAPPED key (32 raw bytes, optionally followed by one line ending (LF or CRLF), or its hex or base64): treat it as a key exposure",
         ErrFileMalformed => "the key file is the right size, but is not a valid wrapped DEK",
         ErrFileUntrusted => "the key file's path is not trusted: a link or reparse point, a short or network path, or a file or folder another account could replace",
         ErrWinGroupInvalid => @"an HKLM\Software\Policies\HkdfGuard\KeyUseGroups entry is unresolvable, not a group, not host-local, or over-broad",

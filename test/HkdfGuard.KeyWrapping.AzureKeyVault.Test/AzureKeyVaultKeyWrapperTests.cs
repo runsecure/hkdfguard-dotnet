@@ -208,6 +208,115 @@ public sealed class AzureKeyVaultKeyWrapperTests : IDisposable
         Assert.IsType<RequestFailedException>(ex.InnerException);
     }
 
+    // A wrapper whose factory counts the clients it makes.
+    private (AzureKeyVaultKeyWrapper Wrapper, Func<int> Created) CountingWrapper()
+    {
+        var created = 0;
+        var wrapper = new AzureKeyVaultKeyWrapper(FakeKeyVault.WrappingKeyId, FakeKeyVault.SigningKeyId,
+            keyId => { Interlocked.Increment(ref created); return _vault.Client(keyId); }, Context, keyFileTrust: null);
+        return (wrapper, () => Volatile.Read(ref created));
+    }
+
+    // A real wrapped DEK with its signing key version replaced by one the vault has never had.
+    private static byte[] WithSigningVersion(byte[] wrapped, string version)
+    {
+        var parts = WrappedDekEnvelope.Parse(wrapped);
+        var rewritten = new byte[WrappedKeyLimits.MaxBytes];
+        var length = WrappedDekEnvelope.Write(wrapped[..parts.UnsignedLength], version, parts.Signature, rewritten);
+        return rewritten[..length];
+    }
+
+    [Fact]
+    public async Task Unwrap_UnderSigningVersionsKeyVaultDoesNotHave_CachesNoClient()
+    {
+        var wrapped = await Wrap(Wrapper(), RandomNumberGenerator.GetBytes(32));
+        var (wrapper, created) = CountingWrapper();
+
+        for (var i = 0; i < 10; i++)
+        {
+            var forged = WithSigningVersion(wrapped, Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16)));
+            var ex = await Assert.ThrowsAsync<CryptographicException>(async () => await Unwrap(wrapper, forged));
+            Assert.IsType<RequestFailedException>(ex.InnerException);
+        }
+
+        Assert.Equal(10, created());
+        Assert.Equal(0, wrapper.CachedClientCount);
+        Assert.DoesNotContain(_vault.Calls, c => c.StartsWith("unwrap", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Unwrap_WhoseSignatureDoesNotVerify_CachesNoClient()
+    {
+        var wrapped = await Wrap(Wrapper(), RandomNumberGenerator.GetBytes(32));
+        wrapped[^1] ^= 0x01; // the signature's last byte
+        var (wrapper, created) = CountingWrapper();
+
+        for (var i = 0; i < 3; i++)
+        {
+            var ex = await Assert.ThrowsAsync<CryptographicException>(async () => await Unwrap(wrapper, wrapped));
+            Assert.Contains("signature doesn't verify", ex.Message);
+        }
+
+        Assert.Equal(3, created());
+        Assert.Equal(0, wrapper.CachedClientCount);
+    }
+
+    [Fact]
+    public async Task Unwrap_ThatSucceeds_CachesTheClientsItUsed()
+    {
+        var dek = RandomNumberGenerator.GetBytes(32);
+        var wrapped = await Wrap(Wrapper(), dek);
+        var (wrapper, created) = CountingWrapper();
+
+        Assert.Equal(dek, await Unwrap(wrapper, wrapped));
+        Assert.Equal(2, created());
+        Assert.Equal(2, wrapper.CachedClientCount);
+
+        Assert.Equal(dek, await Unwrap(wrapper, wrapped));
+        Assert.Equal(2, created());
+    }
+
+    [Fact]
+    public async Task Wrap_ThatSucceeds_CachesTheConfiguredKeysClients_AndOneThatFails_DoesNot()
+    {
+        var (wrapper, created) = CountingWrapper();
+
+        _vault.Failures["sign"] = new RequestFailedException(403, "Forbidden.", "Forbidden", null);
+        await Assert.ThrowsAsync<CryptographicException>(async () => await Wrap(wrapper, new byte[32]));
+        Assert.Equal(1, wrapper.CachedClientCount); // the wrapping key's; signing failed
+
+        _vault.Failures.Clear();
+        await Wrap(wrapper, new byte[32]);
+        await Wrap(wrapper, new byte[32]);
+
+        Assert.Equal(3, created());
+        Assert.Equal(2, wrapper.CachedClientCount);
+    }
+
+    [Fact]
+    public async Task Wrap_WhenKeyVaultReportsAnotherKey_CachesNoClient()
+    {
+        var (wrapper, _) = CountingWrapper();
+        _vault.ReportedKeyId = id => id.Replace(FakeKeyVault.WrappingKeyName, "other-key", StringComparison.Ordinal);
+
+        await Assert.ThrowsAsync<CryptographicException>(async () => await Wrap(wrapper, new byte[32]));
+
+        Assert.Equal(0, wrapper.CachedClientCount);
+    }
+
+    [Fact]
+    public async Task ConcurrentUnwraps_UnderNewVersions_KeepOneClientPerVersion()
+    {
+        var dek = RandomNumberGenerator.GetBytes(32);
+        var wrapped = await Wrap(Wrapper(), dek);
+        var (wrapper, _) = CountingWrapper();
+
+        var revealed = await Task.WhenAll(Enumerable.Range(0, 16).Select(_ => Task.Run(() => Unwrap(wrapper, wrapped))));
+
+        Assert.All(revealed, r => Assert.Equal(dek, r));
+        Assert.Equal(2, wrapper.CachedClientCount);
+    }
+
     [Fact]
     public async Task Unwrap_RefusesWhatIsNotAWrappedDek_AndZeroesTheResult()
     {

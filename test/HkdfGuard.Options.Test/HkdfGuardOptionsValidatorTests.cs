@@ -245,7 +245,8 @@ public class HkdfGuardOptionsValidatorTests
     [InlineData(1)]
     [InlineData(24)]
     [InlineData(24 * 365)]
-    public void Validate_EphemeralKeyRetentionHoursAtLeastOne_Succeeds(int hours)
+    [InlineData(HkdfGuardOptions.MaxEphemeralKeyRetentionHours)]
+    public void Validate_EphemeralKeyRetentionHoursInRange_Succeeds(int hours)
     {
         var options = ValidOptions();
         options.EphemeralKeyRetentionHours = hours;
@@ -255,9 +256,40 @@ public class HkdfGuardOptionsValidatorTests
     }
 
     [Theory]
+    [InlineData(1)]
+    [InlineData(365)]
+    [InlineData(3650)]
+    public void Validate_KeyFileMaxAgeDaysInRange_Succeeds(int days)
+    {
+        var options = ValidOptions();
+        options.KeyFileMaxAgeDays = days;
+
+        Assert.True(new HkdfGuardOptionsValidator().Validate(null, options).Succeeded);
+        Assert.Equal(days, options.ApplyTo(new KeyRingBuilder()).KeyFileMaxAgeDays); // and the builder accepts it
+    }
+
+    [Theory]
     [InlineData(0)]
     [InlineData(-1)]
-    public void Validate_EphemeralKeyRetentionHoursBelowOne_Fails(int hours)
+    [InlineData(3651)]
+    public void Validate_KeyFileMaxAgeDaysOutOfRange_Fails(int days)
+    {
+        var options = ValidOptions();
+        options.KeyFileMaxAgeDays = days;
+
+        var result = new HkdfGuardOptionsValidator().Validate(null, options);
+
+        Assert.True(result.Failed);
+        Assert.Contains("KeyFileMaxAgeDays must be between 1 and 3650.", result.Failures!);
+        Assert.Throws<ArgumentOutOfRangeException>(() => options.ApplyTo(new KeyRingBuilder()));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(HkdfGuardOptions.MaxEphemeralKeyRetentionHours + 1)]
+    [InlineData(int.MaxValue)] // past what a TimeSpan holds: refused here, never an OverflowException at startup
+    public void Validate_EphemeralKeyRetentionHoursOutOfRange_Fails(int hours)
     {
         var options = ValidOptions();
         options.EphemeralKeyRetentionHours = hours;
@@ -265,7 +297,7 @@ public class HkdfGuardOptionsValidatorTests
         var result = new HkdfGuardOptionsValidator().Validate(null, options);
 
         Assert.True(result.Failed);
-        Assert.Contains(result.Failures!, f => f.Contains("EphemeralKeyRetentionHours"));
+        Assert.Contains("EphemeralKeyRetentionHours must be between 1 and 87600.", result.Failures!);
     }
 
     [Theory]

@@ -82,7 +82,8 @@ internal sealed class FakeKeyVault : IDisposable
 
     internal void Record(string operation, Uri keyId)
     {
-        Calls.Add($"{operation} {keyId}");
+        lock (Calls) // concurrent tests call from several threads
+            Calls.Add($"{operation} {keyId}");
         if (Failures.TryGetValue(operation, out var failure))
             throw failure;
     }

@@ -62,22 +62,28 @@ internal static class NativeLibraryResolver
 
     /// <summary>
     /// The routing decision, with the platform check and the loaders passed in so every branch can
-    /// be tested on any platform: the platform's own KMS library goes to that platform's loader;
-    /// everything else, and a KMS library name on the wrong platform, gets the default (zero).
+    /// be tested on any platform: the platform's own KMS library goes to that platform's loader; a
+    /// KMS library name on the wrong platform is refused, so the runtime never falls back to its
+    /// default search (the application folder, PATH) for a file by that name; every other import
+    /// gets the default (zero).
     /// </summary>
+    /// <exception cref="PlatformNotSupportedException">libraryName is another platform's KMS library</exception>
     internal static IntPtr Route(string libraryName, Func<OSPlatform, bool> isPlatform, Func<IntPtr> loadWindows, Func<IntPtr> loadMacOs, Func<IntPtr> loadLinux)
     {
-        if (libraryName == WindowsHkdfGuardKmsLibrary.LibraryName && isPlatform(OSPlatform.Windows))
-            return loadWindows();
+        if (libraryName == WindowsHkdfGuardKmsLibrary.LibraryName)
+            return isPlatform(OSPlatform.Windows) ? loadWindows() : throw WrongPlatform(libraryName);
 
-        if (libraryName == MacOsHkdfGuardKmsLibrary.LibraryName && isPlatform(OSPlatform.OSX))
-            return loadMacOs();
+        if (libraryName == MacOsHkdfGuardKmsLibrary.LibraryName)
+            return isPlatform(OSPlatform.OSX) ? loadMacOs() : throw WrongPlatform(libraryName);
 
-        if (libraryName == LinuxHkdfGuardKmsLibrary.LibraryName && isPlatform(OSPlatform.Linux))
-            return loadLinux();
+        if (libraryName == LinuxHkdfGuardKmsLibrary.LibraryName)
+            return isPlatform(OSPlatform.Linux) ? loadLinux() : throw WrongPlatform(libraryName);
 
         return IntPtr.Zero;
     }
+
+    private static PlatformNotSupportedException WrongPlatform(string libraryName)
+        => new($"The HkdfGuard KMS library '{libraryName}' is another platform's; it is never loaded here, nor searched for.");
 
     // Only ever invoked by Route after the matching platform check.
 #pragma warning disable CA1416

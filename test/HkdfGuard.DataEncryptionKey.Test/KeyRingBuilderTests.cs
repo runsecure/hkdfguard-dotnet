@@ -328,21 +328,48 @@ public class KeyRingBuilderTests
     [Fact]
     public async Task Build_ReadsEveryKeyFileThroughItsKeyWrapper_NotItself()
     {
-        // Neither path exists: only the key wrapper is asked to read them.
+        // Both files exist - Build takes each one's last write time as its age - but hold nothing
+        // usable: only the key wrapper is asked to read them.
         var wrapper = new ReadingKeyWrapper(RandomNumberGenerator.GetBytes(32), "wrapped"u8.ToArray());
-        var first = Path.Combine(Path.GetTempPath(), $"absent-{Guid.NewGuid():N}.bin");
-        var second = Path.Combine(Path.GetTempPath(), $"absent-{Guid.NewGuid():N}.bin");
+        var first = Path.GetTempFileName();
+        var second = Path.GetTempFileName();
+        try
+        {
+            await using var ring = await new KeyRingBuilder()
+                .WithKeyWrapper(wrapper)
+                .WithCryptoProviderFactory(CryptoProviderFactory)
+                .WithKeyRefreshInterval(60)
+                .WithKeyFile(2, second)
+                .WithKeyFile(1, first)
+                .BuildAsync();
 
-        await using var ring = await new KeyRingBuilder()
+            Assert.Equal([first, second], wrapper.PathsRead);
+            Assert.Equal(2, ring.CurrentVersion);
+        }
+        finally
+        {
+            File.Delete(first);
+            File.Delete(second);
+        }
+    }
+
+    [Fact]
+    public async Task Build_WhenAKeyFileTheWrapperReadIsMissing_FailsRatherThanDatingIt()
+    {
+        // A key wrapper that reads from elsewhere: there is no file to take the age from.
+        var wrapper = new ReadingKeyWrapper(RandomNumberGenerator.GetBytes(32), "wrapped"u8.ToArray());
+        var factory = new RecordingCryptoProviderFactory();
+        var absent = Path.Combine(Path.GetTempPath(), $"absent-{Guid.NewGuid():N}.bin");
+
+        var thrown = await Assert.ThrowsAsync<FileNotFoundException>(() => new KeyRingBuilder()
             .WithKeyWrapper(wrapper)
-            .WithCryptoProviderFactory(CryptoProviderFactory)
+            .WithCryptoProviderFactory(factory)
             .WithKeyRefreshInterval(60)
-            .WithKeyFile(2, second)
-            .WithKeyFile(1, first)
-            .BuildAsync();
+            .WithKeyFile(1, absent)
+            .BuildAsync());
 
-        Assert.Equal([first, second], wrapper.PathsRead);
-        Assert.Equal(2, ring.CurrentVersion);
+        Assert.Contains(absent, thrown.Message);
+        Assert.Empty(factory.CreatedProviders);
     }
 
     [Fact]
@@ -368,18 +395,25 @@ public class KeyRingBuilderTests
     public async Task Build_WithAKeyFileAboveEveryEphemeralVersionAndRotationOff_KeepsTheKeyFileCurrent()
     {
         var wrapper = new ReadingKeyWrapper(RandomNumberGenerator.GetBytes(32), "wrapped"u8.ToArray());
+        var path = Path.GetTempFileName();
+        try
+        {
+            await using var ring = await new KeyRingBuilder()
+                .WithKeyWrapper(wrapper)
+                .WithCryptoProviderFactory(new RecordingCryptoProviderFactory())
+                .WithKeyRefreshInterval(60)
+                .WithKeyFile(10, path)
+                .WithEphemeralKey(1)
+                .WithoutEphemeralKeyRotation()
+                .BuildAsync();
 
-        await using var ring = await new KeyRingBuilder()
-            .WithKeyWrapper(wrapper)
-            .WithCryptoProviderFactory(new RecordingCryptoProviderFactory())
-            .WithKeyRefreshInterval(60)
-            .WithKeyFile(10, "dek.bin")
-            .WithEphemeralKey(1)
-            .WithoutEphemeralKeyRotation()
-            .BuildAsync();
-
-        Assert.Equal(10, ring.CurrentVersion);
-        Assert.Null(ring.EphemeralKeyRotationInterval);
+            Assert.Equal(10, ring.CurrentVersion);
+            Assert.Null(ring.EphemeralKeyRotationInterval);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
     }
 
     [Fact]
