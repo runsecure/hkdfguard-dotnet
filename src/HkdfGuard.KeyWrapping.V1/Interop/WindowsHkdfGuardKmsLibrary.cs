@@ -24,8 +24,10 @@ internal sealed partial class WindowsHkdfGuardKmsLibrary : AbstractHkdfGuardKmsL
     /// <inheritdoc/>
     public override string? DescribeStatus(int status) => status switch
     {
+        ErrProviderUnavailable => @"payload version 2 is unavailable on this host: the TPM can't be used for it and KeyStoragePolicy, or an existing TPM KEK, rules out the software key store (event 2008 names the reason); set HKLM\Software\Policies\HkdfGuard\ClassicalMode to 1 to keep using version 1",
         ErrProviderError => "the KEK's key storage provider (Platform Crypto Provider or Software KSP) could not open or create the key",
         ErrPolicyInvalid => @"a machine policy value under HKLM\Software\Policies\HkdfGuard is invalid",
+        ErrPayloadVersionRefused => @"the wrapped payload is the other payload version from the one HKLM\Software\Policies\HkdfGuard\ClassicalMode selects (absent or 0: version 2; 1: version 1); a host unwraps only its own version",
         ErrKekNotFound => "no KEK is provisioned for this service; run hkdfguard provision from an elevated prompt",
         ErrKekAccessDenied => "the KEK exists, but this account is not authorized to use it (or, for a new KEK, the process is not elevated); add it to the HkdfGuardUsers group or a KeyUseGroups group",
         ErrKekInvalid => "the existing KEK's ACL is missing, lacks SYSTEM/Administrators, or grants an over-broad principal",
