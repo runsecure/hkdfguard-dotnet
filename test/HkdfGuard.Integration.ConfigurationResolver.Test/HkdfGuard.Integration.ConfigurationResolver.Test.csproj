@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\HkdfGuard.Integration.ConfigurationResolver\HkdfGuard.Integration.ConfigurationResolver.csproj" />
+    <ProjectReference Include="..\..\src\HkdfGuard.Abstractions\HkdfGuard.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\HkdfGuard.Cache\HkdfGuard.Cache.csproj" />
+    <ProjectReference Include="..\..\src\HkdfGuard.DataEncryptionKey\HkdfGuard.DataEncryptionKey.csproj" />
+    <ProjectReference Include="..\..\src\HkdfGuard.CryptoProvider.AesGcm256\HkdfGuard.CryptoProvider.AesGcm256.csproj" />
+  </ItemGroup>
+
+  <!-- A real key ring, and a remote cache that records its fetches; shared with Cache's tests. -->
+  <ItemGroup>
+    <Compile Include="..\HkdfGuard.Cache.Test\TestHelpers\FakeKeyWrapper.cs" Link="TestHelpers\FakeKeyWrapper.cs" />
+    <Compile Include="..\HkdfGuard.Cache.Test\TestHelpers\FakeRemoteSecretCache.cs" Link="TestHelpers\FakeRemoteSecretCache.cs" />
+    <Compile Include="..\HkdfGuard.Cache.Test\TestHelpers\TestRing.cs" Link="TestHelpers\TestRing.cs" />
+  </ItemGroup>
+
+</Project>
