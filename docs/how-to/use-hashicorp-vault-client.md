@@ -1,10 +1,11 @@
 # Call Vault's API with the HashiCorp Vault client
 
 This page uses `VaultClient`, from the package `HkdfGuard.Integration.HashiCorpVault`, to call
-HashiCorp Vault's HTTP API from .NET: logging in, managing auth methods, secrets engines, policies,
-PKI, and anything else Vault exposes. It's a port of HashiCorp's
-[vault-client-go](https://github.com/hashicorp/vault-client-go), generated from the same OpenAPI
-spec, and it holds Vault tokens the way the rest of HkdfGuard does: only in protected form.
+HashiCorp Vault's HTTP API from .NET: logging in, managing tokens, the KV and cubbyhole secrets
+engines, the transit engine, and through generic methods anything else Vault exposes. It's a port of
+HashiCorp's [vault-client-go](https://github.com/hashicorp/vault-client-go), generated from the same
+OpenAPI spec but only for the endpoints HkdfGuard needs, and it holds Vault tokens the way the rest of
+HkdfGuard does: only in protected form.
 
 To read secrets into memory your application uses, prefer `HashiCorpVaultSecretCache` (package
 `HkdfGuard.Cache.HashiCorpVault`). It reads each secret straight into pinned memory and keeps it
@@ -67,10 +68,20 @@ Clear your own copy afterwards. To log in, renew and replace tokens on your own 
 
 ## 3. Call Vault
 
-The generated methods are grouped as vault-client-go groups them: `vault.Auth`, `vault.Identity`,
-`vault.Secrets` and `vault.System`. Each method is named after the endpoint's operation ID
-(`kv-v2-read` is `KvV2ReadAsync`), takes the path's parameters and a typed request body, and returns
-a typed response from the `Schema` namespace.
+The generated methods are grouped as vault-client-go groups them. Only a subset of Vault's API is
+generated, the endpoints listed in `generator.json`:
+
+| Group | What it has |
+|---|---|
+| `vault.Auth` | Every auth method's login (`AppRoleLoginAsync`, `KubernetesLoginAsync`, `AwsLoginAsync`, `CertLoginAsync`, `JwtLoginAsync`, ...), the JWT/OIDC browser flow and Okta push verification, and creating, looking up, renewing and revoking tokens |
+| `vault.Secrets` | The KV version 2 and 1 engines, cubbyhole, and the whole transit engine (encrypt, decrypt, rewrap, data keys, sign, verify, HMAC, random bytes, and creating, rotating, configuring and trimming keys) |
+| `vault.System` | Health, seal status, leader status, the list of mounts, and wrapping (wrap, unwrap, rewrap, lookup) |
+
+Configuring auth methods and other secrets engines, policies, identity and the rest of `sys/` aren't
+generated: use the generic methods below, or add them to `generator.json` and regenerate. Each
+generated method is named after the endpoint's operation ID (`kv-v2-read` is `KvV2ReadAsync`), takes
+the path's parameters and a typed request body, and returns a typed response from the `Schema`
+namespace.
 
 ```csharp
 // The engine's default mount is "kv-v2"; a dev server mounts KV version 2 at "secret".
@@ -145,13 +156,21 @@ catch (VaultResponseException e) when (VaultClient.IsErrorStatus(e, HttpStatusCo
 | Rate limiting | `rate.Limiter` | `VaultRateLimiter`, the same token bucket |
 | Retries, MFA, namespaces, replication, callbacks, TLS, unix sockets | Yes | Yes, as vault-client-go |
 | Every request | | Sends `X-Vault-Request: true`, as the `vault` CLI does |
+| Typed endpoints | All 907 | The 103 `generator.json` names: logins and tokens, KV, cubbyhole, transit, and a few of `sys/` |
 
-## Regenerate from a newer spec
+## Regenerate from a newer spec, or for other endpoints
 
 The `Generated/` folder is produced by `tools/HkdfGuard.Integration.HashiCorpVault.Generator` from
 `src/HkdfGuard.Integration.HashiCorpVault/openapi.json`, which is vault-client-go's spec (Vault API
 1.15.0). As in vault-client-go, operations whose ID ends in `2`, `3` or `4` (alternative paths to the
 same endpoint) or starts with `enterprise-stub` are left out, along with their schemas.
+
+`generator.json`, beside the spec, narrows that to the endpoints HkdfGuard needs. Its `include` list
+holds regular expressions matched against method names without `Async` (`"^KvV2"`, `"^AppRoleLogin$"`).
+Only the operations they match are generated, with only the schemas those operations use. Each
+expression must match at least one operation, so a typo, or an endpoint a newer spec has dropped,
+stops the generator instead of quietly generating less. To generate another endpoint, add a pattern
+and regenerate. To generate everything vault-client-go does, delete the file.
 
 To update:
 
@@ -165,9 +184,12 @@ To update:
    dotnet run --project tools/HkdfGuard.Integration.HashiCorpVault.Generator
    ```
 
-   It rewrites only the files that changed and deletes those the spec no longer produces.
+   It reads `generator.json` beside the spec (or the file `--settings` names), rewrites only the
+   files that changed, and deletes those no longer produced.
 3. Build and test. `GeneratedApiTests.TheGeneratedCode_IsWhatTheSpecGenerates` fails whenever the
-   checked-in code isn't what the spec generates, so a hand edit to `Generated/` doesn't survive.
+   checked-in code isn't what the spec and `generator.json` generate, so a hand edit to `Generated/`
+   doesn't survive. `TheGeneratedApi_IsTheSubsetGeneratorJsonNames` pins the subset itself; update it
+   when you change `generator.json` on purpose.
 
 If the generator meets something it doesn't handle, such as an inline object with its own
 properties or a header parameter, it stops with an `InvalidDataException` naming the operation or

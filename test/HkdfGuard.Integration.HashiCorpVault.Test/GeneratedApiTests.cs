@@ -312,7 +312,7 @@ public class GeneratedApiTests
     {
         var files = VaultClientGenerator.Generate(Spec(NarrowingPaths, NarrowingSchemas), """{"description": "test", "include": ["^ARead$"]}""");
 
-        Assert.Equal(["SecretsApi.g.cs", "Schema/AReadResponse.g.cs", "Schema/Inner.g.cs", "Schema/Item.g.cs", "Schema/Other.g.cs", "VaultClient.Apis.g.cs"],
+        Assert.Equal(["Schema/AReadResponse.g.cs", "Schema/Inner.g.cs", "Schema/Item.g.cs", "Schema/Other.g.cs", "SecretsApi.g.cs", "VaultClient.Apis.g.cs"],
             files.Keys.Order(StringComparer.Ordinal));
         Assert.Contains("AReadAsync", files["SecretsApi.g.cs"]);
         Assert.DoesNotContain("AWriteAsync", files["SecretsApi.g.cs"]);
