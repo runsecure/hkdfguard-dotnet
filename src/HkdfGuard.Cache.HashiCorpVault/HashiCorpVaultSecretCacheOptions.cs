@@ -1,3 +1,5 @@
+using HkdfGuard.Integration.HashiCorpVault;
+
 namespace HkdfGuard.Cache.HashiCorpVault;
 
 /// <summary>The version of a KV secrets engine, which decides its read path and response shape.</summary>
@@ -36,7 +38,7 @@ public sealed class HashiCorpVaultSecretCacheOptions
     public const int MaxRetryCount = 10;
 
     /// <summary>The longest wait between retries, before the random 0-100 ms each adds.</summary>
-    public static readonly TimeSpan MaxRetryDelay = TimeSpan.FromSeconds(10);
+    public static readonly TimeSpan MaxRetryDelay = VaultHttp.MaxRetryDelay;
 
     /// <summary>
     /// How long one attempt may take: getting the token, or one request and Vault's whole response.

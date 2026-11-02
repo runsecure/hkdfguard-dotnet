@@ -1,12 +1,11 @@
 using System.Buffers;
 using System.Buffers.Text;
-using System.Net;
 using System.Net.Http.Headers;
-using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using HkdfGuard.Abstractions;
+using HkdfGuard.Integration.HashiCorpVault;
 using HkdfGuard.SecureFile;
 
 namespace HkdfGuard.KeyWrapping.HashiCorpVault;
@@ -72,15 +71,10 @@ public sealed class HashiCorpVaultTransitKeyWrapper : IKeyWrapper, IDisposable
     public const int MaxKeyNameLength = 128;
 
     /// <summary>The longest token an <see cref="IVaultTokenSource"/> may supply, in characters.</summary>
-    public const int MaxTokenLength = 2048;
+    public const int MaxTokenLength = VaultHttp.MaxTokenLength;
 
     /// <summary>The largest response read from Vault, in bytes; a transit answer is well under 1 KB.</summary>
     internal const int MaxResponseLength = 16 * 1024;
-
-    private const string TokenHeader = "X-Vault-Token";
-
-    private static readonly SearchValues<char> SegmentCharacters =
-        SearchValues.Create("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.");
 
     private static readonly SearchValues<byte> Base64Bytes =
         SearchValues.Create("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="u8);
@@ -135,14 +129,14 @@ public sealed class HashiCorpVaultTransitKeyWrapper : IKeyWrapper, IDisposable
         ArgumentNullException.ThrowIfNull(keyName);
         ArgumentNullException.ThrowIfNull(tokenSource);
         options ??= new HashiCorpVaultTransitKeyWrapperOptions();
-        var apiBase = ApiBase(address);
+        var apiBase = VaultHttp.ApiBase(address);
 
-        if (keyName.Length > MaxKeyNameLength || !IsValidSegment(keyName))
+        if (keyName.Length > MaxKeyNameLength || !VaultHttp.IsValidPathSegment(keyName))
             throw new ArgumentException(
                 $"The key name '{keyName}' isn't one: 1-{MaxKeyNameLength} ASCII letters, digits, '-', '_' and '.', and not \".\" or \"..\".", nameof(keyName));
-        if (!IsValidPath(options.MountPath))
+        if (!VaultHttp.IsValidPath(options.MountPath))
             throw new ArgumentException($"The mount path '{options.MountPath}' isn't a Vault path.", nameof(options));
-        if (options.Namespace is not null && !IsValidPath(options.Namespace))
+        if (options.Namespace is not null && !VaultHttp.IsValidPath(options.Namespace))
             throw new ArgumentException($"The namespace '{options.Namespace}' isn't a Vault path.", nameof(options));
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(options.Timeout, TimeSpan.Zero, nameof(options));
         if (options.RetryCount is < HashiCorpVaultTransitKeyWrapperOptions.MinRetryCount or > HashiCorpVaultTransitKeyWrapperOptions.MaxRetryCount)
@@ -151,7 +145,7 @@ public sealed class HashiCorpVaultTransitKeyWrapper : IKeyWrapper, IDisposable
         if (options.RetryDelay < TimeSpan.Zero || options.RetryDelay > HashiCorpVaultTransitKeyWrapperOptions.MaxRetryDelay)
             throw new ArgumentOutOfRangeException(nameof(options), options.RetryDelay,
                 $"RetryDelay must be zero to {HashiCorpVaultTransitKeyWrapperOptions.MaxRetryDelay}.");
-        if (options.HttpMessageHandler is { } supplied && !options.AllowRedirects && FollowsRedirects(supplied))
+        if (options.HttpMessageHandler is { } supplied && !options.AllowRedirects && VaultHttp.FollowsRedirects(supplied))
             throw new ArgumentException(
                 "The HttpMessageHandler follows redirects, which would send the Vault token wherever they point. Set its AllowAutoRedirect to false, or set AllowRedirects if every redirect target may see the token.",
                 nameof(options));
@@ -176,16 +170,8 @@ public sealed class HashiCorpVaultTransitKeyWrapper : IKeyWrapper, IDisposable
         _retryDelay = options.RetryDelay;
         _keyFileTrust = keyFileTrust ?? KeyFileTrust.AdministratorsOnly;
 
-        var handler = options.HttpMessageHandler ?? new SocketsHttpHandler
-        {
-            // A redirect would carry X-Vault-Token to wherever it points: HttpClient drops only the
-            // Authorization header when following one. Vault's standbys forward requests to the
-            // active node themselves, so a redirect is answered as an error instead.
-            AllowAutoRedirect = false,
-            UseCookies = false,
-            // Picks up a changed DNS record (a failover) without restarting.
-            PooledConnectionLifetime = TimeSpan.FromMinutes(5),
-        };
+        // Follows no redirects: one would carry X-Vault-Token wherever it points.
+        var handler = options.HttpMessageHandler ?? VaultHttp.CreateHandler();
         _http = new HttpClient(handler, disposeHandler: options.HttpMessageHandler is null)
         {
             BaseAddress = apiBase,
@@ -312,10 +298,6 @@ public sealed class HashiCorpVaultTransitKeyWrapper : IKeyWrapper, IDisposable
     public ValueTask<byte[]> ReadKeyFileAsync(string path, CancellationToken cancellationToken = default)
         => TrustedKeyFile.ReadAsync(path, _keyFileTrust, cancellationToken);
 
-    /// <summary>Whether token can go in a header: non-empty printable ASCII, with no spaces.</summary>
-    internal static bool IsValidToken(ReadOnlySpan<char> token)
-        => !token.IsEmpty && !token.ContainsAnyExceptInRange('!', '~');
-
     /// <summary>Whether value is a transit ciphertext as Vault writes it: vault:v{version}:{base64}.</summary>
     internal static bool IsVaultCiphertext(ReadOnlySpan<byte> value)
     {
@@ -328,17 +310,6 @@ public sealed class HashiCorpVaultTransitKeyWrapper : IKeyWrapper, IDisposable
                && rest[digits] == (byte)':'
                && rest.Length > digits + 1
                && !rest[(digits + 1)..].ContainsAnyExcept(Base64Bytes);
-    }
-
-    /// <summary>
-    /// The wait before retry number <paramref name="retry"/> (0 for the first): baseDelay, doubled
-    /// for each retry before it, at most MaxRetryDelay - plus jitterMilliseconds.
-    /// </summary>
-    internal static TimeSpan RetryDelay(TimeSpan baseDelay, int retry, int jitterMilliseconds)
-    {
-        var backoff = baseDelay * Math.Pow(2, retry);
-        return (backoff < HashiCorpVaultTransitKeyWrapperOptions.MaxRetryDelay ? backoff : HashiCorpVaultTransitKeyWrapperOptions.MaxRetryDelay)
-               + TimeSpan.FromMilliseconds(jitterMilliseconds);
     }
 
     // prefix, then value (base64-encoded if encode), then the suffix: a whole encrypt or decrypt
@@ -379,7 +350,7 @@ public sealed class HashiCorpVaultTransitKeyWrapper : IKeyWrapper, IDisposable
                 tokenLength = await _tokenSource.CopyTokenAsync(token, timeout.Token).ConfigureAwait(false);
             }
 
-            if (tokenLength is <= 0 or > MaxTokenLength || !IsValidToken(token.AsSpan(0, tokenLength)))
+            if (tokenLength is <= 0 or > MaxTokenLength || !VaultHttp.IsValidToken(token.AsSpan(0, tokenLength)))
                 throw new InvalidOperationException("The Vault token source supplied no token, or one that isn't a token: printable ASCII, with no spaces.");
 
             for (var retry = 0; ; retry++)
@@ -388,9 +359,9 @@ public sealed class HashiCorpVaultTransitKeyWrapper : IKeyWrapper, IDisposable
                 {
                     return await SendAsync(path, body, token.AsMemory(0, tokenLength), cancellationToken).ConfigureAwait(false);
                 }
-                catch (Exception e) when (retry < _retryCount && IsTransient(e, cancellationToken))
+                catch (Exception e) when (retry < _retryCount && VaultHttp.IsTransient(e, cancellationToken))
                 {
-                    await Task.Delay(RetryDelay(_retryDelay, retry, Random.Shared.Next(0, 101)), cancellationToken).ConfigureAwait(false);
+                    await Task.Delay(VaultHttp.RetryDelay(_retryDelay, retry, Random.Shared.Next(0, 101)), cancellationToken).ConfigureAwait(false);
                 }
                 catch (Exception e) when (e is HttpRequestException or IOException
                                           || (e is OperationCanceledException && !cancellationToken.IsCancellationRequested))
@@ -405,19 +376,6 @@ public sealed class HashiCorpVaultTransitKeyWrapper : IKeyWrapper, IDisposable
             ArrayUtility.ZeroMemory(token.AsSpan());
         }
     }
-
-    // A failure another attempt may not meet: no answer at all (connection refused or reset, DNS),
-    // a connection lost mid-response, the attempt's own timeout, or Vault busy or briefly unable to
-    // answer - 429, or a 5xx other than 501.
-    private static bool IsTransient(Exception e, CancellationToken cancellationToken) => e switch
-    {
-        HttpRequestException http => http.StatusCode is not { } status
-                                     || status == HttpStatusCode.TooManyRequests
-                                     || ((int)status >= 500 && status != HttpStatusCode.NotImplemented),
-        IOException => true,
-        OperationCanceledException => !cancellationToken.IsCancellationRequested,
-        _ => false,
-    };
 
     // One attempt: one request, and Vault's whole response, within the attempt's timeout. A
     // successful response is returned in a pinned buffer; any other is thrown as an
@@ -434,26 +392,8 @@ public sealed class HashiCorpVaultTransitKeyWrapper : IKeyWrapper, IDisposable
         if (_namespace is not null)
             request.Headers.Add("X-Vault-Namespace", _namespace);
 
-        HttpResponseMessage sent;
-        var header = new string(token.Span);
-        try
-        {
-            // Checked by PostAsync - printable ASCII, nothing to parse - so added as it is, without
-            // the copies validation could make.
-            request.Headers.TryAddWithoutValidation(TokenHeader, header);
-
-            // Unbuffered: HttpClient would otherwise copy the body into a pooled buffer it returns uncleared.
-            sent = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
-        }
-        finally
-        {
-            // The request is sent, or has failed: zero the header's only copy of the token. It was
-            // made by new string from the token's chars, so it is no literal or interned string
-            // anything else could share.
-            ArrayUtility.ZeroMemory(MemoryMarshal.AsMemory(header.AsMemory()).Span);
-        }
-
-        using var response = sent;
+        // Checked by PostAsync; sent unbuffered, and the header's copy zeroed once it has gone.
+        using var response = await VaultHttp.SendWithTokenAsync(_http, request, token, timeout.Token).ConfigureAwait(false);
         await using var stream = await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false);
         // One byte over the limit, so a body that doesn't fit is noticed rather than truncated.
         var buffer = ArrayUtility.AllocatePinned<byte>(MaxResponseLength + 1);
@@ -473,7 +413,7 @@ public sealed class HashiCorpVaultTransitKeyWrapper : IKeyWrapper, IDisposable
                 return answer;
             }
 
-            var errors = ReadErrors(buffer.AsSpan(0, length));
+            var errors = VaultHttp.ReadErrors(buffer.AsSpan(0, length));
             var detail = errors is { Length: > 0 } ? ": " + string.Join("; ", errors) : "";
             throw new HttpRequestException($"Vault answered {(int)response.StatusCode} {response.StatusCode}{detail}", null, response.StatusCode);
         }
@@ -627,72 +567,4 @@ public sealed class HashiCorpVaultTransitKeyWrapper : IKeyWrapper, IDisposable
             CryptographicOperations.ZeroMemory(decoded);
         }
     }
-
-    // The errors Vault listed in an error response; null if it isn't Vault's JSON. An error
-    // response holds no key material.
-    private static string[]? ReadErrors(ReadOnlySpan<byte> body)
-    {
-        try
-        {
-            var reader = new Utf8JsonReader(body);
-            using var json = JsonDocument.ParseValue(ref reader);
-            var root = json.RootElement;
-            if (root.ValueKind != JsonValueKind.Object)
-                return null;
-            if (!root.TryGetProperty("errors", out var errors))
-                return [];
-
-            return errors.ValueKind == JsonValueKind.Array ? errors.EnumerateArray().Select(e => e.ToString()).ToArray() : null;
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-    }
-
-    // /v1/ under Vault's address, refusing an address that would send tokens in the clear (http
-    // anywhere but loopback) or that carries credentials, a query or a fragment.
-    private static Uri ApiBase(Uri address)
-    {
-        ArgumentNullException.ThrowIfNull(address);
-        if (!address.IsAbsoluteUri)
-            throw new ArgumentException($"Vault's address '{address}' isn't absolute, e.g. https://vault.example.com:8200.", nameof(address));
-        if (address.Scheme != Uri.UriSchemeHttps && !(address.Scheme == Uri.UriSchemeHttp && address.IsLoopback))
-            throw new ArgumentException(
-                $"Vault's address '{address}' must be https; http is allowed only on a loopback address (a local Vault Agent or dev server), since every request carries a token and DEKs.", nameof(address));
-        if (address.UserInfo.Length > 0 || address.Query.Length > 0 || address.Fragment.Length > 0)
-            throw new ArgumentException($"Vault's address '{address}' must not hold credentials, a query or a fragment.", nameof(address));
-
-        return new Uri(address.GetLeftPart(UriPartial.Path).TrimEnd('/') + "/v1/");
-    }
-
-    // Whether the handler at the bottom of handler's DelegatingHandler chain follows redirects. One
-    // of a type other than SocketsHttpHandler or HttpClientHandler can't be told, so counts as not.
-    private static bool FollowsRedirects(HttpMessageHandler handler)
-    {
-        while (handler is DelegatingHandler { InnerHandler: { } inner })
-            handler = inner;
-
-        return handler switch
-        {
-            SocketsHttpHandler sockets => sockets.AllowAutoRedirect,
-            HttpClientHandler client => client.AllowAutoRedirect,
-            _ => false,
-        };
-    }
-
-    // '/'-separated segments, none empty, "." or "..": a path that stays where it's put.
-    private static bool IsValidPath(ReadOnlySpan<char> path)
-    {
-        foreach (var range in path.Split('/'))
-        {
-            if (!IsValidSegment(path[range]))
-                return false;
-        }
-
-        return true;
-    }
-
-    private static bool IsValidSegment(ReadOnlySpan<char> segment)
-        => !segment.IsEmpty && segment is not "." and not ".." && !segment.ContainsAnyExcept(SegmentCharacters);
 }

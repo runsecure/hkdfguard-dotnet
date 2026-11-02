@@ -1,3 +1,5 @@
+using HkdfGuard.Integration.HashiCorpVault;
+
 namespace HkdfGuard.KeyWrapping.HashiCorpVault;
 
 /// <summary>Which transit secrets engine a <see cref="HashiCorpVaultTransitKeyWrapper"/> calls, and how it connects.</summary>
@@ -17,7 +19,7 @@ public sealed class HashiCorpVaultTransitKeyWrapperOptions
     public const int MaxRetryCount = 10;
 
     /// <summary>The longest wait between retries, before the random 0-100 ms each adds.</summary>
-    public static readonly TimeSpan MaxRetryDelay = TimeSpan.FromSeconds(10);
+    public static readonly TimeSpan MaxRetryDelay = VaultHttp.MaxRetryDelay;
 
     /// <summary>
     /// How long one attempt may take: getting the token, or one request and Vault's whole response.

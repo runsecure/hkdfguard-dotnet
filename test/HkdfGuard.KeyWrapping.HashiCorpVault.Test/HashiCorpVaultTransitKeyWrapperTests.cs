@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using HkdfGuard.Abstractions;
 using HkdfGuard.CryptoProvider.AesGcm256;
+using HkdfGuard.Integration.HashiCorpVault;
 using HkdfGuard.KeyWrapping.HashiCorpVault.Test.TestHelpers;
 using HkdfGuard.SecureFile;
 
@@ -670,22 +671,6 @@ public class HashiCorpVaultTransitKeyWrapperTests
         Assert.Single(vault.Requests);
     }
 
-    [Theory]
-    [InlineData("")]
-    [InlineData("hvs.with space")]
-    [InlineData("hvs.é")]
-    public void StaticVaultTokenSource_RejectsATokenThatIsNotOne(string token)
-        => Assert.Throws<ArgumentException>("token", () => new StaticVaultTokenSource(token));
-
-    [Fact]
-    public async Task StaticVaultTokenSource_RejectsATokenOverTheLimit_AndADestinationTooSmall()
-    {
-        Assert.Throws<ArgumentException>("token", () => new StaticVaultTokenSource(new string('t', HashiCorpVaultTransitKeyWrapper.MaxTokenLength + 1)));
-
-        using var tokens = new StaticVaultTokenSource(FakeTransit.Token);
-        await Assert.ThrowsAsync<ArgumentException>("destination", async () => await tokens.CopyTokenAsync(new char[4], default));
-    }
-
     [Fact]
     public async Task TheNamespaceMountAndPathPrefix_AreUsed()
     {
@@ -721,16 +706,6 @@ public class HashiCorpVaultTransitKeyWrapperTests
     [InlineData("", false)]
     public void IsVaultCiphertext_AcceptsOnlyVaultsFormat(string value, bool expected)
         => Assert.Equal(expected, HashiCorpVaultTransitKeyWrapper.IsVaultCiphertext(Encoding.UTF8.GetBytes(value)));
-
-    [Theory]
-    [InlineData(0, 0, 200)]
-    [InlineData(1, 0, 400)]
-    [InlineData(2, 50, 850)]
-    [InlineData(20, 0, 10_000)]
-    [InlineData(20, 100, 10_100)]
-    public void RetryDelay_DoublesUpToTheLimit_PlusJitter(int retry, int jitter, int expectedMilliseconds)
-        => Assert.Equal(TimeSpan.FromMilliseconds(expectedMilliseconds),
-            HashiCorpVaultTransitKeyWrapper.RetryDelay(TimeSpan.FromMilliseconds(200), retry, jitter));
 
     [Fact]
     public async Task ACryptoProvider_GeneratesAndRevealsItsDekThroughVault()

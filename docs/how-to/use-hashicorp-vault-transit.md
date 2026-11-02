@@ -88,16 +88,21 @@ file. Nothing renews it, so once it expires every request fails with 403. Pass i
 your application is given it:
 
 ```csharp
-using HkdfGuard.KeyWrapping.HashiCorpVault;
+using HkdfGuard.Integration.HashiCorpVault;
 
 using var token = new StaticVaultTokenSource(vaultToken); // the Vault token, passed in or configured
 ```
 
+`IVaultTokenSource` and `StaticVaultTokenSource` live in `HkdfGuard.Integration.HashiCorpVault`,
+which the wrapper's package depends on, alongside the rest of the Vault request rules the wrapper
+shares with the secret cache and `VaultClient`.
+
 For a long-running service, prefer a Vault Agent on loopback with `use_auto_auth_token`, which
 renews the token itself, or implement `IVaultTokenSource` over your auth method.
 
-> **Note:** this is not the cache's `IVaultTokenProvider`. That one hands over a token protected by
-> the key ring; a key wrapper runs before there is a key ring, so it can't.
+> **Note:** this is not `IVaultTokenProvider`, which the secret cache and `VaultClient` use. That one
+> hands over a token protected by the key ring; a key wrapper runs before there is a key ring, so it
+> can't.
 
 ## 4. Create the wrapper
 

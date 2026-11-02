@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="HkdfGuard.Integration.HashiCorpVault.Test" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HkdfGuard.Abstractions\HkdfGuard.Abstractions.csproj" />
+  </ItemGroup>
+
+  <!-- The Vault API spec the Generated/ code is produced from, and which of its operations to
+       generate (generator.json); regenerate after changing either
+       (docs/how-to/use-hashicorp-vault-client.md). Not compiled, not packed. -->
+  <ItemGroup>
+    <None Update="openapi.json;generator.json" Pack="false" />
+  </ItemGroup>
+
+</Project>
