@@ -1313,7 +1313,9 @@ git push origin v0.1.0
 ```
 
 The tag must be `vMAJOR.MINOR.PATCH`, optionally with a pre-release suffix (`v1.2.0-rc.1`). The
-version without the `v` is stamped into every assembly and package. The **Release** workflow
+version without the `v` is stamped into every assembly and package. `Version` in
+`Directory.Build.props` is only what a plain local build stamps in; keep it at the release being
+prepared, updating it alongside the tag. The **Release** workflow
 (`.github/workflows/release.yml`) then:
 
 1. **build** (the shared `build.yml`, the same one CI runs): restores the locked dependency
