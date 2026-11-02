@@ -141,9 +141,9 @@ Test Explorer:
 In **Visual Studio**, choose **Test**, **Configure Run Settings**, **Select Solution Wide runsettings
 File**, and pick `aws.runsettings`.
 
-On a CI runner, set `HKDFGUARD_TEST_AWS_KMS_KEY_ID` in the job and give the job a role, for example
-through GitHub's OIDC provider and `aws-actions/configure-aws-credentials`, rather than storing an
-access key.
+On a CI runner, have the job write `aws.runsettings` with the key ARN before it runs the tests, and
+give the job a role, for example through GitHub's OIDC provider and
+`aws-actions/configure-aws-credentials`, rather than storing an access key.
 
 ## If something goes wrong
 

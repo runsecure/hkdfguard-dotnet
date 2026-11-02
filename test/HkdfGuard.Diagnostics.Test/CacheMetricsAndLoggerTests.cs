@@ -1,4 +1,5 @@
 using System.Diagnostics.Metrics;
+using System.Globalization;
 using Microsoft.Extensions.Logging;
 
 namespace HkdfGuard.Diagnostics.Test;
@@ -140,6 +141,42 @@ public class CacheMetricsAndLoggerTests
     }
 
     [Fact]
+    public void KeyFileAgeWarning_WritesAWarningEntryNamingTheFileAndWhenItStopsEncrypting()
+    {
+        var logger = new CapturingLogger();
+        var culture = CultureInfo.CurrentCulture;
+        CultureInfo.CurrentCulture = new CultureInfo("ar-SA"); // a non-Gregorian calendar can't change the timestamp
+        try
+        {
+            logger.KeyFileAgeWarning(3, "/etc/app/key.v3", new DateTimeOffset(2027, 1, 2, 0, 0, 0, TimeSpan.Zero));
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = culture;
+        }
+
+        var entry = Assert.Single(logger.Entries);
+        Assert.Equal(LogLevel.Warning, entry.Level);
+        Assert.Equal(11, entry.EventId.Id);
+        Assert.Equal("KeyFileAgeWarning", entry.EventId.Name);
+        Assert.Equal("Key file '/etc/app/key.v3' (version 3) stops encrypting at 2027-01-02T00:00:00.000Z, when it reaches its maximum age; deploy a new key file at a higher version before then.", entry.Message);
+    }
+
+    [Fact]
+    public void KeyFileExpired_WritesACriticalEntryNamingTheFile()
+    {
+        var logger = new CapturingLogger();
+
+        logger.KeyFileExpired(3, "/etc/app/key.v3");
+
+        var entry = Assert.Single(logger.Entries);
+        Assert.Equal(LogLevel.Critical, entry.Level);
+        Assert.Equal(12, entry.EventId.Id);
+        Assert.Equal("KeyFileExpired", entry.EventId.Name);
+        Assert.Equal("Key file '/etc/app/key.v3' (version 3) has passed its maximum age and no longer encrypts; values under it still decrypt. Deploy a new key file at a higher version.", entry.Message);
+    }
+
+    [Fact]
     public void LoggerExtensions_WhenTheLevelIsDisabled_WriteNothing()
     {
         var logger = new CapturingLogger { Enabled = false };
@@ -151,6 +188,8 @@ public class CacheMetricsAndLoggerTests
         logger.KeyAccessResumed(1);
         logger.EphemeralKeyRotated(1);
         logger.EphemeralKeyRotationFailed(1, new InvalidOperationException());
+        logger.KeyFileAgeWarning(1, "key.bin", DateTimeOffset.UnixEpoch);
+        logger.KeyFileExpired(1, "key.bin");
 
         Assert.Empty(logger.Entries);
     }

@@ -260,6 +260,14 @@ still decrypt as long as their key file stays registered.
 > ephemeral key at a higher version (`.WithEphemeralKey(version: 2)`): its encryption budget is counted exactly, in the one
 > process that holds it. See the README's encryption budget section.
 
+Rotate at least yearly. AES-GCM is only safe for a limited number of encryptions under one key,
+and a key file outlives the process that counts them. So a key file stops encrypting 365 days
+after it was last written (`WithKeyFileMaxAgeDays`, or `KeyFileMaxAgeDays` in `appsettings.json`,
+sets anywhere from 1 to 3650). A warning is logged at 90% of that age. After it, encrypting throws
+`EncryptionLimitReachedException`, and values under that key file still decrypt. The age is the
+file's last write time, so copy key files with their timestamps kept (`cp -p`, `rsync -t`). A plain
+copy resets the clock.
+
 ## If something goes wrong
 
 | You see | Cause | Fix |
@@ -274,6 +282,7 @@ still decrypt as long as their key file stays registered.
 | `InvalidDataException` ... `status -37` | The "key file" holds what looks like an **unwrapped** key | Treat the key as exposed: replace it, and create the file with `wrap` |
 | `InvalidDataException` ... `status -35`, `-36` or `-38` | The file isn't a key file: wrong size, or not a valid wrapped key | Check the path; recreate it with `wrap` |
 | `ArgumentException` about the service name | The name breaks the rule in step 2 | Use letters, digits and dots only |
+| `EncryptionLimitReachedException` naming a key file | The current key file is older than `KeyFileMaxAgeDays` (365 by default) | Wrap a new key file and register it at a higher version (step 6); old values keep decrypting |
 
 Every native error message includes the status code and its meaning.
 

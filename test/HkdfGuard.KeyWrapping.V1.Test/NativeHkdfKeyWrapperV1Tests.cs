@@ -38,7 +38,7 @@ public class NativeHkdfKeyWrapperV1Tests
 
     [Theory]
     [InlineData(-7)]  // reserved codes: no platform returns them, so there is no meaning to add
-    [InlineData(-13)]
+    [InlineData(-14)]
     [InlineData(-40)]
     public async Task WrapAsync_WhenLibraryFails_ThrowsCryptographicException(int errorCode)
     {
@@ -97,7 +97,7 @@ public class NativeHkdfKeyWrapperV1Tests
 
     [Theory]
     [InlineData(-7)]  // reserved codes: no platform returns them, so there is no meaning to add
-    [InlineData(-13)]
+    [InlineData(-14)]
     [InlineData(-40)]
     public async Task UnwrapAsync_WhenLibraryFails_ThrowsCryptographicException(int errorCode)
     {
@@ -140,7 +140,7 @@ public class NativeHkdfKeyWrapperV1Tests
 
     [Theory]
     [InlineData(-7)]  // reserved codes: no platform returns them, so there is no meaning to add
-    [InlineData(-13)]
+    [InlineData(-14)]
     [InlineData(-40)]
     public async Task GenerateAndWrapAsync_WhenLibraryFails_ThrowsCryptographicException(int errorCode)
     {

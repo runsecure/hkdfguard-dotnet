@@ -1,5 +1,7 @@
+using System.Globalization;
 using HkdfGuard.Abstractions;
 using HkdfGuard.DataEncryptionKey.FormatProvider;
+using HkdfGuard.Diagnostics;
 using Microsoft.Extensions.Logging;
 
 namespace HkdfGuard.DataEncryptionKey;
@@ -20,7 +22,9 @@ namespace HkdfGuard.DataEncryptionKey;
 /// adds a fresh one as its new current version every <see cref="EphemeralKeyRotationInterval"/>
 /// (24 hours unless configured otherwise). Because a rotation adds its key above the current
 /// version, a rotating ring must have its highest ephemeral version above every key file - Build
-/// refuses a key file above every ephemeral version unless rotation is turned off.
+/// refuses a key file above every ephemeral version unless rotation is turned off. A key file
+/// stops encrypting <see cref="KeyFileMaxAgeDays"/> days after it was last written (365 unless
+/// configured otherwise), so one that is never rotated can't encrypt without bound.
 /// </summary>
 public sealed class KeyRingBuilder
 {
@@ -30,6 +34,7 @@ public sealed class KeyRingBuilder
     private ICryptoProviderFactory? _cryptoProviderFactory;
     private IEncryptedFormatProvider _formatProvider = new DefaultFormatProvider();
     private ILogger<KeyRing>? _logger;
+    private TimeProvider _timeProvider = TimeProvider.System;
 
     /// <summary>How often a ring with ephemeral keys adds a fresh one as its current version, unless configured otherwise.</summary>
     public static readonly TimeSpan DefaultEphemeralKeyRotationInterval = TimeSpan.FromHours(24);
@@ -61,6 +66,23 @@ public sealed class KeyRingBuilder
     /// </summary>
     public const int DefaultMaxRefreshFailures = RefreshFailurePolicy.DefaultMaxRefreshFailures;
 
+    /// <summary>
+    /// How many days after it was last written a key file stops encrypting, unless configured otherwise.
+    /// AES-GCM with random nonces is safe for about 2^32 encryptions under one key in total, and a key
+    /// file outlives the process that counts them, so it is bounded by age instead: rotate key files by
+    /// deploying a new one at a higher version. Decryption under an old key file never stops.
+    /// </summary>
+    public const int DefaultKeyFileMaxAgeDays = 365;
+
+    /// <summary>The shortest key-file age <see cref="WithKeyFileMaxAgeDays"/> accepts, in days.</summary>
+    public const int MinKeyFileMaxAgeDays = 1;
+
+    /// <summary>The longest key-file age <see cref="WithKeyFileMaxAgeDays"/> accepts, in days.</summary>
+    public const int MaxKeyFileMaxAgeDays = 3650;
+
+    /// <summary>The fraction of the maximum age after which a warning is logged: 90%, about five weeks of a year.</summary>
+    public const double KeyFileAgeWarningFraction = 0.9;
+
     public string? ServiceName { get; private set; }
     public int? KeyRefreshInterval { get; private set; }
 
@@ -87,6 +109,12 @@ public sealed class KeyRingBuilder
     /// so this has no effect without rotation.
     /// </summary>
     public TimeSpan EphemeralKeyRetention { get; private set; } = DefaultEphemeralKeyRetention;
+
+    /// <summary>
+    /// Days after a key file was last written that it stops encrypting. Defaults to
+    /// <see cref="DefaultKeyFileMaxAgeDays"/>. Ephemeral keys have no age limit.
+    /// </summary>
+    public int KeyFileMaxAgeDays { get; private set; } = DefaultKeyFileMaxAgeDays;
 
     /// <summary>
     /// Sets how often the built ring rotates its ephemeral encryption key: each interval it
@@ -151,8 +179,36 @@ public sealed class KeyRingBuilder
     }
 
     /// <summary>
+    /// Sets how many days after it was last written each key file stops encrypting. Its age is its
+    /// last write time, so copy key files with their timestamps preserved (cp -p, rsync -t); a plain
+    /// copy resets the clock. A warning is logged at 90% of the age (<see cref="KeyFileAgeWarningFraction"/>);
+    /// past it, Encrypt throws EncryptionLimitReachedException and decryption still works. Only the
+    /// current version ever encrypts, so only it is reported. Not calling this keeps
+    /// <see cref="DefaultKeyFileMaxAgeDays"/>.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">days is not between <see cref="MinKeyFileMaxAgeDays"/>
+    /// and <see cref="MaxKeyFileMaxAgeDays"/></exception>
+    public KeyRingBuilder WithKeyFileMaxAgeDays(int days)
+    {
+        if (days is < MinKeyFileMaxAgeDays or > MaxKeyFileMaxAgeDays)
+            throw new ArgumentOutOfRangeException(nameof(days), days,
+                $"KeyFileMaxAgeDays must be between {MinKeyFileMaxAgeDays} and {MaxKeyFileMaxAgeDays}.");
+
+        KeyFileMaxAgeDays = days;
+        return this;
+    }
+
+    // Tests only: the clock key-file deadlines are checked against.
+    internal KeyRingBuilder WithTimeProviderForTesting(TimeProvider timeProvider)
+    {
+        _timeProvider = timeProvider;
+        return this;
+    }
+
+    /// <summary>
     /// Receives an informational entry for every ephemeral key rotation and an error for every
-    /// failed one. Optional.
+    /// failed one, and a warning or critical entry for a current key file nearing or past its
+    /// maximum age (<see cref="WithKeyFileMaxAgeDays"/>). Optional.
     /// </summary>
     public KeyRingBuilder WithLogger(ILogger<KeyRing>? logger)
     {
@@ -334,10 +390,12 @@ public sealed class KeyRingBuilder
                 if (wrapped.Length > WrappedKeyLimits.MaxBytes)
                     throw new InvalidDataException(
                         $"Key file '{path}' is larger than {WrappedKeyLimits.MaxBytes} bytes (WrappedKeyLimits.MaxBytes); a wrapped key never is.");
+                // The key file's age: its last write time, taken from the same path the key wrapper read.
+                var lastWritten = LastWriteTimeUtc(path);
                 var provider = await _cryptoProviderFactory
                     .CreateAsync(_keyWrapper, wrapped, KeyRefreshInterval.Value, MaxRefreshFailures, cancellationToken)
                     .ConfigureAwait(false);
-                await AddOwnedAsync(ring, version, provider).ConfigureAwait(false);
+                await AddOwnedAsync(ring, version, provider, KeyFileDeadline(version, path, lastWritten)).ConfigureAwait(false);
             }
 
             foreach (var version in _ephemeralVersions)
@@ -345,8 +403,13 @@ public sealed class KeyRingBuilder
                 var provider = await _cryptoProviderFactory
                     .CreateEphemeralAsync(_keyWrapper, KeyRefreshInterval.Value, MaxRefreshFailures, cancellationToken)
                     .ConfigureAwait(false);
-                await AddOwnedAsync(ring, version, provider).ConfigureAwait(false);
+                await AddOwnedAsync(ring, version, provider, null).ConfigureAwait(false);
             }
+
+            // Report a current key file already nearing or past its age now, not at its first
+            // encrypt. A superseded key file never encrypts, so it is never reported.
+            if (ring.TryGet(ring.CurrentVersion, out var current) && current is DataEncryptionKey currentKey)
+                currentKey.CheckDeadline();
 
             if (_ephemeralVersions.Count > 0 && EphemeralKeyRotationInterval is { } interval)
             {
@@ -370,9 +433,37 @@ public sealed class KeyRingBuilder
         }
     }
 
-    private static async Task AddOwnedAsync(KeyRing ring, int version, ICryptoProvider provider)
+    private static DateTimeOffset LastWriteTimeUtc(string path)
     {
-        var key = new DataEncryptionKey(provider);
+        // File.GetLastWriteTimeUtc reports a missing file as 1601-01-01 rather than throwing, which
+        // would read as a key file centuries past its age.
+        var file = new FileInfo(path);
+        if (!file.Exists)
+            throw new FileNotFoundException($"Key file '{path}' was read but no longer exists, so its age can't be determined.", path);
+        return new DateTimeOffset(file.LastWriteTimeUtc, TimeSpan.Zero);
+    }
+
+    /// <summary>When the key file at <paramref name="path"/>, last written at <paramref name="lastWritten"/>, stops encrypting, and who hears about it.</summary>
+    private EncryptionDeadline KeyFileDeadline(int version, string path, DateTimeOffset lastWritten)
+    {
+        var maxAgeDays = KeyFileMaxAgeDays;
+        var maxAge = TimeSpan.FromDays(maxAgeDays);
+        var refuseAt = lastWritten + maxAge;
+        var logger = _logger;
+        var written = lastWritten.UtcDateTime.ToString("yyyy'-'MM'-'dd'T'HH':'mm':'ss'.'fff'Z'", CultureInfo.InvariantCulture);
+        return new EncryptionDeadline
+        {
+            WarnAt = lastWritten + maxAge * KeyFileAgeWarningFraction,
+            RefuseAt = refuseAt,
+            Reason = $"Key file '{path}' (version {version}) was last written {written}, more than {maxAgeDays} days ago (KeyFileMaxAgeDays), so it no longer encrypts: AES-GCM is only safe for a bounded number of encryptions under one key. Deploy a new key file at a higher version; values under this one still decrypt.",
+            OnWarning = logger is null ? null : () => logger.KeyFileAgeWarning(version, path, refuseAt),
+            OnExpired = logger is null ? null : () => logger.KeyFileExpired(version, path),
+        };
+    }
+
+    private async Task AddOwnedAsync(KeyRing ring, int version, ICryptoProvider provider, EncryptionDeadline? deadline)
+    {
+        var key = new DataEncryptionKey(provider, deadline, _timeProvider);
         try
         {
             ring.Add(version, key);

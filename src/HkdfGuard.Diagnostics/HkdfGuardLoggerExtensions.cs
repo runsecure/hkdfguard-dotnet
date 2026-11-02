@@ -72,4 +72,29 @@ public static partial class HkdfGuardLoggerExtensions
     [LoggerMessage(EventId = 9, Level = LogLevel.Error,
         Message = "Ephemeral key version {KeyVersion} was removed from the ring, but disposing it failed.")]
     public static partial void EphemeralKeyRetirementFailed(this ILogger logger, int keyVersion, Exception exception);
+
+    /// <summary>
+    /// The current key file has reached 90% of its maximum age (KeyRingBuilder.WithKeyFileMaxAgeDays);
+    /// at <paramref name="refuseAt"/> it stops encrypting, so deploy a new key file at a higher
+    /// version before then. Logged once per key.
+    /// </summary>
+    public static void KeyFileAgeWarning(this ILogger logger, int keyVersion, string keyFilePath, DateTimeOffset refuseAt)
+        => LogKeyFileAgeWarning(logger, keyFilePath, keyVersion, FormatIsoUtc(refuseAt));
+
+    // RefuseAt is passed preformatted so the message is the same in every culture and every port.
+    [LoggerMessage(EventId = 11, EventName = nameof(KeyFileAgeWarning), Level = LogLevel.Warning,
+        Message = "Key file '{KeyFilePath}' (version {KeyVersion}) stops encrypting at {RefuseAt}, when it reaches its maximum age; deploy a new key file at a higher version before then.")]
+    private static partial void LogKeyFileAgeWarning(ILogger logger, string keyFilePath, int keyVersion, string refuseAt);
+
+    /// <summary>
+    /// The current key file has passed its maximum age and no longer encrypts; values under it
+    /// still decrypt. Logged once per key.
+    /// </summary>
+    [LoggerMessage(EventId = 12, Level = LogLevel.Critical,
+        Message = "Key file '{KeyFilePath}' (version {KeyVersion}) has passed its maximum age and no longer encrypts; values under it still decrypt. Deploy a new key file at a higher version.")]
+    public static partial void KeyFileExpired(this ILogger logger, int keyVersion, string keyFilePath);
+
+    // ISO 8601 UTC with milliseconds ("2027-01-02T00:00:00.000Z"), whatever the current culture.
+    private static string FormatIsoUtc(DateTimeOffset value)
+        => value.UtcDateTime.ToString("yyyy'-'MM'-'dd'T'HH':'mm':'ss'.'fff'Z'", System.Globalization.CultureInfo.InvariantCulture);
 }

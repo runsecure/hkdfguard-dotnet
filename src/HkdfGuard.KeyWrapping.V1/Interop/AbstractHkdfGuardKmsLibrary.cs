@@ -38,6 +38,7 @@ internal abstract class AbstractHkdfGuardKmsLibrary
     public const int ErrPayloadMalformed = -10;
     public const int ErrPayloadAuthFailed = -11;
     public const int ErrPayloadUnsupported = -12;
+    public const int ErrPayloadVersionRefused = -13;
 
     // KEK and process (-16..-31)
     public const int ErrKekFingerprintMismatch = -16;
@@ -82,9 +83,10 @@ internal abstract class AbstractHkdfGuardKmsLibrary
         ErrInternalError => "an unexpected internal failure in the native library",
         ErrInvalidServiceName => "the service name is null, empty, too long, or has a character other than an ASCII letter, digit or '.'",
         ErrPolicyInvalid => "the machine's HkdfGuard policy is invalid",
-        ErrPayloadMalformed => "the wrapped payload is not a valid WrappedDekV1",
+        ErrPayloadMalformed => "the wrapped payload is not a valid wrapped DEK",
         ErrPayloadAuthFailed => "AES-GCM authentication failed: the wrapped payload was altered",
         ErrPayloadUnsupported => "the wrapped payload's version or suite is not one this native library understands",
+        ErrPayloadVersionRefused => "the wrapped payload's version is one this native library understands, but this host's policy does not use",
         ErrKekFingerprintMismatch => "the payload was wrapped under a different KEK than this service's current one",
         ErrKekNotFound => "no KEK is provisioned for this service; run hkdfguard provision",
         ErrKekAccessDenied => "the KEK exists, but this account is not authorized to use it",
@@ -95,7 +97,7 @@ internal abstract class AbstractHkdfGuardKmsLibrary
         ErrFileIo => "the key file is not a regular file, is in use by a writer, or could not be read",
         ErrFileTooShort => "the key file is shorter than a wrapped DEK",
         ErrFileTooLong => "the key file is longer than a wrapped DEK",
-        ErrFilePlaintextKey => "the key file holds what looks like an UNWRAPPED key (32 raw bytes, or its hex or base64): treat it as a key exposure",
+        ErrFilePlaintextKey => "the key file holds what looks like an UNWRAPPED key (32 raw bytes, optionally followed by one line ending (LF or CRLF), or its hex or base64): treat it as a key exposure",
         ErrFileMalformed => "the key file is the right size, but is not a valid wrapped DEK",
         ErrFileUntrusted => "the key file's path is not trusted: a link or reparse point, a short or network path, or a file or folder another account could replace",
         ErrWinGroupInvalid => @"an HKLM\Software\Policies\HkdfGuard\KeyUseGroups entry is unresolvable, not a group, not host-local, or over-broad",

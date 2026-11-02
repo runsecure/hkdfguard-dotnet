@@ -12,6 +12,15 @@ namespace HkdfGuard.Cache;
 /// or stores a value - so mutation of actual cached values stays entirely a concern of whichever
 /// underlying source(s) actually support it (e.g. a writable ProtectedCache mixed in as one of
 /// the sources).
+/// <para>
+/// A source that throws fails the lookup, even when a later source holds the name: a source that
+/// couldn't answer can't say whether it holds the name, and answering from a later source could
+/// return a value an earlier one overrides. Order sources so that cannot cost availability: add
+/// local sources (ProtectedCache) before remote ones (a RemoteSecretCache such as the Key Vault or
+/// Secrets Manager caches). A remote cache doesn't remember a name its store lacks, so a remote
+/// source added first makes a network call for every local-only name on every lookup - enough to
+/// be throttled, and then to fail every lookup.
+/// </para>
 /// </summary>
 public sealed class ProtectedCacheCollection : IProtectedReadOnlyCache
 {

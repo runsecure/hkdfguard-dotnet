@@ -180,7 +180,7 @@ Reading a key file (`hkdfguard_open_file`) can fail with:
 | -34 | Not a regular file, in use by a writer, or a read failed | `IOException` |
 | -35 | Shorter than a wrapped DEK | `InvalidDataException` |
 | -36 | Longer than a wrapped DEK | `InvalidDataException` |
-| -37 | Holds what looks like an **unwrapped** DEK: 32 raw bytes, or its hex or base64. Treat it as a key exposure | `InvalidDataException` |
+| -37 | Holds what looks like an **unwrapped** DEK: 32 raw bytes, optionally followed by one line ending (LF or CRLF), or its hex or base64. Treat it as a key exposure | `InvalidDataException` |
 | -38 | The right size, but not a valid wrapped DEK | `InvalidDataException` |
 | -39 | Untrusted: a link, junction or 8.3 short name in the path, a network, mapped or SUBST drive, or a file or folder another account could write or replace | `UnauthorizedAccessException` |
 
