@@ -117,7 +117,8 @@
         "type": "Project",
         "dependencies": {
           "HkdfGuard.Abstractions": "[1.0.0, )",
-          "HkdfGuard.Cache": "[1.0.0, )"
+          "HkdfGuard.Cache": "[1.0.0, )",
+          "HkdfGuard.Integration.HashiCorpVault": "[1.0.0, )"
         }
       },
       "hkdfguard.cryptoprovider.aesgcm256": {
@@ -137,6 +138,13 @@
       "hkdfguard.diagnostics": {
         "type": "Project",
         "dependencies": {
+          "Microsoft.Extensions.Logging.Abstractions": "[10.0.11, )"
+        }
+      },
+      "hkdfguard.integration.hashicorpvault": {
+        "type": "Project",
+        "dependencies": {
+          "HkdfGuard.Abstractions": "[1.0.0, )",
           "Microsoft.Extensions.Logging.Abstractions": "[10.0.11, )"
         }
       },

@@ -88,16 +88,21 @@ file. Nothing renews it, so once it expires every request fails with 403. Pass i
 your application is given it:
 
 ```csharp
-using HkdfGuard.KeyWrapping.HashiCorpVault;
+using HkdfGuard.Integration.HashiCorpVault;
 
 using var token = new StaticVaultTokenSource(vaultToken); // the Vault token, passed in or configured
 ```
 
+`IVaultTokenSource` and `StaticVaultTokenSource` live in `HkdfGuard.Integration.HashiCorpVault`,
+which the wrapper's package depends on, alongside the rest of the Vault request rules the wrapper
+shares with the secret cache and `VaultClient`.
+
 For a long-running service, prefer a Vault Agent on loopback with `use_auto_auth_token`, which
 renews the token itself, or implement `IVaultTokenSource` over your auth method.
 
-> **Note:** this is not the cache's `IVaultTokenProvider`. That one hands over a token protected by
-> the key ring; a key wrapper runs before there is a key ring, so it can't.
+> **Note:** this is not `IVaultTokenProvider`, which the secret cache and `VaultClient` use. That one
+> hands over a token protected by the key ring; a key wrapper runs before there is a key ring, so it
+> can't.
 
 ## 4. Create the wrapper
 
@@ -139,21 +144,43 @@ using var wrapper = new HashiCorpVaultTransitKeyWrapper(
 Options (`HashiCorpVaultTransitKeyWrapperOptions`) set a mount other than `transit`, a Vault
 Enterprise namespace, the per-attempt timeout (30 seconds), and retries: a request that gets no
 answer, loses its connection, times out, or is answered 429 or a 5xx other than 501 is retried 3
-times by default, waiting 200 ms and doubling, plus up to 100 ms of jitter. To trust a private CA,
-supply a `SocketsHttpHandler` with `AllowAutoRedirect = false`:
+times by default, waiting 200 ms and doubling, plus up to 100 ms of jitter.
+
+To trust a private CA, or to present a client certificate to a Vault that requires mutual TLS, set
+`Tls` to a `VaultTlsOptions`. It takes PEM files, or a password-protected PKCS#12 trust store and
+client key store. Each store's password is held only encrypted, by a protector on your key ring
+created for `VaultTlsOptions.PasswordPurpose`. It is decrypted into pinned memory only while the
+store is read, then zeroed. Encrypt the password once, for example when you provision the
+application, and keep only the result in configuration:
 
 ```csharp
+using HkdfGuard.Integration.HashiCorpVault;
+
+var passwordProtector = keyRing.CreateProtector(VaultTlsOptions.PasswordPurpose);
+// Once: VaultTlsOptions.ProtectPassword(passwordProtector, password), then zero password.
+var protectedPassword = configuration["Vault:KeyStorePassword"];
+
 var options = new HashiCorpVaultTransitKeyWrapperOptions
 {
     MountPath = "transit/team-a",
     Namespace = "team-a/prod",
-    HttpMessageHandler = new SocketsHttpHandler
+    Tls = new VaultTlsOptions
     {
-        AllowAutoRedirect = false,
-        SslOptions = { RemoteCertificateValidationCallback = /* trust your CA */ },
+        TrustStoreFile = "/etc/myapp/vault-ca.p12",
+        TrustStorePassword = protectedPassword,
+        ClientKeyStoreFile = "/etc/myapp/vault-client.p12",
+        ClientKeyStorePassword = protectedPassword,
+        PasswordProtector = passwordProtector,
     },
 };
 ```
+
+The stores are read when the wrapper is created. A store that can't be read, a wrong password, or a
+password not encrypted by `PasswordProtector` throws `ArgumentException` then. If the client key
+store holds more than one private key, choose the certificate to present with
+`ClientKeyStoreThumbprint`. .NET reads PKCS#12, not JKS. `Tls` configures the wrapper's own
+handler, or a `SocketsHttpHandler` you supply as `HttpMessageHandler` (set `AllowAutoRedirect = false`
+on it). A supplied handler of any other type can't take `Tls`, and is refused.
 
 ## 5. Build a key ring with an ephemeral key
 

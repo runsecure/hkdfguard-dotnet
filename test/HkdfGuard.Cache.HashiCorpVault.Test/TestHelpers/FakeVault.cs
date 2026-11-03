@@ -3,6 +3,7 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using HkdfGuard.Abstractions;
+using HkdfGuard.Integration.HashiCorpVault;
 
 namespace HkdfGuard.Cache.HashiCorpVault.Test.TestHelpers;
 

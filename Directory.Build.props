@@ -11,6 +11,13 @@
     <PackageLicenseExpression>MPL-2.0</PackageLicenseExpression>
   </PropertyGroup>
 
+  <!-- The version a plain local build stamps in. Releases (release.yml, from the vX.Y.Z tag), CI and
+       scripts\build-signed.bat pass their own with -p:Version, which overrides this. Keep it at the
+       release being prepared: update it alongside the tag. -->
+  <PropertyGroup>
+    <Version>0.9.1</Version>
+  </PropertyGroup>
+
   <!-- Supply chain. Every project records its full resolved dependency graph, content hashes
        included, in packages.lock.json; on a CI build restore must match it exactly, so a changed
        or substituted package fails the build instead of being picked up. nuget.config restricts

@@ -5,6 +5,7 @@ using HkdfGuard.Cache.HashiCorpVault.Test.TestHelpers;
 using HkdfGuard.DataEncryptionKey;
 using HkdfGuard.DataEncryptionKey.FormatProvider;
 using HkdfGuard.Diagnostics;
+using HkdfGuard.Integration.HashiCorpVault;
 using Microsoft.Extensions.Logging;
 
 namespace HkdfGuard.Cache.HashiCorpVault.Test;
@@ -430,21 +431,6 @@ public class HashiCorpVaultSecretCacheTests
         Assert.Empty(vault.Reads);
     }
 
-    [Theory]
-    [InlineData(200, 0, 0, 200)]
-    [InlineData(200, 1, 0, 400)]
-    [InlineData(200, 2, 0, 800)]
-    [InlineData(200, 5, 0, 6400)]
-    [InlineData(200, 6, 0, 10_000)]
-    [InlineData(200, 9, 0, 10_000)]
-    [InlineData(200, 0, 100, 300)]
-    [InlineData(200, 9, 100, 10_100)]
-    [InlineData(0, 3, 37, 37)]
-    [InlineData(10_000, 0, 0, 10_000)]
-    public void RetryDelay_Doubles_UpToTheMaximum_PlusTheJitter(int baseMilliseconds, int retry, int jitter, int expectedMilliseconds)
-        => Assert.Equal(TimeSpan.FromMilliseconds(expectedMilliseconds),
-            HashiCorpVaultSecretCache.RetryDelay(TimeSpan.FromMilliseconds(baseMilliseconds), retry, jitter));
-
     [Fact]
     public async Task TheRetryOptions_AreChecked()
     {
@@ -804,6 +790,24 @@ public class HashiCorpVaultSecretCacheTests
         Assert.Contains("AllowRedirects", e.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Tls_IsAppliedToASocketsHttpHandler_AndRefusedWhereItCantBeAppliedOrRead()
+    {
+        var ring = await TestRing.CreateAsync();
+        var tls = new VaultTlsOptions { InsecureSkipVerify = true };
+        using var sockets = new SocketsHttpHandler { AllowAutoRedirect = false };
+        using (var cache = NewCache(FakeVault.Address, ring, new HashiCorpVaultSecretCacheOptions { HttpMessageHandler = sockets, Tls = tls }))
+            Assert.Equal(0, cache.Decrypt("not:a:path", new byte[16]));
+        Assert.NotNull(sockets.SslOptions.RemoteCertificateValidationCallback);
+
+        using var vault = new FakeVault();
+        Assert.Throws<ArgumentException>("options", () => NewCache(FakeVault.Address, ring,
+            new HashiCorpVaultSecretCacheOptions { HttpMessageHandler = vault, Tls = tls }));
+        Assert.Throws<ArgumentException>(() => NewCache(FakeVault.Address, ring,
+            new HashiCorpVaultSecretCacheOptions { Tls = new VaultTlsOptions { TrustStoreFile = "no-such-trust-store.p12" } }));
+        Assert.Null(new HashiCorpVaultSecretCacheOptions().Tls);
+    }
+
     [Theory]
     [MemberData(nameof(RedirectingHandlers))]
     public async Task AHandlerThatFollowsNoRedirects_IsAccepted(string kind)
@@ -846,40 +850,5 @@ public class HashiCorpVaultSecretCacheTests
             if (inner is not null)
                 InnerHandler = inner;
         }
-    }
-
-    [Theory]
-    [InlineData("")]
-    [InlineData("hvs.with space")]
-    [InlineData("hvs.line\nbreak")]
-    [InlineData("caf\u00e9")]
-    public async Task StaticVaultToken_Protect_RejectsATokenThatCantBeSent(string token)
-    {
-        var protector = (await TestRing.CreateAsync()).CreateProtector(HashiCorpVaultSecretCache.TokenPurpose);
-
-        Assert.Throws<ArgumentException>(() => StaticVaultToken.Protect(protector, token));
-    }
-
-    [Fact]
-    public void StaticVaultToken_Protect_RejectsANullProtector()
-        => Assert.Throws<ArgumentNullException>(() => StaticVaultToken.Protect(null!, FakeVault.Token));
-
-    [Theory]
-    [InlineData(null)]
-    [InlineData("")]
-    [InlineData(" ")]
-    public void StaticVaultToken_RejectsAnEmptyProtectedToken(string? protectedToken)
-        => Assert.ThrowsAny<ArgumentException>(() => new StaticVaultToken(protectedToken!));
-
-    [Fact]
-    public async Task StaticVaultToken_Protect_HoldsOnlyTheProtectedToken()
-    {
-        var protector = (await TestRing.CreateAsync()).CreateProtector(HashiCorpVaultSecretCache.TokenPurpose);
-
-        var held = await StaticVaultToken.Protect(protector, FakeVault.Token).GetTokenAsync(CancellationToken.None);
-
-        Assert.DoesNotContain(FakeVault.Token, held, StringComparison.Ordinal);
-        var token = new char[64];
-        Assert.Equal(FakeVault.Token, new string(token, 0, protector.Decrypt(held, token)));
     }
 }

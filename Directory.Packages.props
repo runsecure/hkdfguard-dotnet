@@ -29,6 +29,9 @@
     <PackageVersion Include="Google.Cloud.Kms.V1" Version="3.27.0" />
     <PackageVersion Include="Google.Cloud.SecretManager.V1" Version="2.8.0" />
 
+    <!-- ConfigurationResolver (HkdfGuard.Integration.ConfigurationResolver) -->
+    <PackageVersion Include="ConfigurationResolver" Version="0.9.1" />
+
     <!-- Test infrastructure -->
     <PackageVersion Include="coverlet.collector" Version="6.0.4" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />

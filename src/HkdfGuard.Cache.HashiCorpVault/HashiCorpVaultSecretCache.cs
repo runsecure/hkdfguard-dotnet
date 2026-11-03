@@ -1,9 +1,6 @@
-using System.Buffers;
 using System.Net;
-using System.Runtime.InteropServices;
-using System.Security.Cryptography;
-using System.Text.Json;
 using HkdfGuard.Abstractions;
+using HkdfGuard.Integration.HashiCorpVault;
 using Microsoft.Extensions.Logging;
 
 namespace HkdfGuard.Cache.HashiCorpVault;
@@ -71,11 +68,6 @@ public sealed class HashiCorpVaultSecretCache : RemoteSecretCache, IDisposable
     /// </summary>
     public const string TokenPurpose = "HkdfGuard.Cache.HashiCorpVault.Token";
 
-    private const string TokenHeader = "X-Vault-Token";
-
-    private static readonly SearchValues<char> SegmentCharacters =
-        SearchValues.Create("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.");
-
     private readonly HttpClient _http;
     private readonly IVaultTokenProvider _tokenProvider;
     private readonly IDataProtector _tokenProtector;
@@ -100,8 +92,9 @@ public sealed class HashiCorpVaultSecretCache : RemoteSecretCache, IDisposable
     /// <param name="logger">Optional; see RemoteSecretCache.</param>
     /// <exception cref="ArgumentNullException">address, tokenProvider, tokenProtector or keyRing is null</exception>
     /// <exception cref="ArgumentException">address isn't https (or http on loopback), or holds
-    /// credentials, a query or a fragment; or the mount path, default key or namespace isn't one; or
-    /// the HttpMessageHandler follows redirects without AllowRedirects</exception>
+    /// credentials, a query or a fragment; the mount path, default key or namespace isn't one; the
+    /// HttpMessageHandler follows redirects without AllowRedirects; or the TLS options can't be read,
+    /// or are given with an HttpMessageHandler that isn't a SocketsHttpHandler</exception>
     /// <exception cref="ArgumentOutOfRangeException">The KV version isn't one, or the timeout isn't positive</exception>
     public HashiCorpVaultSecretCache(Uri address, IVaultTokenProvider tokenProvider, IDataProtector tokenProtector, IKeyRing keyRing,
         HashiCorpVaultSecretCacheOptions? options = null, ILogger<HashiCorpVaultSecretCache>? logger = null)
@@ -110,27 +103,14 @@ public sealed class HashiCorpVaultSecretCache : RemoteSecretCache, IDisposable
         ArgumentNullException.ThrowIfNull(tokenProvider);
         ArgumentNullException.ThrowIfNull(tokenProtector);
         options ??= new HashiCorpVaultSecretCacheOptions();
-        var apiBase = ApiBase(address);
+        var apiBase = VaultHttp.ApiBase(address);
 
-        if (!IsValidPath(options.MountPath))
-            throw new ArgumentException($"The mount path '{options.MountPath}' isn't a Vault path.", nameof(options));
+        VaultHttp.CheckSettings(options.MountPath, options.Namespace, options.Timeout, options.RetryCount, options.RetryDelay, nameof(options));
         if (!IsValidKey(options.DefaultKey))
             throw new ArgumentException($"The default key '{options.DefaultKey}' isn't a key: 1-{MaxKeyLength} printable ASCII characters other than space, '!' and '#'.", nameof(options));
-        if (options.Namespace is not null && !IsValidPath(options.Namespace))
-            throw new ArgumentException($"The namespace '{options.Namespace}' isn't a Vault path.", nameof(options));
         if (!Enum.IsDefined(options.KvVersion))
             throw new ArgumentOutOfRangeException(nameof(options), options.KvVersion, "The KV version must be V1 or V2.");
-        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(options.Timeout, TimeSpan.Zero, nameof(options));
-        if (options.RetryCount is < HashiCorpVaultSecretCacheOptions.MinRetryCount or > HashiCorpVaultSecretCacheOptions.MaxRetryCount)
-            throw new ArgumentOutOfRangeException(nameof(options), options.RetryCount,
-                $"RetryCount must be {HashiCorpVaultSecretCacheOptions.MinRetryCount}-{HashiCorpVaultSecretCacheOptions.MaxRetryCount}.");
-        if (options.RetryDelay < TimeSpan.Zero || options.RetryDelay > HashiCorpVaultSecretCacheOptions.MaxRetryDelay)
-            throw new ArgumentOutOfRangeException(nameof(options), options.RetryDelay,
-                $"RetryDelay must be zero to {HashiCorpVaultSecretCacheOptions.MaxRetryDelay}.");
-        if (options.HttpMessageHandler is { } supplied && !options.AllowRedirects && FollowsRedirects(supplied))
-            throw new ArgumentException(
-                "The HttpMessageHandler follows redirects, which would send the Vault token wherever they point. Set its AllowAutoRedirect to false, or set AllowRedirects if every redirect target may see the token.",
-                nameof(options));
+        VaultHttp.CheckRedirects(options.HttpMessageHandler, options.AllowRedirects, nameof(options));
 
         _tokenProvider = tokenProvider;
         _tokenProtector = tokenProtector;
@@ -143,22 +123,9 @@ public sealed class HashiCorpVaultSecretCache : RemoteSecretCache, IDisposable
             ? ($"{options.MountPath}/data/", new[] { "data", "data" })
             : ($"{options.MountPath}/", new[] { "data" });
 
-        var handler = options.HttpMessageHandler ?? new SocketsHttpHandler
-        {
-            // A redirect would carry X-Vault-Token to wherever it points: HttpClient drops only the
-            // Authorization header when following one. Vault's standbys forward requests to the
-            // active node themselves, so a redirect is answered as an error instead.
-            AllowAutoRedirect = false,
-            UseCookies = false,
-            // Picks up a changed DNS record (a failover) without restarting.
-            PooledConnectionLifetime = TimeSpan.FromMinutes(5),
-        };
-        _http = new HttpClient(handler, disposeHandler: options.HttpMessageHandler is null)
-        {
-            BaseAddress = apiBase,
-            // The fetch's own timeout covers the token as well as the request.
-            Timeout = System.Threading.Timeout.InfiniteTimeSpan,
-        };
+        // Follows no redirects: one would carry X-Vault-Token wherever it points. The fetch's own
+        // timeout covers the token as well as the request.
+        _http = VaultHttp.CreateHttpClient(apiBase, options.HttpMessageHandler, options.Tls);
     }
 
     /// <summary>
@@ -167,11 +134,7 @@ public sealed class HashiCorpVaultSecretCache : RemoteSecretCache, IDisposable
     /// read follows it in a lookup, after '#' (see <see cref="RemoteSecretCache.IsValidKey"/>).
     /// </summary>
     public static bool IsValidSecretName(string? name)
-        => !string.IsNullOrEmpty(name) && name.Length <= MaxSecretNameLength && IsValidPath(name);
-
-    /// <summary>Whether token can go in a header: non-empty printable ASCII, with no spaces.</summary>
-    internal static bool IsValidToken(ReadOnlySpan<char> token)
-        => !token.IsEmpty && !token.ContainsAnyExceptInRange('!', '~');
+        => !string.IsNullOrEmpty(name) && name.Length <= MaxSecretNameLength && VaultHttp.IsValidPath(name);
 
     /// <summary>Releases the cache's connections, and its HTTP handler unless the caller supplied it.</summary>
     public void Dispose() => _http.Dispose();
@@ -198,45 +161,11 @@ public sealed class HashiCorpVaultSecretCache : RemoteSecretCache, IDisposable
             protectedToken = await _tokenProvider.GetTokenAsync(timeout.Token).ConfigureAwait(false);
         }
 
-        for (var retry = 0; ; retry++)
-        {
-            try
-            {
-                await ReadAsync(name, protectedToken, value, cancellationToken).ConfigureAwait(false);
-                return;
-            }
-            catch (Exception e) when (retry < _retryCount && IsTransient(e, cancellationToken))
-            {
-                // A failed attempt has handed nothing to value: the body is read whole before
-                // anything is parsed out of it, and a parse failure isn't transient.
-                await Task.Delay(RetryDelay(_retryDelay, retry, Random.Shared.Next(0, 101)), cancellationToken).ConfigureAwait(false);
-            }
-        }
+        // A failed attempt has handed nothing to value: the body is read whole before anything is
+        // parsed out of it, and a parse failure isn't transient.
+        await VaultHttp.WithRetriesAsync(_retryCount, _retryDelay, attempt => ReadAsync(name, protectedToken, value, attempt), cancellationToken)
+            .ConfigureAwait(false);
     }
-
-    /// <summary>
-    /// The wait before retry number <paramref name="retry"/> (0 for the first): baseDelay, doubled
-    /// for each retry before it, at most MaxRetryDelay - plus jitterMilliseconds.
-    /// </summary>
-    internal static TimeSpan RetryDelay(TimeSpan baseDelay, int retry, int jitterMilliseconds)
-    {
-        var backoff = baseDelay * Math.Pow(2, retry);
-        return (backoff < HashiCorpVaultSecretCacheOptions.MaxRetryDelay ? backoff : HashiCorpVaultSecretCacheOptions.MaxRetryDelay)
-               + TimeSpan.FromMilliseconds(jitterMilliseconds);
-    }
-
-    // A failure another attempt may not meet: no answer at all (connection refused or reset, DNS),
-    // a connection lost mid-response, the attempt's own timeout, or Vault busy or briefly unable to
-    // answer - 429, or a 5xx other than 501.
-    private static bool IsTransient(Exception e, CancellationToken cancellationToken) => e switch
-    {
-        HttpRequestException http => http.StatusCode is not { } status
-                                     || status == HttpStatusCode.TooManyRequests
-                                     || ((int)status >= 500 && status != HttpStatusCode.NotImplemented),
-        IOException => true,
-        OperationCanceledException => !cancellationToken.IsCancellationRequested,
-        _ => false,
-    };
 
     // One attempt: one request, and Vault's whole response, within the attempt's timeout.
     private async Task ReadAsync(string path, string protectedToken, SecretValueSink value, CancellationToken cancellationToken)
@@ -244,31 +173,10 @@ public sealed class HashiCorpVaultSecretCache : RemoteSecretCache, IDisposable
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(_timeout);
 
-        using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(_readPrefix + path, UriKind.Relative));
-        request.Headers.Add("X-Vault-Request", "true");
-        if (_namespace is not null)
-            request.Headers.Add("X-Vault-Namespace", _namespace);
+        using var request = VaultHttp.CreateRequest(HttpMethod.Get, new Uri(_readPrefix + path, UriKind.Relative), _namespace);
 
-        HttpResponseMessage sent;
-        var token = DecryptToken(protectedToken);
-        try
-        {
-            // Checked by DecryptToken - printable ASCII, nothing to parse - so added as it is,
-            // without the copies validation could make.
-            request.Headers.TryAddWithoutValidation(TokenHeader, token);
-
-            // Unbuffered: HttpClient would otherwise copy the body into a pooled buffer it returns uncleared.
-            sent = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
-        }
-        finally
-        {
-            // The request is sent, or has failed: zero the header's only copy of the token. It was
-            // made by new string from the decrypted chars, so it is no literal or interned string
-            // anything else could share.
-            ArrayUtility.ZeroMemory(MemoryMarshal.AsMemory(token.AsMemory()).Span);
-        }
-
-        using var response = sent;
+        // Decrypted into pinned memory, sent unbuffered, and both copies zeroed once it has gone.
+        using var response = await VaultHttp.SendWithTokenAsync(_http, request, _tokenProtector, protectedToken, timeout.Token).ConfigureAwait(false);
         await using var body = await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false);
         if (response.IsSuccessStatusCode)
         {
@@ -276,7 +184,10 @@ public sealed class HashiCorpVaultSecretCache : RemoteSecretCache, IDisposable
             return;
         }
 
-        var errors = await ReadErrorsAsync(body, timeout.Token).ConfigureAwait(false);
+        // An error response holds no secret: read whole, as Vault's error list.
+        using var error = new MemoryStream();
+        await body.CopyToAsync(error, timeout.Token).ConfigureAwait(false);
+        var errors = VaultHttp.ReadErrors(error.GetBuffer().AsSpan(0, (int)error.Length));
 
         // Nothing at the path: Vault answers 404 with an empty error list - or, for a KV version 2
         // secret whose latest version is deleted, with its metadata and none. A 404 naming an error
@@ -288,120 +199,4 @@ public sealed class HashiCorpVaultSecretCache : RemoteSecretCache, IDisposable
         throw new HttpRequestException($"Vault refused to read '{path}': {(int)response.StatusCode} {response.StatusCode}{detail}",
             null, response.StatusCode);
     }
-
-    // The token protectedToken holds, as the string its header needs. Decrypted into stack or pinned
-    // memory, zeroed before returning; refused unless it is protected by the token protector - it
-    // parses, its key version is on the ring, and it authenticates under TokenPurpose - and is a
-    // token. The protector's exceptions aren't chained: a parser handed an unprotected token could
-    // quote it.
-    private string DecryptToken(string? protectedToken)
-    {
-        if (string.IsNullOrEmpty(protectedToken))
-            throw new InvalidOperationException("The Vault token provider returned no token.");
-
-        int maxLength;
-        try
-        {
-            maxLength = _tokenProtector.GetMaxDecryptedLength(protectedToken);
-        }
-        catch (FormatException)
-        {
-            throw NotProtected();
-        }
-
-        Span<char> chars = maxLength <= ArrayUtility.MaxStackChars
-            ? stackalloc char[maxLength]
-            : ArrayUtility.AllocatePinned<char>(maxLength);
-        try
-        {
-            int length;
-            try
-            {
-                length = _tokenProtector.Decrypt(protectedToken, chars);
-            }
-            catch (Exception e) when (e is FormatException or CryptographicException or KeyNotFoundException)
-            {
-                throw NotProtected();
-            }
-
-            var token = chars[..length];
-            if (!IsValidToken(token))
-                throw new InvalidOperationException("The protected Vault token isn't a token: printable ASCII, with no spaces.");
-
-            return new string(token);
-        }
-        finally
-        {
-            ArrayUtility.ZeroMemory(chars);
-        }
-    }
-
-    private static InvalidOperationException NotProtected()
-        => new("The Vault token provider returned a token that isn't protected by the cache's token protector: hand over tokenProtector.Encrypt(token), never the token itself.");
-
-    // The errors Vault listed in an error response; null if it isn't Vault's JSON.
-    private static async Task<string[]?> ReadErrorsAsync(Stream body, CancellationToken cancellationToken)
-    {
-        try
-        {
-            using var json = await JsonDocument.ParseAsync(body, cancellationToken: cancellationToken).ConfigureAwait(false);
-            var root = json.RootElement;
-            if (root.ValueKind != JsonValueKind.Object)
-                return null;
-            if (!root.TryGetProperty("errors", out var errors))
-                return [];
-
-            return errors.ValueKind == JsonValueKind.Array ? errors.EnumerateArray().Select(e => e.ToString()).ToArray() : null;
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-    }
-
-    // /v1/ under Vault's address, refusing an address that would send tokens in the clear (http
-    // anywhere but loopback) or that carries credentials, a query or a fragment.
-    private static Uri ApiBase(Uri address)
-    {
-        ArgumentNullException.ThrowIfNull(address);
-        if (!address.IsAbsoluteUri)
-            throw new ArgumentException($"Vault's address '{address}' isn't absolute, e.g. https://vault.example.com:8200.", nameof(address));
-        if (address.Scheme != Uri.UriSchemeHttps && !(address.Scheme == Uri.UriSchemeHttp && address.IsLoopback))
-            throw new ArgumentException(
-                $"Vault's address '{address}' must be https; http is allowed only on a loopback address (a local Vault Agent or dev server), since every request carries a token.", nameof(address));
-        if (address.UserInfo.Length > 0 || address.Query.Length > 0 || address.Fragment.Length > 0)
-            throw new ArgumentException($"Vault's address '{address}' must not hold credentials, a query or a fragment.", nameof(address));
-
-        return new Uri(address.GetLeftPart(UriPartial.Path).TrimEnd('/') + "/v1/");
-    }
-
-    // Whether the handler at the bottom of handler's DelegatingHandler chain follows redirects. One
-    // of a type other than SocketsHttpHandler or HttpClientHandler can't be told, so counts as not.
-    private static bool FollowsRedirects(HttpMessageHandler handler)
-    {
-        while (handler is DelegatingHandler { InnerHandler: { } inner })
-            handler = inner;
-
-        return handler switch
-        {
-            SocketsHttpHandler sockets => sockets.AllowAutoRedirect,
-            HttpClientHandler client => client.AllowAutoRedirect,
-            _ => false,
-        };
-    }
-
-    // '/'-separated segments, none empty, "." or "..": a path that stays where it's put.
-    private static bool IsValidPath(ReadOnlySpan<char> path)
-    {
-        foreach (var range in path.Split('/'))
-        {
-            if (!IsValidSegment(path[range]))
-                return false;
-        }
-
-        return true;
-    }
-
-    private static bool IsValidSegment(ReadOnlySpan<char> segment)
-        => !segment.IsEmpty && segment is not "." and not ".." && !segment.ContainsAnyExcept(SegmentCharacters);
 }

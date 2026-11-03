@@ -1,5 +1,6 @@
 using System.Security.Cryptography.X509Certificates;
 using HkdfGuard.Cache.HashiCorpVault.Test.TestHelpers;
+using HkdfGuard.Integration.HashiCorpVault;
 
 namespace HkdfGuard.Cache.HashiCorpVault.Test;
 

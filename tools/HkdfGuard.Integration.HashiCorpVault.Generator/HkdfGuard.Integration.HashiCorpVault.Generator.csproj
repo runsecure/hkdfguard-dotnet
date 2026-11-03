@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Generates src/HkdfGuard.Integration.HashiCorpVault/Generated from its openapi.json:
+       dotnet run with this project, from anywhere in the repository. Not shipped. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="HkdfGuard.Integration.HashiCorpVault.Test" />
+  </ItemGroup>
+
+</Project>

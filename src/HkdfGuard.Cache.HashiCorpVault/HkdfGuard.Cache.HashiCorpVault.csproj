@@ -7,6 +7,7 @@
   <ItemGroup>
     <ProjectReference Include="..\HkdfGuard.Abstractions\HkdfGuard.Abstractions.csproj" />
     <ProjectReference Include="..\HkdfGuard.Cache\HkdfGuard.Cache.csproj" />
+    <ProjectReference Include="..\HkdfGuard.Integration.HashiCorpVault\HkdfGuard.Integration.HashiCorpVault.csproj" />
   </ItemGroup>
 
 </Project>
