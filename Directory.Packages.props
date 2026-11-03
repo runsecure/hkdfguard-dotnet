@@ -16,16 +16,16 @@
     <PackageVersion Include="Microsoft.Extensions.Options" Version="$(CoreLibVersion)" />
     <PackageVersion Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="$(CoreLibVersion)" />
 
-    <!-- AWS (HkdfGuard.KeyWrapping.AwsKms, HkdfGuard.Cache.AwsSecretsManager) -->
+    <!-- AWS (HkdfGuard.KeyWrapping.AwsKms, HkdfGuard.Cache.AwsSecretsManager, HkdfGuard.Pipeline.AwsSecretsManager) -->
     <PackageVersion Include="AWSSDK.KeyManagementService" Version="4.0.100.19" />
     <PackageVersion Include="AWSSDK.SecretsManager" Version="4.0.100.18" />
 
-    <!-- Azure (HkdfGuard.KeyWrapping.AzureKeyVault, HkdfGuard.Cache.AzureKeyVault; Azure.Identity for their integration tests only) -->
+    <!-- Azure (HkdfGuard.KeyWrapping.AzureKeyVault, HkdfGuard.Cache.AzureKeyVault, HkdfGuard.Pipeline.AzureKeyVault; Azure.Identity for their integration tests only) -->
     <PackageVersion Include="Azure.Security.KeyVault.Keys" Version="4.10.2" />
     <PackageVersion Include="Azure.Security.KeyVault.Secrets" Version="4.11.2" />
     <PackageVersion Include="Azure.Identity" Version="1.21.0" />
 
-    <!-- Google Cloud (HkdfGuard.KeyWrapping.GoogleKms, HkdfGuard.Cache.GoogleSecretManager) -->
+    <!-- Google Cloud (HkdfGuard.KeyWrapping.GoogleKms, HkdfGuard.Cache.GoogleSecretManager, HkdfGuard.Pipeline.GoogleSecretManager) -->
     <PackageVersion Include="Google.Cloud.Kms.V1" Version="3.27.0" />
     <PackageVersion Include="Google.Cloud.SecretManager.V1" Version="2.8.0" />
 
