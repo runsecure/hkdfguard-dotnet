@@ -265,6 +265,54 @@ public class AesGcmPipelineDataProtectorTests
     }
 
     [Fact]
+    public async Task WriteDekAsync_WritesTheBase64KeyAsAscii_WithoutALineEnding_AndLeavesTheStreamOpen()
+    {
+        var key = RandomNumberGenerator.GetBytes(32);
+        using var protector = new AesGcmPipelineDataProtector(new DefaultFormatProvider(), Version, (byte[])key.Clone());
+        using var stdin = new FlushRecordingStream();
+
+        await protector.WriteDekAsync(stdin);
+
+        Assert.Equal(System.Text.Encoding.ASCII.GetBytes(Convert.ToBase64String(key)), stdin.ToArray());
+        Assert.Equal(44, stdin.Length);
+        Assert.True(stdin.Flushed);
+        Assert.True(stdin.CanWrite);
+    }
+
+    [Fact]
+    public async Task WriteDekAsync_RefusesNoStream_AndADisposedProtector()
+    {
+        var protector = Create();
+        await Assert.ThrowsAsync<ArgumentNullException>(() => protector.WriteDekAsync(null!));
+
+        protector.Dispose();
+
+        using var stdin = new MemoryStream();
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => protector.WriteDekAsync(stdin));
+        Assert.Equal(0, stdin.Length);
+    }
+
+    [Fact]
+    public async Task WriteDekAsync_HonoursCancellation()
+    {
+        using var protector = Create();
+        using var stdin = new MemoryStream();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => protector.WriteDekAsync(stdin, new CancellationToken(canceled: true)));
+    }
+
+    private sealed class FlushRecordingStream : MemoryStream
+    {
+        public bool Flushed { get; private set; }
+
+        public override Task FlushAsync(CancellationToken cancellationToken)
+        {
+            Flushed = true;
+            return base.FlushAsync(cancellationToken);
+        }
+    }
+
+    [Fact]
     public void Encrypt_CountsAgainstTheKeysBudgetAndStopsAtTheLimit()
     {
         using var protector = new AesGcmPipelineDataProtector(new DefaultFormatProvider(), Version,
