@@ -137,10 +137,22 @@ public sealed class AwsSecretsManagerSecretPipelineWriterTests : SecretPipelineW
     [Fact]
     public void WithoutCredentials_TheSdksDefaultChainIsUsed()
     {
-        // Credentials are resolved when a request is signed, not when the client is made.
+        // Credentials are resolved when a request is signed, not when the client is made - but the
+        // region is resolved when it's made, from AWS_REGION or a profile, and a build agent has
+        // neither: the default writer is given one here, as any real deployment must give it.
         using var withConfig = new AwsSecretsManagerSecretPipelineWriter(Protector, ["item"], _aws.Config());
         using var withNothing = new AwsSecretsManagerSecretPipelineWriter(Protector, ["item"], new AmazonSecretsManagerConfig { RegionEndpoint = RegionEndpoint.USEast1 });
-        using var defaults = new AwsSecretsManagerSecretPipelineWriter(Protector, ["item"]);
+
+        var region = Environment.GetEnvironmentVariable("AWS_REGION");
+        Environment.SetEnvironmentVariable("AWS_REGION", region ?? RegionEndpoint.USEast1.SystemName);
+        try
+        {
+            using var defaults = new AwsSecretsManagerSecretPipelineWriter(Protector, ["item"]);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AWS_REGION", region);
+        }
     }
 
     [Fact]
