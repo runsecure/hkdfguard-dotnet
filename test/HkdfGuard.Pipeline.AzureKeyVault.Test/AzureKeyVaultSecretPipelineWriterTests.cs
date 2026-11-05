@@ -98,9 +98,9 @@ public sealed class AzureKeyVaultSecretPipelineWriterTests : SecretPipelineWrite
         options.AddPolicy(new DropContent(), HttpPipelinePosition.BeforeTransport);
         using var writer = Create(Protector, ["Item"], options);
 
-        // Nothing to capture, so the policy passes it on, and SecretClient refuses a 200 without a body.
-        var ex = await Assert.ThrowsAsync<ArgumentNullException>(() => writer.PullSecretsAsync());
-        Assert.Equal("utf8Json", ex.ParamName);
+        // Nothing to capture, so the policy passes it on, and SecretClient refuses a 200 without a body:
+        // since Azure.Security.KeyVault.Secrets 4.12 its parser throws a JsonException for the empty input.
+        await Assert.ThrowsAnyAsync<System.Text.Json.JsonException>(() => writer.PullSecretsAsync());
         Assert.Empty(writer.ProtectedSecrets);
     }
 
