@@ -6,7 +6,7 @@ namespace HkdfGuard.Abstractions;
 /// An implementation is given the secrets to pull and an <see cref="IPipelineDataProtector"/> when
 /// it is created; <see cref="PullSecretsAsync"/> reads each secret and encrypts it at once, bound to
 /// its file name, keeping only the encrypted value; <see cref="WriteProtectedSecretFiles"/> then
-/// writes one file per secret. No key ring is involved: the protector's key is the only one, and it
+/// writes one file per secret, or <see cref="WriteJsonSecrets"/> one JSON file of them all. No key ring is involved: the protector's key is the only one, and it
 /// is handed to the native platform's wrap process once the files are written.
 /// <para>
 /// The protector belongs to the caller and is never disposed by the writer. Disposing the writer
@@ -39,4 +39,40 @@ public interface ISecretPipelineWriter : IDisposable
     /// <exception cref="ArgumentException">folderPath is empty</exception>
     /// <exception cref="InvalidOperationException">No pull has completed</exception>
     public void WriteProtectedSecretFiles(string folderPath);
+
+    /// <summary>
+    /// Writes every secret in <see cref="ProtectedSecrets"/> to one JSON file at
+    /// <paramref name="filePath"/>, creating its folder if it doesn't exist: a single object with a
+    /// member per secret, its file name mapped to its encrypted, formatted value. A file already
+    /// there is replaced.
+    /// </summary>
+    /// <param name="filePath">The file to write, absolute or relative to the working directory</param>
+    /// <exception cref="ArgumentNullException">filePath is null</exception>
+    /// <exception cref="ArgumentException">filePath is empty</exception>
+    /// <exception cref="InvalidOperationException">No pull has completed</exception>
+    public void WriteJsonSecrets(string filePath);
+
+    /// <summary>
+    /// Writes every secret in <see cref="ProtectedSecrets"/> to <paramref name="destination"/> as a
+    /// tar archive of the files <see cref="WriteProtectedSecretFiles"/> would write - for a remote
+    /// tar to unpack, e.g. the stdin of <c>ssh -T host sudo -n tar -x --no-same-owner -f - -C folder</c>.
+    /// destination is flushed and left open: close it afterwards, so tar sees the end of its input.
+    /// </summary>
+    /// <param name="destination">Where to write the archive: a process's standard input</param>
+    /// <param name="cancellationToken">Cancels the write</param>
+    /// <exception cref="ArgumentNullException">destination is null</exception>
+    /// <exception cref="InvalidOperationException">No pull has completed</exception>
+    public Task WriteProtectedSecretFilesAsync(Stream destination, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Writes every secret in <see cref="ProtectedSecrets"/> to <paramref name="destination"/> as
+    /// the JSON object <see cref="WriteJsonSecrets"/> would write - for a remote command to store,
+    /// e.g. the stdin of <c>ssh -T host sudo -n tee /etc/app/secrets.json</c>. destination is flushed
+    /// and left open: close it afterwards, so the remote command sees the end of its input.
+    /// </summary>
+    /// <param name="destination">Where to write the JSON: a process's standard input</param>
+    /// <param name="cancellationToken">Cancels the write</param>
+    /// <exception cref="ArgumentNullException">destination is null</exception>
+    /// <exception cref="InvalidOperationException">No pull has completed</exception>
+    public Task WriteJsonSecretsAsync(Stream destination, CancellationToken cancellationToken = default);
 }

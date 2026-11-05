@@ -1,5 +1,7 @@
+using System.Formats.Tar;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using HkdfGuard.Abstractions;
 using HkdfGuard.CryptoProvider.AesGcm256;
 using HkdfGuard.DataEncryptionKey.FormatProvider;
@@ -177,6 +179,113 @@ public abstract class SecretPipelineWriterContractTests : IDisposable
         var bytes = await File.ReadAllBytesAsync(Path.Join(Folder, "db-login__password"));
         Assert.NotEqual(0xEF, bytes[0]);
         Assert.Equal("pässwörd", Decrypt(Encoding.UTF8.GetString(bytes), "db-login__password"));
+    }
+
+    [Fact]
+    public async Task ThroughTheInterface_WritesOneJsonObject_OfFileNamesAndValues()
+    {
+        SetKeys("db-login", """{"password":"pässwörd"}""");
+        SetText("api-key", "key");
+        using var writer = CreateWriter("db-login#password", "api-key");
+        await writer.PullSecretsAsync();
+        var path = Path.Join(Folder, "nested", "secrets.json");
+
+        writer.WriteJsonSecrets(path);
+
+        var bytes = await File.ReadAllBytesAsync(path);
+        Assert.Equal((byte)'{', bytes[0]);
+        using var json = JsonDocument.Parse(bytes);
+        Assert.Equal(["api-key", "db-login__password"], json.RootElement.EnumerateObject().Select(p => p.Name));
+        Assert.Equal(writer.ProtectedSecrets["db-login__password"], json.RootElement.GetProperty("db-login__password").GetString());
+        Assert.Equal("pässwörd", Decrypt(json.RootElement.GetProperty("db-login__password").GetString()!, "db-login__password"));
+        Assert.DoesNotContain(@"\u", Encoding.UTF8.GetString(bytes), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task WriteJsonSecrets_ReplacesTheFile_AndNeedsAPullAndAPath()
+    {
+        using var writer = CreateWriter("item");
+        Assert.Throws<InvalidOperationException>(() => writer.WriteJsonSecrets(Path.Join(Folder, "secrets.json")));
+        Assert.Throws<ArgumentNullException>(() => writer.WriteJsonSecrets(null!));
+        Assert.Throws<ArgumentException>(() => writer.WriteJsonSecrets(""));
+
+        Directory.CreateDirectory(Folder);
+        var path = Path.Join(Folder, "secrets.json");
+        await File.WriteAllTextAsync(path, """{"stale":"value","padding":"making the old file longer than the new one"}""");
+        SetText("item", "new");
+        await writer.PullSecretsAsync();
+
+        writer.WriteJsonSecrets(path);
+
+        using var json = JsonDocument.Parse(await File.ReadAllBytesAsync(path));
+        Assert.Equal(["item"], json.RootElement.EnumerateObject().Select(p => p.Name));
+        Assert.Equal("new", Decrypt(json.RootElement.GetProperty("item").GetString()!, "item"));
+    }
+
+    [Fact]
+    public async Task ThroughTheInterface_StreamsATarOfTheFiles_ThatAnyTarUnpacks()
+    {
+        SetKeys("db-login", """{"password":"pässwörd"}""");
+        SetText("api-key", "key");
+        using var writer = CreateWriter("db-login#password", "api-key");
+        await writer.PullSecretsAsync();
+        using var stdin = new MemoryStream();
+
+        await writer.WriteProtectedSecretFilesAsync(stdin);
+
+        Assert.True(stdin.CanWrite);
+        stdin.Position = 0;
+        var entries = new List<(string Name, UnixFileMode Mode, string Value)>();
+        await using (var tar = new TarReader(stdin, leaveOpen: true))
+        {
+            while (await tar.GetNextEntryAsync(copyData: true) is { } entry)
+            {
+                Assert.Equal(TarEntryType.RegularFile, entry.EntryType);
+                using var reader = new StreamReader(entry.DataStream!, Encoding.UTF8);
+                entries.Add((entry.Name, entry.Mode, await reader.ReadToEndAsync()));
+            }
+        }
+
+        Assert.Equal(["api-key", "db-login__password"], entries.Select(e => e.Name));
+        Assert.All(entries, e => Assert.Equal((UnixFileMode)0b110_100_100, e.Mode));
+        Assert.Equal(writer.ProtectedSecrets["db-login__password"], entries[1].Value);
+        Assert.Equal("pässwörd", Decrypt(entries[1].Value, "db-login__password"));
+
+        // The same files WriteProtectedSecretFiles writes, byte for byte.
+        stdin.Position = 0;
+        Directory.CreateDirectory(Folder);
+        await TarFile.ExtractToDirectoryAsync(stdin, Folder, overwriteFiles: false);
+        Assert.Equal(writer.ProtectedSecrets["api-key"], await File.ReadAllTextAsync(Path.Join(Folder, "api-key")));
+    }
+
+    [Fact]
+    public async Task ThroughTheInterface_StreamsTheJsonObject_AsTheFileHoldsIt()
+    {
+        SetText("item", "s3cret");
+        using var writer = CreateWriter("item");
+        await writer.PullSecretsAsync();
+        using var stdin = new MemoryStream();
+
+        await writer.WriteJsonSecretsAsync(stdin);
+        writer.WriteJsonSecrets(Path.Join(Folder, "secrets.json"));
+
+        Assert.True(stdin.CanWrite);
+        Assert.Equal(await File.ReadAllBytesAsync(Path.Join(Folder, "secrets.json")), stdin.ToArray());
+        using var json = JsonDocument.Parse(stdin.ToArray());
+        Assert.Equal("s3cret", Decrypt(json.RootElement.GetProperty("item").GetString()!, "item"));
+    }
+
+    [Fact]
+    public async Task TheStreamWrites_NeedAPullAndAStream()
+    {
+        using var writer = CreateWriter("item");
+        using var stdin = new MemoryStream();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => writer.WriteProtectedSecretFilesAsync(stdin));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => writer.WriteJsonSecretsAsync(stdin));
+        await Assert.ThrowsAsync<ArgumentNullException>(() => writer.WriteProtectedSecretFilesAsync(null!));
+        await Assert.ThrowsAsync<ArgumentNullException>(() => writer.WriteJsonSecretsAsync(null!));
+        Assert.Equal(0, stdin.Length);
     }
 
     [Fact]

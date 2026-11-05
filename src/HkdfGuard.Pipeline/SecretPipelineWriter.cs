@@ -1,4 +1,6 @@
+using System.Formats.Tar;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using HkdfGuard.Abstractions;
 using HkdfGuard.Cache;
@@ -39,6 +41,9 @@ public abstract class SecretPipelineWriter : ISecretPipelineWriter
 
     /// <summary>Replaces each '/' and '#' of a secret name in its file name.</summary>
     public const string FileNameSeparator = "__";
+
+    // rw-r--r--: what each file in a tar archive is unpacked as.
+    private const UnixFileMode SecretFileMode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.OtherRead;
 
     private readonly IPipelineDataProtector _protector;
 
@@ -143,13 +148,110 @@ public abstract class SecretPipelineWriter : ISecretPipelineWriter
     public void WriteProtectedSecretFiles(string folderPath)
     {
         ArgumentException.ThrowIfNullOrEmpty(folderPath);
-        if (!_pulled)
-            throw new InvalidOperationException($"No secrets have been pulled: call {nameof(PullSecretsAsync)} first.");
+        RequirePulled();
 
         var folder = Path.GetFullPath(folderPath);
         Directory.CreateDirectory(folder);
         foreach (var (fileName, value) in _protectedSecrets)
             File.WriteAllText(Path.Join(folder, fileName), value);
+    }
+
+    /// <summary>
+    /// Writes every secret in <see cref="ProtectedSecrets"/> to one JSON file at
+    /// <paramref name="filePath"/>, creating its folder if it doesn't exist: a single object with a
+    /// member per secret, its file name mapped to its encrypted, formatted value, in file-name order,
+    /// as UTF-8 without a BOM. A file already there is replaced. Each value is bound to its member's
+    /// name - Decrypt(value, name) - as it is to its file name in <see cref="WriteProtectedSecretFiles"/>.
+    /// </summary>
+    /// <param name="filePath">The file to write, absolute or relative to the working directory</param>
+    /// <exception cref="ArgumentNullException">filePath is null</exception>
+    /// <exception cref="ArgumentException">filePath is empty</exception>
+    /// <exception cref="InvalidOperationException">No pull has completed</exception>
+    public void WriteJsonSecrets(string filePath)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(filePath);
+        RequirePulled();
+
+        var path = Path.GetFullPath(filePath);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using var file = File.Create(path);
+        using var json = JsonSecretsWriter(file);
+        WriteJsonSecrets(json);
+    }
+
+    /// <summary>
+    /// Writes every secret in <see cref="ProtectedSecrets"/> to <paramref name="destination"/> as a
+    /// tar archive of the files <see cref="WriteProtectedSecretFiles"/> would write - for a remote
+    /// tar to unpack, e.g. the stdin of <c>ssh -T host sudo -n tar -x --no-same-owner -f - -C folder</c>.
+    /// The archive is PAX, which GNU tar and bsdtar (macOS, and Windows' tar.exe) both read: one
+    /// regular file per secret, in file-name order, mode 0644 - the values are encrypted, and only
+    /// who may write them matters to FilePerSecretCache; with --no-same-owner they belong to
+    /// whoever unpacks them. destination is flushed and left open: close it afterwards.
+    /// </summary>
+    /// <param name="destination">Where to write the archive: a process's standard input</param>
+    /// <param name="cancellationToken">Cancels the write</param>
+    /// <exception cref="ArgumentNullException">destination is null</exception>
+    /// <exception cref="InvalidOperationException">No pull has completed</exception>
+    public async Task WriteProtectedSecretFilesAsync(Stream destination, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        RequirePulled();
+
+        var modified = DateTimeOffset.UtcNow;
+        await using (var tar = new TarWriter(destination, TarEntryFormat.Pax, leaveOpen: true))
+        {
+            foreach (var (fileName, value) in _protectedSecrets.OrderBy(s => s.Key, StringComparer.Ordinal))
+            {
+                await tar.WriteEntryAsync(new PaxTarEntry(TarEntryType.RegularFile, fileName)
+                {
+                    DataStream = new MemoryStream(Encoding.UTF8.GetBytes(value)),
+                    Mode = SecretFileMode,
+                    ModificationTime = modified,
+                }, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Writes every secret in <see cref="ProtectedSecrets"/> to <paramref name="destination"/> as
+    /// the JSON object <see cref="WriteJsonSecrets(string)"/> would write - for a remote command to
+    /// store, e.g. the stdin of <c>ssh -T host sudo -n tee /etc/app/secrets.json</c>. destination is
+    /// flushed and left open: close it afterwards.
+    /// </summary>
+    /// <param name="destination">Where to write the JSON: a process's standard input</param>
+    /// <param name="cancellationToken">Cancels the write</param>
+    /// <exception cref="ArgumentNullException">destination is null</exception>
+    /// <exception cref="InvalidOperationException">No pull has completed</exception>
+    public async Task WriteJsonSecretsAsync(Stream destination, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        RequirePulled();
+
+        await using var json = JsonSecretsWriter(destination);
+        WriteJsonSecrets(json);
+        await json.FlushAsync(cancellationToken).ConfigureAwait(false);
+        await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    // The values are base64 and the names [A-Za-z0-9._-]: relaxed escaping keeps them as they are
+    // (the default would write '+' as +). The JSON is never embedded in HTML.
+    private static Utf8JsonWriter JsonSecretsWriter(Stream stream)
+        => new(stream, new JsonWriterOptions { Indented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
+
+    private void WriteJsonSecrets(Utf8JsonWriter json)
+    {
+        json.WriteStartObject();
+        foreach (var (fileName, value) in _protectedSecrets.OrderBy(s => s.Key, StringComparer.Ordinal))
+            json.WriteString(fileName, value);
+        json.WriteEndObject();
+    }
+
+    private void RequirePulled()
+    {
+        if (!_pulled)
+            throw new InvalidOperationException($"No secrets have been pulled: call {nameof(PullSecretsAsync)} first.");
     }
 
     /// <summary>Releases the writer's connection to the store.</summary>

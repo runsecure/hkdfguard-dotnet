@@ -120,6 +120,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HkdfGuard.SystemdCredential
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HkdfGuard.SystemdCredentials.Test", "test\HkdfGuard.SystemdCredentials.Test\HkdfGuard.SystemdCredentials.Test.csproj", "{55DEDE68-503C-4056-986E-0A3ECE00A8F0}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HkdfGuard.Cache.JsonSecretsFile", "src\HkdfGuard.Cache.JsonSecretsFile\HkdfGuard.Cache.JsonSecretsFile.csproj", "{4FEE74AE-5E59-4DC8-921B-7F67EB0F3AC2}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HkdfGuard.Cache.JsonSecretsFile.Test", "test\HkdfGuard.Cache.JsonSecretsFile.Test\HkdfGuard.Cache.JsonSecretsFile.Test.csproj", "{7D466FF8-4012-409D-8125-321A3764F667}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -802,6 +806,30 @@ Global
 		{55DEDE68-503C-4056-986E-0A3ECE00A8F0}.Release|x64.Build.0 = Release|Any CPU
 		{55DEDE68-503C-4056-986E-0A3ECE00A8F0}.Release|x86.ActiveCfg = Release|Any CPU
 		{55DEDE68-503C-4056-986E-0A3ECE00A8F0}.Release|x86.Build.0 = Release|Any CPU
+		{4FEE74AE-5E59-4DC8-921B-7F67EB0F3AC2}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4FEE74AE-5E59-4DC8-921B-7F67EB0F3AC2}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4FEE74AE-5E59-4DC8-921B-7F67EB0F3AC2}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{4FEE74AE-5E59-4DC8-921B-7F67EB0F3AC2}.Debug|x64.Build.0 = Debug|Any CPU
+		{4FEE74AE-5E59-4DC8-921B-7F67EB0F3AC2}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{4FEE74AE-5E59-4DC8-921B-7F67EB0F3AC2}.Debug|x86.Build.0 = Debug|Any CPU
+		{4FEE74AE-5E59-4DC8-921B-7F67EB0F3AC2}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4FEE74AE-5E59-4DC8-921B-7F67EB0F3AC2}.Release|Any CPU.Build.0 = Release|Any CPU
+		{4FEE74AE-5E59-4DC8-921B-7F67EB0F3AC2}.Release|x64.ActiveCfg = Release|Any CPU
+		{4FEE74AE-5E59-4DC8-921B-7F67EB0F3AC2}.Release|x64.Build.0 = Release|Any CPU
+		{4FEE74AE-5E59-4DC8-921B-7F67EB0F3AC2}.Release|x86.ActiveCfg = Release|Any CPU
+		{4FEE74AE-5E59-4DC8-921B-7F67EB0F3AC2}.Release|x86.Build.0 = Release|Any CPU
+		{7D466FF8-4012-409D-8125-321A3764F667}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{7D466FF8-4012-409D-8125-321A3764F667}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{7D466FF8-4012-409D-8125-321A3764F667}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{7D466FF8-4012-409D-8125-321A3764F667}.Debug|x64.Build.0 = Debug|Any CPU
+		{7D466FF8-4012-409D-8125-321A3764F667}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{7D466FF8-4012-409D-8125-321A3764F667}.Debug|x86.Build.0 = Debug|Any CPU
+		{7D466FF8-4012-409D-8125-321A3764F667}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{7D466FF8-4012-409D-8125-321A3764F667}.Release|Any CPU.Build.0 = Release|Any CPU
+		{7D466FF8-4012-409D-8125-321A3764F667}.Release|x64.ActiveCfg = Release|Any CPU
+		{7D466FF8-4012-409D-8125-321A3764F667}.Release|x64.Build.0 = Release|Any CPU
+		{7D466FF8-4012-409D-8125-321A3764F667}.Release|x86.ActiveCfg = Release|Any CPU
+		{7D466FF8-4012-409D-8125-321A3764F667}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -863,5 +891,7 @@ Global
 		{EE3B61C0-EEC4-49CD-8B66-B1C67AE1401B} = {0C88DD14-F956-CE84-757C-A364CCF449FC}
 		{CBCCC618-9DF2-479C-9416-D7E17D3B356C} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{55DEDE68-503C-4056-986E-0A3ECE00A8F0} = {0C88DD14-F956-CE84-757C-A364CCF449FC}
+		{4FEE74AE-5E59-4DC8-921B-7F67EB0F3AC2} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
+		{7D466FF8-4012-409D-8125-321A3764F667} = {0C88DD14-F956-CE84-757C-A364CCF449FC}
 	EndGlobalSection
 EndGlobal
