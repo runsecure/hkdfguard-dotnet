@@ -60,6 +60,9 @@ internal abstract class AbstractHkdfGuardKmsLibrary
     // Windows-specific (-64..-79), refining ErrPolicyInvalid
     public const int ErrWinGroupInvalid = -64;
 
+    // Linux-specific (-80..-95), refining ErrPolicyInvalid
+    public const int ErrLinuxGroupInvalid = -80;
+
     // macOS-specific (-96..-111), each refining ErrProviderError
     public const int ErrMacAccessControlCreationFailed = -96;
     public const int ErrMacKeyGenerationFailed = -97;
@@ -101,6 +104,7 @@ internal abstract class AbstractHkdfGuardKmsLibrary
         ErrFileMalformed => "the key file is the right size, but is not a valid wrapped DEK",
         ErrFileUntrusted => "the key file's path is not trusted: a link or reparse point, a short or network path, or a file or folder another account could replace",
         ErrWinGroupInvalid => @"an HKLM\Software\Policies\HkdfGuard\KeyUseGroups entry is unresolvable, not a group, not host-local, or over-broad",
+        ErrLinuxGroupInvalid => "a deployer group (deployer_groups in the policy, or hkdfguard-deployers) doesn't exist, is over-broad, or can't be looked up; every key-file read fails until it is fixed",
         ErrMacAccessControlCreationFailed => "the access policy for a new KEK could not be created",
         ErrMacKeyGenerationFailed => "the Secure Enclave refused to generate a key",
         ErrMacKeychainWriteFailed => "the new KEK could not be stored in the keychain",

@@ -41,6 +41,7 @@ public class KmsLibraryContractTests
         { AbstractHkdfGuardKmsLibrary.ErrFileMalformed, -38 },
         { AbstractHkdfGuardKmsLibrary.ErrFileUntrusted, -39 },
         { AbstractHkdfGuardKmsLibrary.ErrWinGroupInvalid, -64 },
+        { AbstractHkdfGuardKmsLibrary.ErrLinuxGroupInvalid, -80 },
         { AbstractHkdfGuardKmsLibrary.ErrMacAccessControlCreationFailed, -96 },
         { AbstractHkdfGuardKmsLibrary.ErrMacKeyGenerationFailed, -97 },
         { AbstractHkdfGuardKmsLibrary.ErrMacKeychainWriteFailed, -98 },
@@ -72,7 +73,7 @@ public class KmsLibraryContractTests
             Assert.False(string.IsNullOrEmpty(library.DescribeStatus((int)row[0])), $"{platform}: no description for {row[0]}");
 
         // Reserved and unassigned codes, and anything positive, have no meaning to describe.
-        foreach (var unassigned in new[] { -7, -14, -15, -21, -31, -40, -63, -65, -80, -95, -101, 1 })
+        foreach (var unassigned in new[] { -7, -14, -15, -21, -31, -40, -63, -65, -81, -95, -101, 1 })
             Assert.Null(library.DescribeStatus(unassigned));
     }
 
@@ -107,6 +108,10 @@ public class KmsLibraryContractTests
         Assert.Contains("ClassicalMode", library.DescribeStatus(AbstractHkdfGuardKmsLibrary.ErrPayloadVersionRefused));
         Assert.Contains("ClassicalMode", library.DescribeStatus(AbstractHkdfGuardKmsLibrary.ErrProviderUnavailable));
     }
+
+    [Fact]
+    public void MacOs_NamesThePolicyThatCanRefuseAPayloadSuite()
+        => Assert.Contains("RequirePostQuantum", new MacOsHkdfGuardKmsLibrary().DescribeStatus(AbstractHkdfGuardKmsLibrary.ErrPayloadUnsupported));
 
     [Fact]
     public void Linux_DescribesAFingerprintMismatchAsADifferentKek()
