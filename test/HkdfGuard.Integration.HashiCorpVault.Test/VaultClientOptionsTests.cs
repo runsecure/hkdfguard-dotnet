@@ -144,7 +144,7 @@ public class VaultClientOptionsTests
         {
             Address = new Uri("unix:///var/run/vault.sock"),
             HttpMessageHandler = handler,
-            Tls = { InsecureSkipVerify = true },
+            Tls = { ServerName = "vault.internal" },
         });
 
         Assert.NotNull(handler.ConnectCallback);
@@ -457,7 +457,7 @@ public class VaultClientOptionsTests
     private static SocketsHttpHandler Apply(VaultTlsOptions tls)
     {
         var handler = new SocketsHttpHandler();
-        tls.ApplyTo(handler);
+        tls.ApplyTo(handler, supplied: false);
         return handler;
     }
 

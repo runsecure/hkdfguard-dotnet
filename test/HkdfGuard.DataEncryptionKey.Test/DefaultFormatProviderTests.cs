@@ -134,10 +134,33 @@ public class DefaultFormatProviderTests
     [InlineData("enc::v1 ::AQID")]
     [InlineData("enc::v~1::AQID")]
     [InlineData("enc::v::AQID")]
+    [InlineData("enc::v007::AQID")]
+    [InlineData("enc::v00::AQID")]
+    [InlineData("enc::v-0::AQID")]
+    [InlineData("enc::v-007::AQID")]
+    [InlineData("enc::v-::AQID")]
+    [InlineData("enc::v2147483648::AQID")]
     public void Parse_RejectsVersionsThatAreNotInCanonicalForm(string encrypted)
     {
         WithCurrentCulture(TildeNegativeCulture(), () =>
-            Assert.Throws<FormatException>(() => _provider.Parse(encrypted)));
+        {
+            Assert.Throws<FormatException>(() => _provider.Parse(encrypted));
+            return Assert.Throws<FormatException>(() => _provider.GetMaxDecryptedLength(encrypted));
+        });
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(7)]
+    [InlineData(-1)]
+    [InlineData(int.MaxValue)]
+    [InlineData(int.MinValue)]
+    public void EveryVersionHasExactlyOneSpelling_TheOneFormatWrites(int version)
+    {
+        var formatted = _provider.Format(new KeyTrackingValue { KeyVersion = version, Value = [1, 2, 3] });
+
+        Assert.Equal(version, _provider.Parse(formatted).KeyVersion);
+        Assert.StartsWith($"enc::v{version.ToString(System.Globalization.CultureInfo.InvariantCulture)}::", formatted);
     }
 
     [Theory]

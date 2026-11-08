@@ -182,6 +182,13 @@ store holds more than one private key, choose the certificate to present with
 handler, or a `SocketsHttpHandler` you supply as `HttpMessageHandler` (set `AllowAutoRedirect = false`
 on it). A supplied handler of any other type can't take `Tls`, and is refused.
 
+A supplied handler is configured only where it has nothing set already. The wrapper never replaces a
+certificate validation or client certificate callback the handler already has, and refuses instead,
+so two clients sharing one handler can't change what each other trusts: give each its own.
+`InsecureSkipVerify` is refused for a supplied handler outright, since it would turn off certificate
+checks for everything else using it. A custom CA only vouches for certificates issued for TLS
+servers: a leaf whose extended key usage leaves out server authentication is refused.
+
 ## 5. Build a key ring with an ephemeral key
 
 An ephemeral key is generated at startup and never written anywhere:

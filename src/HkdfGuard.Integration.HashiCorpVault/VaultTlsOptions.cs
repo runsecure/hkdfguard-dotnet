@@ -59,7 +59,9 @@ public sealed class VaultTlsOptions
 
     /// <summary>
     /// Accepts any certificate Vault presents - VAULT_SKIP_VERIFY. Anyone between the client and Vault
-    /// can then read every token and secret: for a throwaway dev server only.
+    /// can then read every token and secret: for a throwaway dev server only. A warning is logged
+    /// whenever it takes effect, and it is refused for a supplied HttpMessageHandler, where it would
+    /// turn off certificate checks for everything else that handler serves.
     /// </summary>
     public bool InsecureSkipVerify { get; set; }
 
@@ -117,27 +119,63 @@ public sealed class VaultTlsOptions
 
     internal VaultTlsOptions Clone() => (VaultTlsOptions)MemberwiseClone();
 
-    /// <summary>Configures handler's TLS from these options.</summary>
+    /// <summary>
+    /// Configures handler's TLS from these options. A handler the caller supplied is configured only
+    /// where it has nothing set already: a validation or certificate-selection callback it already
+    /// holds - its owner's, or another Vault client's sharing it - is never replaced, and
+    /// <see cref="InsecureSkipVerify"/> is refused for it outright, since either would change how
+    /// every other request through that handler is secured.
+    /// </summary>
+    /// <param name="handler">The handler to configure.</param>
+    /// <param name="supplied">Whether the caller supplied handler, rather than the client creating it.</param>
+    /// <param name="logger">Warned when certificate verification is turned off; optional.</param>
     /// <exception cref="ArgumentException">A certificate, key or key store can't be read; a client
     /// certificate has no key or a key no certificate; a key store has no password, or one
-    /// PasswordProtector didn't protect; or a key store is combined with the PEM it replaces</exception>
-    internal void ApplyTo(SocketsHttpHandler handler)
+    /// PasswordProtector didn't protect; a key store is combined with the PEM it replaces; or a
+    /// supplied handler would have a callback replaced, or is asked to skip verification</exception>
+    internal void ApplyTo(SocketsHttpHandler handler, bool supplied, Microsoft.Extensions.Logging.ILogger? logger = null)
     {
+        if (InsecureSkipVerify && supplied)
+            throw new ArgumentException(
+                "InsecureSkipVerify can't be applied to a supplied HttpMessageHandler: it would turn off certificate checks for every other request through that handler. Let the client create its own handler, or configure yours yourself.",
+                "options");
+
         var roots = ServerCertificates();
         var serverName = ServerName;
+        var validates = InsecureSkipVerify || roots is not null || serverName is not null;
+        if (supplied && validates && handler.SslOptions.RemoteCertificateValidationCallback is not null)
+            throw Occupied("a certificate validation callback");
+
+        var client = ClientCertificate();
+        if (supplied && client is not null && handler.SslOptions.LocalCertificateSelectionCallback is not null)
+        {
+            client.Dispose();
+            throw Occupied("a client certificate selection callback");
+        }
+
         if (InsecureSkipVerify)
+        {
             handler.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
-        else if (roots is not null || serverName is not null)
+            if (logger is not null)
+                Log.CertificateVerificationSkipped(logger);
+        }
+        else if (validates)
+        {
             handler.SslOptions.RemoteCertificateValidationCallback = (_, certificate, chain, errors) =>
                 IsTrusted(certificate, chain, errors, roots, serverName);
+        }
 
-        if (ClientCertificate() is { } client)
+        if (client is not null)
         {
             // Presented whatever CAs Vault says it accepts, as vault-client-go does: the cert auth
             // method's CAs needn't be in the server's own list.
             handler.SslOptions.LocalCertificateSelectionCallback = (_, _, _, _, _) => client;
         }
     }
+
+    /// <summary>Why a supplied handler setting isn't replaced.</summary>
+    internal static ArgumentException Occupied(string what)
+        => new($"The supplied HttpMessageHandler already has {what}, which the client won't replace: it may be another client's, or its owner's. Give the client a handler of its own.", "options");
 
     // Vault's certificate chains to roots (or the system's trust, without roots) and is issued to
     // serverName (or the address's host, without one).
@@ -164,6 +202,9 @@ public sealed class VaultTlsOptions
                 chain.ChainPolicy.ExtraStore.Add(element.Certificate);
         }
         chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+        // Issued for TLS servers, as the system's own validation requires: otherwise any certificate
+        // the CA issued under Vault's name - a client certificate, say - could stand in for Vault's.
+        chain.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.1"));
         return chain.Build(presented);
     }
 
@@ -337,18 +378,79 @@ public sealed class VaultTlsOptions
         if (!hasCertificate)
             return null;
 
-        var certificate = ClientCertificateFile is not null ? File.ReadAllText(ClientCertificateFile) : System.Text.Encoding.UTF8.GetString(ClientCertificatePem!);
-        var key = ClientCertificateKeyFile is not null ? File.ReadAllText(ClientCertificateKeyFile) : System.Text.Encoding.UTF8.GetString(ClientCertificateKeyPem!);
+        // Both PEM texts are decoded into pinned arrays, zeroed once read - never strings, which the
+        // private key would then live on in until collected.
+        var certificate = ReadPem(ClientCertificateFile, ClientCertificatePem, out var certificateLength);
+        char[]? key = null;
         try
         {
-            using var pair = X509Certificate2.CreateFromPem(certificate, key);
-            // Windows' TLS can't use the ephemeral key CreateFromPem gives the certificate: round-trip
-            // it through PKCS#12 so the key is one SChannel can sign with.
-            return X509CertificateLoader.LoadPkcs12(pair.Export(X509ContentType.Pkcs12), null);
+            key = ReadPem(ClientCertificateKeyFile, ClientCertificateKeyPem, out var keyLength);
+            var pair = X509Certificate2.CreateFromPem(certificate.AsSpan(0, certificateLength), key.AsSpan(0, keyLength));
+            if (OperatingSystem.IsLinux())
+                return pair; // OpenSSL signs with the in-memory key as it is: nothing is written anywhere.
+
+            // Windows' and macOS's TLS can't sign with the ephemeral key CreateFromPem gives the
+            // certificate: round-trip it through PKCS#12 so it is one they can use. On Windows that
+            // puts the key in a temporary key container of the user's, deleted when the certificate is
+            // disposed or finalized. The unprotected PKCS#12 bytes are zeroed as soon as it is loaded.
+            using (pair)
+            {
+                var pkcs12 = pair.Export(X509ContentType.Pkcs12);
+                try
+                {
+                    return X509CertificateLoader.LoadPkcs12(pkcs12, null);
+                }
+                finally
+                {
+                    CryptographicOperations.ZeroMemory(pkcs12);
+                }
+            }
         }
-        catch (System.Security.Cryptography.CryptographicException e)
+        catch (CryptographicException e)
         {
             throw new ArgumentException($"Could not read the client certificate and key: {e.Message}", e);
         }
+        finally
+        {
+            ArrayUtility.ZeroMemory(certificate.AsSpan());
+            if (key is not null)
+                ArrayUtility.ZeroMemory(key.AsSpan());
+        }
     }
+
+    // A PEM file's text, or pem's, as UTF-8 decoded into a pinned array the caller zeroes; its first
+    // length chars are the text. pem is the caller's and left as it is.
+    private static char[] ReadPem(string? file, byte[]? pem, out int length)
+    {
+        byte[]? bytes = null;
+        try
+        {
+            ReadOnlySpan<byte> utf8;
+            if (file is not null)
+            {
+                using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read);
+                if (stream.Length > MaxPemBytes)
+                    throw new ArgumentException($"{file} is over {MaxPemBytes} bytes; a PEM certificate or key never is.");
+                bytes = ArrayUtility.AllocatePinned<byte>((int)stream.Length);
+                stream.ReadExactly(bytes);
+                utf8 = bytes;
+            }
+            else
+            {
+                utf8 = pem;
+            }
+
+            var chars = ArrayUtility.AllocatePinned<char>(System.Text.Encoding.UTF8.GetMaxCharCount(utf8.Length));
+            length = System.Text.Encoding.UTF8.GetChars(utf8, chars);
+            return chars;
+        }
+        finally
+        {
+            if (bytes is not null)
+                ArrayUtility.ZeroMemory(bytes);
+        }
+    }
+
+    // A PEM file this size holds far more than any certificate chain and key.
+    private const int MaxPemBytes = 1024 * 1024;
 }

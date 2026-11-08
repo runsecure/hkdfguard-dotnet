@@ -204,7 +204,10 @@ encrypting 365 days after it was last written. `WithKeyFileMaxAgeDays`, or `KeyF
 `KeyFileExpired`, is logged as critical), and values under that key file still decrypt. Only the
 current version ever encrypts, so a superseded key file is never reported. The age is the file's
 last write time, so copy key files with their timestamps kept (`cp -p`, `rsync -t`). A plain copy
-resets the clock.
+resets the clock. A key file dated more than a day ahead of the host's clock
+(`KeyRingBuilder.KeyFileFutureTolerance`) doesn't encrypt at all, since a future date would
+otherwise stretch its age; it still decrypts, and event 13, `KeyFileDatedInTheFuture`, is logged as
+critical.
 
 ```csharp
 builder.WithKeyFileMaxAgeDays(90);                        // 1-3650; default 365

@@ -89,7 +89,7 @@ public sealed partial class VaultClient : IDisposable
         var handler = options.HttpMessageHandler ?? VaultHttp.CreateHandler();
         try
         {
-            Configure(handler, options);
+            Configure(handler, options, supplied: options.HttpMessageHandler is not null, logger);
         }
         catch when (options.HttpMessageHandler is null)
         {
@@ -341,14 +341,17 @@ public sealed partial class VaultClient : IDisposable
 
     private static string UnixSocketPath(Uri address) => Uri.UnescapeDataString(address.AbsolutePath);
 
-    // A unix address and TLS options configure the SocketsHttpHandler at the bottom of handler's chain.
-    private static void Configure(HttpMessageHandler handler, VaultClientOptions options)
+    // A unix address and TLS options configure the SocketsHttpHandler at the bottom of handler's chain
+    // - a supplied one only where it has nothing set already (see VaultTlsOptions.ApplyTo).
+    private static void Configure(HttpMessageHandler handler, VaultClientOptions options, bool supplied, ILogger? logger)
     {
         var unix = options.Address.Scheme == "unix";
         if (!unix && options.Tls.IsEmpty)
             return;
 
         var sockets = VaultHttp.SocketsHandler(handler, unix ? "a unix socket address" : "TLS options");
+        if (unix && supplied && sockets.ConnectCallback is not null)
+            throw VaultTlsOptions.Occupied("a connect callback");
 
         if (unix)
         {
@@ -370,6 +373,6 @@ public sealed partial class VaultClient : IDisposable
         }
 
         if (!options.Tls.IsEmpty)
-            options.Tls.ApplyTo(sockets);
+            options.Tls.ApplyTo(sockets, supplied, logger);
     }
 }

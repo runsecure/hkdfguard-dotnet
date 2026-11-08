@@ -125,7 +125,7 @@ public sealed class HashiCorpVaultSecretCache : RemoteSecretCache, IDisposable
 
         // Follows no redirects: one would carry X-Vault-Token wherever it points. The fetch's own
         // timeout covers the token as well as the request.
-        _http = VaultHttp.CreateHttpClient(apiBase, options.HttpMessageHandler, options.Tls);
+        _http = VaultHttp.CreateHttpClient(apiBase, options.HttpMessageHandler, options.Tls, logger);
     }
 
     /// <summary>

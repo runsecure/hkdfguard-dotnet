@@ -196,6 +196,42 @@ public sealed class KeyFileMaxAgeTests : IDisposable
     }
 
     [Fact]
+    public async Task AKeyFileDatedFurtherAheadThanClockSkew_DoesNotEncrypt_ButDecrypts()
+    {
+        var path = KeyFile();
+        var clock = new ManualTimeProvider(DateTimeOffset.UtcNow);
+        var wrapper = new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)); // one DEK for both rings
+        await using var honest = await Builder().WithKeyWrapper(wrapper).WithKeyFile(1, path).WithTimeProviderForTesting(clock).BuildAsync();
+        var formatted = honest.CreateProtector("p").Encrypt("written honestly");
+
+        // Dated 400 days ahead: without the check it would encrypt for 765 days from today.
+        File.SetLastWriteTimeUtc(path, DateTime.UtcNow + TimeSpan.FromDays(400));
+        var logger = new RecordingLogger<KeyRing>();
+        await using var ring = await Builder().WithKeyWrapper(wrapper).WithKeyFile(1, path).WithTimeProviderForTesting(clock).WithLogger(logger).BuildAsync();
+        var protector = ring.CreateProtector("p");
+
+        var refused = Assert.Throws<EncryptionLimitReachedException>(() => protector.Encrypt("refused"));
+        Assert.Contains("ahead of this host's clock", refused.Message);
+        Assert.Equal("written honestly", Unprotect(protector, formatted));
+        var entry = Assert.Single(logger.Entries);
+        Assert.Equal(13, entry.EventId);
+        Assert.Equal(LogLevel.Critical, entry.Level);
+    }
+
+    [Fact]
+    public async Task AKeyFileDatedWithinClockSkewAhead_Encrypts()
+    {
+        var path = KeyFile();
+        File.SetLastWriteTimeUtc(path, DateTime.UtcNow + TimeSpan.FromHours(12));
+        var logger = new RecordingLogger<KeyRing>();
+        await using var ring = await Builder().WithKeyFile(1, path).WithLogger(logger).BuildAsync();
+
+        Assert.StartsWith("enc::v1::", ring.CreateProtector("p").Encrypt("fine"));
+        Assert.Empty(logger.Entries);
+        Assert.Equal(TimeSpan.FromDays(1), KeyRingBuilder.KeyFileFutureTolerance);
+    }
+
+    [Fact]
     public async Task Encrypt_RefusesACurrentKeyFilePastItsAge_ReportedAtStartup_ButStillDecrypts()
     {
         var path = KeyFile(ageDays: 20);

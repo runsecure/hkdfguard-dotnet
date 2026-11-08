@@ -105,15 +105,18 @@ public static class VaultHttp
     /// </summary>
     /// <param name="baseAddress">What relative request URIs resolve against: <see cref="ApiBase"/>'s, say; null for none.</param>
     /// <param name="tls">Null, or empty, for the operating system's trust store and no client certificate.</param>
+    /// <param name="logger">Warned when tls turns certificate verification off; optional.</param>
     /// <exception cref="ArgumentException">tls sets something but supplied's innermost handler isn't a
-    /// SocketsHttpHandler, or a certificate, key or key store can't be read</exception>
-    public static HttpClient CreateHttpClient(Uri? baseAddress, HttpMessageHandler? supplied, VaultTlsOptions? tls)
+    /// SocketsHttpHandler, already has a callback tls would replace, or is asked to skip verification;
+    /// or a certificate, key or key store can't be read</exception>
+    public static HttpClient CreateHttpClient(Uri? baseAddress, HttpMessageHandler? supplied, VaultTlsOptions? tls,
+        Microsoft.Extensions.Logging.ILogger? logger = null)
     {
         var handler = supplied ?? CreateHandler();
         try
         {
             if (tls is { IsEmpty: false })
-                tls.ApplyTo(SocketsHandler(handler, "TLS options"));
+                tls.ApplyTo(SocketsHandler(handler, "TLS options"), supplied is not null, logger);
         }
         catch when (supplied is null)
         {
@@ -228,8 +231,11 @@ public static class VaultHttp
 
     /// <summary>
     /// Whether the handler at the bottom of handler's DelegatingHandler chain follows redirects
-    /// itself, which would send the token wherever they point. One of a type other than
-    /// SocketsHttpHandler or HttpClientHandler can't be told, so counts as not.
+    /// itself, which would send the token wherever they point. A handler of another type than
+    /// SocketsHttpHandler or HttpClientHandler is asked through a public bool AllowAutoRedirect or
+    /// AutomaticRedirection property (WinHttpHandler's, say); one with neither can't be told, so
+    /// counts as following them - most handlers do by default, and assuming otherwise would let one
+    /// carry the token off.
     /// </summary>
     public static bool FollowsRedirects(HttpMessageHandler handler)
     {
@@ -241,8 +247,23 @@ public static class VaultHttp
         {
             SocketsHttpHandler sockets => sockets.AllowAutoRedirect,
             HttpClientHandler client => client.AllowAutoRedirect,
-            _ => false,
+            _ => RedirectSetting(handler) ?? true,
         };
+    }
+
+    // An unknown handler's own redirect switch, if it has one by a conventional name.
+    [System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage("Trimming", "IL2075",
+        Justification = "Reading an optional public property; a trimmed one reads as absent, which counts as following redirects.")]
+    private static bool? RedirectSetting(HttpMessageHandler handler)
+    {
+        foreach (var name in (ReadOnlySpan<string>)["AllowAutoRedirect", "AutomaticRedirection"])
+        {
+            if (handler.GetType().GetProperty(name, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance) is { PropertyType: var type } property
+                && type == typeof(bool) && property.CanRead)
+                return (bool)property.GetValue(handler)!;
+        }
+
+        return null;
     }
 
     /// <summary>

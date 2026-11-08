@@ -141,7 +141,7 @@ public sealed class VaultTlsKeyStoreTests : IDisposable
     private static SocketsHttpHandler Apply(VaultTlsOptions tls)
     {
         var handler = new SocketsHttpHandler();
-        tls.ApplyTo(handler);
+        tls.ApplyTo(handler, supplied: false);
         return handler;
     }
 

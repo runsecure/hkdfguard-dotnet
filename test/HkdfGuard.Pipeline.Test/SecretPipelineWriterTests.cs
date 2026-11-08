@@ -58,6 +58,96 @@ public sealed class SecretPipelineWriterTests : SecretPipelineWriterContractTest
 
     protected override Type ReadFailure => typeof(HttpRequestException);
 
+    [Fact]
+    public async Task WritingAgain_ReplacesEachFile_AndLeavesNoTemporaryFileBehind()
+    {
+        SetText("api-key", "first");
+        using var writer = CreateWriter("api-key");
+        await writer.PullSecretsAsync();
+        writer.WriteProtectedSecretFiles(Folder);
+        writer.WriteJsonSecrets(Path.Join(Folder, "secrets.json"));
+        var first = await File.ReadAllTextAsync(Path.Join(Folder, "api-key"));
+
+        SetText("api-key", "second");
+        await writer.PullSecretsAsync();
+        writer.WriteProtectedSecretFiles(Folder);
+        writer.WriteJsonSecrets(Path.Join(Folder, "secrets.json"));
+
+        Assert.Equal(["api-key", "secrets.json"], Directory.GetFiles(Folder).Select(Path.GetFileName).Order());
+        Assert.NotEqual(first, await File.ReadAllTextAsync(Path.Join(Folder, "api-key")));
+        Assert.Equal("second", Decrypt(await File.ReadAllTextAsync(Path.Join(Folder, "api-key")), "api-key"));
+    }
+
+    [Fact]
+    public void AWriteThatFails_LeavesTheOldFileIntact_AndRemovesItsTemporaryFile()
+    {
+        Directory.CreateDirectory(Folder);
+        var path = Path.Join(Folder, "api-key");
+        File.WriteAllText(path, "old");
+
+        Assert.Throws<IOException>(() => SecretPipelineWriter.ReplaceFile(path, stream =>
+        {
+            stream.Write("partial"u8);
+            throw new IOException("disk full");
+        }));
+
+        Assert.Equal("old", File.ReadAllText(path));
+        Assert.Equal(["api-key"], Directory.GetFiles(Folder).Select(Path.GetFileName));
+    }
+
+    [Fact]
+    public async Task ASymbolicLinkAtAFilesName_IsReplaced_NotWrittenThrough()
+    {
+        Directory.CreateDirectory(Folder);
+        var outside = Path.Join(Folder, "..", $"outside-{Guid.NewGuid():N}");
+        File.WriteAllText(outside, "untouched");
+        try
+        {
+            var link = Path.Join(Folder, "api-key");
+            try
+            {
+                File.CreateSymbolicLink(link, outside);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                return; // Windows without the symbolic-link privilege or developer mode: nothing to check.
+            }
+
+            SetText("api-key", "value");
+            using var writer = CreateWriter("api-key");
+            await writer.PullSecretsAsync();
+            writer.WriteProtectedSecretFiles(Folder);
+
+            Assert.Equal("untouched", File.ReadAllText(outside));
+            Assert.Null(new FileInfo(link).LinkTarget);
+            Assert.Equal("value", Decrypt(File.ReadAllText(link), "api-key"));
+        }
+        finally
+        {
+            File.Delete(outside);
+        }
+    }
+
+    [Fact]
+    public async Task OnLinuxAndMacOs_FilesAndNewFoldersAreWritableByTheirOwnerOnly()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        SetText("api-key", "value");
+        using var writer = CreateWriter("api-key");
+        await writer.PullSecretsAsync();
+        var folder = Path.Join(Folder, "new");
+        writer.WriteProtectedSecretFiles(folder);
+        writer.WriteJsonSecrets(Path.Join(folder, "secrets.json"));
+
+        const UnixFileMode groupOrOtherWrite = UnixFileMode.GroupWrite | UnixFileMode.OtherWrite;
+        Assert.Equal(UnixFileMode.None, File.GetUnixFileMode(folder) & groupOrOtherWrite);
+        Assert.Equal(UnixFileMode.None, File.GetUnixFileMode(Path.Join(folder, "api-key")) & groupOrOtherWrite);
+        Assert.Equal(UnixFileMode.None, File.GetUnixFileMode(Path.Join(folder, "secrets.json")) & groupOrOtherWrite);
+        Assert.True(File.GetUnixFileMode(Path.Join(folder, "api-key")).HasFlag(UnixFileMode.OtherRead));
+    }
+
     protected override IEnumerable<string> Reads => _store.Reads;
 
     [Fact]

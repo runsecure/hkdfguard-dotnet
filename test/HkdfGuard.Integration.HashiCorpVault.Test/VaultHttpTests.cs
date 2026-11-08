@@ -84,7 +84,7 @@ public class VaultHttpTests
     }
 
     [Fact]
-    public void FollowsRedirects_LooksUnderDelegatingHandlers_AndCountsWhatItCantTellAsNot()
+    public void FollowsRedirects_LooksUnderDelegatingHandlers_AndCountsWhatItCantTellAsFollowing()
     {
         using var sockets = new SocketsHttpHandler();
         using var client = new HttpClientHandler();
@@ -95,8 +95,8 @@ public class VaultHttpTests
         Assert.True(VaultHttp.FollowsRedirects(sockets));
         Assert.True(VaultHttp.FollowsRedirects(client));
         Assert.True(VaultHttp.FollowsRedirects(chained));
-        Assert.False(VaultHttp.FollowsRedirects(unchained));
-        Assert.False(VaultHttp.FollowsRedirects(custom));
+        Assert.True(VaultHttp.FollowsRedirects(unchained)); // no handler to ask: assume the worst
+        Assert.False(VaultHttp.FollowsRedirects(custom)); // says so through its AllowAutoRedirect
         Assert.Throws<ArgumentNullException>(() => VaultHttp.FollowsRedirects(null!));
     }
 
@@ -370,7 +370,7 @@ public class VaultHttpTests
     [Fact]
     public void CreateHttpClient_AppliesTls_OnlyToASocketsHttpHandler()
     {
-        var tls = new VaultTlsOptions { InsecureSkipVerify = true };
+        var tls = new VaultTlsOptions { ServerName = "vault.internal" };
         var sockets = new SocketsHttpHandler { AllowAutoRedirect = false };
         using (VaultHttp.CreateHttpClient(null, new PassThrough { InnerHandler = sockets }, tls))
             Assert.NotNull(sockets.SslOptions.RemoteCertificateValidationCallback);

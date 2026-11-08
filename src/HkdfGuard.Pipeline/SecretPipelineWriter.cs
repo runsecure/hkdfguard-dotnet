@@ -136,6 +136,14 @@ public abstract class SecretPipelineWriter : ISecretPipelineWriter
     /// holding its encrypted, formatted value as UTF-8. A file already there by that name is
     /// replaced; any other file is left as it is.
     /// <para>
+    /// Each file is replaced atomically: written whole to a hidden temporary file in the same folder,
+    /// flushed to disk, then renamed over the old one, so a reader - or a deployment interrupted
+    /// partway - sees the old value or the new, never a truncated one. A symbolic link already at a
+    /// file's name is replaced by the file, never written through. On Linux and macOS each file is
+    /// created rw-r--r-- whatever the umask, and a folder this creates rwxr-xr-x, so neither is ever
+    /// group- or world-writable, which FilePerSecretCache would refuse.
+    /// </para>
+    /// <para>
     /// Only encrypted values are written, but FilePerSecretCache refuses a folder or file anyone but
     /// administrators and the principals it trusts can modify: write them where the deployment can
     /// set that, or set it once they're written.
@@ -151,17 +159,19 @@ public abstract class SecretPipelineWriter : ISecretPipelineWriter
         RequirePulled();
 
         var folder = Path.GetFullPath(folderPath);
-        Directory.CreateDirectory(folder);
+        CreateFolder(folder);
         foreach (var (fileName, value) in _protectedSecrets)
-            File.WriteAllText(Path.Join(folder, fileName), value);
+            ReplaceFile(Path.Join(folder, fileName), stream => stream.Write(Encoding.UTF8.GetBytes(value)));
     }
 
     /// <summary>
     /// Writes every secret in <see cref="ProtectedSecrets"/> to one JSON file at
     /// <paramref name="filePath"/>, creating its folder if it doesn't exist: a single object with a
     /// member per secret, its file name mapped to its encrypted, formatted value, in file-name order,
-    /// as UTF-8 without a BOM. A file already there is replaced. Each value is bound to its member's
-    /// name - Decrypt(value, name) - as it is to its file name in <see cref="WriteProtectedSecretFiles"/>.
+    /// as UTF-8 without a BOM. A file already there is replaced, atomically and with the same
+    /// permissions, as <see cref="WriteProtectedSecretFiles"/> replaces each of its files. Each value
+    /// is bound to its member's name - Decrypt(value, name) - as it is to its file name in
+    /// <see cref="WriteProtectedSecretFiles"/>.
     /// </summary>
     /// <param name="filePath">The file to write, absolute or relative to the working directory</param>
     /// <exception cref="ArgumentNullException">filePath is null</exception>
@@ -173,10 +183,67 @@ public abstract class SecretPipelineWriter : ISecretPipelineWriter
         RequirePulled();
 
         var path = Path.GetFullPath(filePath);
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        using var file = File.Create(path);
-        using var json = JsonSecretsWriter(file);
-        WriteJsonSecrets(json);
+        CreateFolder(Path.GetDirectoryName(path)!);
+        ReplaceFile(path, stream =>
+        {
+            using var json = JsonSecretsWriter(stream);
+            WriteJsonSecrets(json);
+        });
+    }
+
+    // rwxr-xr-x: like SecretFileMode, writable by its owner only.
+    private const UnixFileMode SecretFolderMode = SecretFileMode
+        | UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute;
+
+    // Creates folder (and any missing parents) if it doesn't exist; an existing one is left as it is.
+    private static void CreateFolder(string folder)
+    {
+        if (OperatingSystem.IsWindows())
+            Directory.CreateDirectory(folder);
+        else
+            Directory.CreateDirectory(folder, SecretFolderMode);
+    }
+
+    /// <summary>
+    /// Replaces the file at path with what write writes, atomically: into a new hidden file beside it
+    /// - created exclusively, so nothing already there, a planted symbolic link included, is opened -
+    /// flushed to disk, then renamed over path. rename replaces a link at path rather than following
+    /// it. The temporary name starts with '.', which FilePerSecretCache never reads, and is removed if
+    /// anything fails before the rename.
+    /// </summary>
+    internal static void ReplaceFile(string path, Action<Stream> write)
+    {
+        var temporary = Path.Join(Path.GetDirectoryName(path), $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
+        var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.None };
+        if (!OperatingSystem.IsWindows())
+            options.UnixCreateMode = SecretFileMode; // the umask can only take bits away, never add write
+
+        try
+        {
+            using (var stream = new FileStream(temporary, options))
+            {
+                write(stream);
+                stream.Flush(flushToDisk: true);
+            }
+
+            File.Move(temporary, path, overwrite: true);
+        }
+        catch
+        {
+            try
+            {
+                File.Delete(temporary);
+            }
+            catch (IOException)
+            {
+                // Best effort: the original failure is what matters.
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+
+            throw;
+        }
     }
 
     /// <summary>
