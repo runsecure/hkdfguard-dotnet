@@ -586,6 +586,24 @@ public class LinuxNativeLibraryLoaderTests
     }
 
     [Fact]
+    public void ListingEnvironment_WhenTheStartupEnvironmentCantBeRead_UsesTheRuntimesCopy()
+    {
+        // A non-dumpable process, or one past a privilege change, can't read /proc/self/environ. Running
+        // the listing with neither variable would let the linker vouch for a resolution dlopen won't make.
+        var current = new Dictionary<string, string> { ["LD_LIBRARY_PATH"] = "/opt/lib", ["LD_PRELOAD"] = "/opt/pre.so", ["LD_AUDIT"] = "/opt/a.so", ["HOME"] = "/root" };
+
+        Assert.Equal(
+            new Dictionary<string, string> { ["LD_LIBRARY_PATH"] = "/opt/lib", ["LD_PRELOAD"] = "/opt/pre.so" },
+            LinuxNativeLibraryLoader.ListingEnvironment(null, current.GetValueOrDefault));
+        Assert.Empty(LinuxNativeLibraryLoader.ListingEnvironment(null, _ => null));
+
+        // When /proc/self/environ was read, it alone decides, whatever the runtime's copy says now.
+        Assert.Equal(
+            new Dictionary<string, string> { ["LD_PRELOAD"] = "/opt/startup.so" },
+            LinuxNativeLibraryLoader.ListingEnvironment(Encoding.UTF8.GetBytes("LD_PRELOAD=/opt/startup.so\0"), current.GetValueOrDefault));
+    }
+
+    [Fact]
     public void ListingEnvironment_KeepsTheLastValue_AsTheDynamicLinkerDoes()
         => Assert.Equal(
             new Dictionary<string, string> { ["LD_PRELOAD"] = "/opt/second.so" },

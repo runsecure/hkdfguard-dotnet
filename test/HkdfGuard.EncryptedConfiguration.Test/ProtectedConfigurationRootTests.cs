@@ -124,27 +124,45 @@ public class ProtectedConfigurationRootTests
     }
 
     [Fact]
-    public async Task Decrypt_Chars_WithMalformedValue_ThrowsFormatException()
+    public async Task APlainValue_IsReportedMissing_AsAKeyWithNoValueIs()
     {
+        // A plain setting - a host name, say - beside the protected ones: nothing to decrypt, so
+        // missing, and a ProtectedCacheCollection or a template's items fall through to another source.
         var keyRing = await CreateKeyRingAsync();
         var configurationRoot = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?> { ["Bad"] = "not-a-protected-value" })
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["Host"] = "db.internal", ["Odd"] = "enc::but not really" })
             .Build();
         var sut = new ProtectedConfigurationRoot(configurationRoot, keyRing);
 
-        Assert.Throws<FormatException>(() => sut.Decrypt("Bad", new char[16]));
+        foreach (var name in new[] { "Host", "Odd" })
+        {
+            Assert.Equal(0, sut.Decrypt(name, new char[64]));
+            Assert.Equal(0, sut.Decrypt(name, new byte[64]));
+            Assert.False(sut.TryGetMaxDecryptedLength(name, out var maxLength));
+            Assert.Equal(0, maxLength);
+            Assert.Equal(0, await ((IProtectedReadOnlyCache)sut).DecryptAsync(name, new char[64].AsMemory()));
+            Assert.Equal(0, await ((IProtectedReadOnlyCache)sut).GetMaxDecryptedLengthAsync(name));
+        }
+
+        // The plain value itself is untouched, for whatever reads configuration directly.
+        Assert.Equal("db.internal", sut["Host"]);
     }
 
     [Fact]
-    public async Task Decrypt_Bytes_WithMalformedValue_ThrowsFormatException()
+    public async Task AProtectedValueThatDoesntAuthenticate_StillThrows()
     {
+        // In the protected format, but encrypted for another key: an altered or moved value is an
+        // error to report, never a missing one to fall through.
         var keyRing = await CreateKeyRingAsync();
+        var movedHere = keyRing.CreateProtector(ProtectedConfigurationPurpose.For("Other")).Encrypt("s3cret");
         var configurationRoot = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?> { ["Bad"] = "not-a-protected-value" })
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["Bad"] = movedHere })
             .Build();
         var sut = new ProtectedConfigurationRoot(configurationRoot, keyRing);
 
-        Assert.Throws<FormatException>(() => sut.Decrypt("Bad", new byte[16]));
+        Assert.True(sut.TryGetMaxDecryptedLength("Bad", out _));
+        Assert.ThrowsAny<CryptographicException>(() => sut.Decrypt("Bad", new char[64]));
+        Assert.ThrowsAny<CryptographicException>(() => sut.Decrypt("Bad", new byte[64]));
     }
 
     [Fact]

@@ -25,8 +25,11 @@ public sealed class KeyFileTrust
 
     /// <summary>
     /// Windows security identifiers (SIDs, such as a deployers group's "S-1-5-21-...-1005") that
-    /// may also own, and hold write rights on, a key file and the folders above it. Everyone,
-    /// Authenticated Users, Users, Interactive and Anonymous are refused when a key file is read.
+    /// may also own, and hold write rights on, a key file and the folders above it. Groups that take
+    /// in everyone or every account of a kind are refused when a key file is read: Everyone,
+    /// Authenticated Users, Users, Guests, Anonymous, Local account, This Organization, the logon-type
+    /// groups (Interactive, Remote Interactive, Network, Batch, Service), and any domain's Domain
+    /// Users, Domain Guests and Domain Computers.
     /// </summary>
     public IReadOnlyList<string> WindowsPrincipals { get; init; } = [];
 

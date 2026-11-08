@@ -15,8 +15,9 @@ public class RemoteSecretCacheTests
         => TestRing.For(new HkdfGuard.DataEncryptionKey.DataEncryptionKey(await AesGcmCryptoProvider.CreateAsync(
             new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)), "wrapped"u8.ToArray(), 60)));
 
-    private static async Task<FakeRemoteSecretCache> CreateAsync(SecretNameMatching matching = SecretNameMatching.Exact, ILogger? logger = null)
-        => new(await NewRingAsync(), matching, logger);
+    private static async Task<FakeRemoteSecretCache> CreateAsync(SecretNameMatching matching = SecretNameMatching.Exact, ILogger? logger = null,
+        TimeProvider? clock = null)
+        => new(await NewRingAsync(), matching, logger) { TimeProvider = clock ?? TimeProvider.System };
 
     private static string DecryptString(IProtectedReadOnlyCache cache, string name)
     {
@@ -118,14 +119,71 @@ public class RemoteSecretCacheTests
     }
 
     [Fact]
-    public async Task AFetchThatSetsNothing_IsMissing_AndIsFetchedAgainNextTime()
+    public async Task AFetchThatSetsNothing_IsMissing_IsRememberedForItsLifetime_ThenFetchedAgain()
     {
-        var cache = await CreateAsync();
+        var clock = new ManualClock();
+        var cache = await CreateAsync(clock: clock);
 
         Assert.Equal(0, cache.Decrypt("later", new byte[16]));
         cache.Set("later", "now here");
+
+        // Within the lifetime, a lookup is answered missing without calling the store.
+        clock.Advance(RemoteSecretCache.DefaultMissLifetime - TimeSpan.FromSeconds(1));
+        Assert.Equal(0, cache.Decrypt("later", new byte[16]));
+        Assert.False(cache.TryGetMaxDecryptedLength("later", out _));
+        Assert.Single(cache.Fetches);
+        Assert.Equal(1, cache.RememberedMissCount);
+
+        // Past it, the secret created meanwhile is found, and the miss is forgotten.
+        clock.Advance(TimeSpan.FromSeconds(1));
         Assert.Equal("now here", DecryptString(cache, "later"));
         Assert.Equal(2, cache.Fetches.Count);
+        Assert.Equal(0, cache.RememberedMissCount);
+    }
+
+    [Fact]
+    public async Task AMissLifetimeOfZero_RemembersNothing()
+    {
+        var ring = await NewRingAsync();
+        var cache = new FakeRemoteSecretCache(ring, SecretNameMatching.Exact) { MissLifetime = TimeSpan.Zero };
+
+        Assert.Equal(0, cache.Decrypt("later", new byte[16]));
+        Assert.Equal(0, cache.Decrypt("later", new byte[16]));
+
+        Assert.Equal(2, cache.Fetches.Count);
+        Assert.Equal(0, cache.RememberedMissCount);
+    }
+
+    [Fact]
+    public async Task MissLifetime_DefaultsToThirtySeconds_AndAcceptsZeroToAnHour()
+    {
+        var ring = await NewRingAsync();
+
+        Assert.Equal(TimeSpan.FromSeconds(30), new FakeRemoteSecretCache(ring, SecretNameMatching.Exact).MissLifetime);
+        Assert.Equal(TimeSpan.FromHours(1), new FakeRemoteSecretCache(ring, SecretNameMatching.Exact) { MissLifetime = TimeSpan.FromHours(1) }.MissLifetime);
+        Assert.Throws<ArgumentOutOfRangeException>(() => new FakeRemoteSecretCache(ring, SecretNameMatching.Exact) { MissLifetime = TimeSpan.FromSeconds(-1) });
+        Assert.Throws<ArgumentOutOfRangeException>(() => new FakeRemoteSecretCache(ring, SecretNameMatching.Exact) { MissLifetime = TimeSpan.FromHours(1) + TimeSpan.FromTicks(1) });
+    }
+
+    [Fact]
+    public async Task RememberedMisses_AreBounded_SoChosenNamesCantGrowMemory()
+    {
+        var clock = new ManualClock();
+        var cache = await CreateAsync(clock: clock);
+
+        for (var i = 0; i < RemoteSecretCache.MaxRememberedMisses + 10; i++)
+            Assert.Equal(0, cache.Decrypt($"absent-{i}", new byte[16]));
+        Assert.Equal(RemoteSecretCache.MaxRememberedMisses, cache.RememberedMissCount);
+
+        // Past the bound, a miss isn't remembered: it is fetched again, as before.
+        var fetches = cache.Fetches.Count;
+        Assert.Equal(0, cache.Decrypt($"absent-{RemoteSecretCache.MaxRememberedMisses + 5}", new byte[16]));
+        Assert.Equal(fetches + 1, cache.Fetches.Count);
+
+        // Once the remembered ones expire, room is made again.
+        clock.Advance(RemoteSecretCache.DefaultMissLifetime);
+        Assert.Equal(0, cache.Decrypt("absent-new", new byte[16]));
+        Assert.Equal(1, cache.RememberedMissCount);
     }
 
     [Fact]
@@ -188,7 +246,7 @@ public class RemoteSecretCacheTests
         var cache = await CreateAsync();
         SecretValueSink? kept = null;
         cache.OnFetch = (_, sink) => kept = sink;
-        Assert.Equal(0, cache.Decrypt("item", new byte[16]));
+        Assert.Equal(0, cache.Decrypt("item", new byte[16])); // remembered missing from here on
 
         var bytes = new byte[] { 9 };
         Assert.Throws<InvalidOperationException>(() => kept!.SetBytes(bytes));
@@ -200,7 +258,7 @@ public class RemoteSecretCacheTests
             kept = sink;
             throw new TimeoutException("unreachable");
         };
-        Assert.Throws<TimeoutException>(() => cache.Decrypt("item", new byte[16]));
+        Assert.Throws<TimeoutException>(() => cache.Decrypt("other-item", new byte[16]));
         Assert.Throws<InvalidOperationException>(() => kept!.SetText("late"));
     }
 

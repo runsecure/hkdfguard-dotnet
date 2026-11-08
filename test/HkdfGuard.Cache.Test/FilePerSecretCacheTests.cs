@@ -223,6 +223,17 @@ public sealed class FilePerSecretCacheTests : IDisposable
     [InlineData(@"sub\item")]
     [InlineData("db:password")]
     [InlineData("café")]
+    [InlineData("secret.")]   // Windows drops the dot and opens "secret"
+    [InlineData("item.")]
+    [InlineData("CON")]       // Windows opens a device for these, with or without an extension
+    [InlineData("con")]
+    [InlineData("Nul.txt")]
+    [InlineData("aux.json")]
+    [InlineData("PRN")]
+    [InlineData("COM1")]
+    [InlineData("com9.key")]
+    [InlineData("LPT0")]
+    [InlineData("lpt3.x.y")]
     public async Task ANameThatCantBeAFileName_IsMissing_WithoutReadingOutsideTheFolder(string name)
     {
         var ring = await NewRingAsync();
@@ -239,6 +250,9 @@ public sealed class FilePerSecretCacheTests : IDisposable
     public void IsValidName_AcceptsUpToMaxNameLength_OfLettersDigitsAndPunctuation()
     {
         Assert.True(FilePerSecretCache.IsValidName("Db-Password_v2.txt"));
+        // Near the reserved device names, but not them.
+        foreach (var name in new[] { "CONFIG", "console.txt", "nulls", "auxiliary", "COM", "COM10", "LPTX", "my.con", "item.v1" })
+            Assert.True(FilePerSecretCache.IsValidName(name), name);
         Assert.True(FilePerSecretCache.IsValidName(new string('a', FilePerSecretCache.MaxNameLength)));
         Assert.False(FilePerSecretCache.IsValidName(new string('a', FilePerSecretCache.MaxNameLength + 1)));
         Assert.False(FilePerSecretCache.IsValidName(null));

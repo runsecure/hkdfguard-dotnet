@@ -783,8 +783,9 @@ administrators and the principals the `KeyFileTrust` adds. Add the account that 
 never the one the application runs as: one that can rewrite its own secrets can be made to roll
 one back.
 
-A name is a file name: 1-255 ASCII letters, digits, `-`, `_` and `.`, not starting with `.`, so it
-can't reach outside the folder. Any other name (for example `ConnectionStrings:Admin`), a missing
+A name is a file name: 1-255 ASCII letters, digits, `-`, `_` and `.`, neither starting nor ending
+with `.`, and not a Windows device name (`CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9`,
+with or without an extension), so it can't reach outside the folder or open something else. Any other name (for example `ConnectionStrings:Admin`), a missing
 or empty file and a missing folder all return 0, so the cache can sit in a
 `ProtectedCacheCollection` beside other sources; a missing secret isn't remembered, so a file
 added later is found. A file over 64 KB throws `InvalidDataException`; any other read failure
@@ -808,7 +809,9 @@ Span<char> buffer = stackalloc char[256];
 int written = secrets.Decrypt("Db-Password", buffer); // 0 if the secret doesn't exist
 ```
 
-A missing (404) or empty secret returns 0 and is looked up again next time; any other failure
+A missing (404) or empty secret returns 0, and is remembered as missing for `MissLifetime` (30
+seconds by default, zero to turn it off, at most 1,024 names at once) so repeated lookups of it don't
+each call Key Vault - the same holds for every remote cache here; any other failure
 (access denied, a disabled secret, the vault unreachable) throws the Azure exception. A name Key
 Vault can't hold (anything but 1-127 ASCII letters, digits and hyphens, e.g.
 `ConnectionStrings:Admin`) returns 0 without a call, so the cache can go last in a
@@ -932,7 +935,7 @@ Paths match exactly, as Vault's do. A name whose path segments aren't ASCII lett
 `_` and `.` - or that holds a `.`/`..` segment, e.g. `ConnectionStrings:Admin` - returns 0
 without a call. A secret that doesn't exist (404 with no errors), whose latest version is deleted
 or destroyed, or that lacks the key or holds no value there that is cached, returns 0 and is
-looked up again next time. Any other answer (403, a 404 naming an error such as a missing
+remembered as missing for `MissLifetime` (30 seconds by default), then looked up again. Any other answer (403, a 404 naming an error such as a missing
 mount, a sealed Vault) throws an `HttpRequestException` carrying Vault's status and errors, never
 the token. A request that fails transiently - no answer (connection refused or reset, DNS), a
 connection lost mid-response, an attempt that took longer than `Timeout`, or 429 or a 5xx other than

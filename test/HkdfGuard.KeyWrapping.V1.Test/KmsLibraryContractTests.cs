@@ -143,6 +143,17 @@ public class KmsLibraryContractTests
         Assert.Equal(@"C:\keys\dek.bin", library.LastOpenFilePath);
     }
 
+    [Theory]
+    [InlineData("/etc/app/keys/v2.key\0ignored")]
+    [InlineData("\0")]
+    public void OpenFile_RefusesAPathWithANul_WithoutCallingTheNativeLibrary(string path)
+    {
+        var library = new FakeHkdfGuardKmsLibrary { OpenFilePayloadToEmit = new byte[132] };
+
+        Assert.Throws<ArgumentException>("path", () => library.OpenFile(path));
+        Assert.Null(library.LastOpenFilePath);
+    }
+
     [Fact]
     public void OpenFile_PassesABufferLargeEnoughForEveryPlatformsWrappedDek()
     {

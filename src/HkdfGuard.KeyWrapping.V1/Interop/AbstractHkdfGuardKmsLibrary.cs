@@ -171,6 +171,10 @@ internal abstract class AbstractHkdfGuardKmsLibrary
     public byte[] OpenFile(string path)
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
+        // The native side reads a C string, so it would open only what comes before a NUL while every
+        // message here named the whole path: refused, as .NET's own file APIs refuse it.
+        if (path.Contains('\0'))
+            throw new ArgumentException("The key file path contains a NUL character.", nameof(path));
 
         // Every platform's wrapped DEK fits in WrappedKeyLimits.MaxBytes (Windows 132, Linux 276,
         // macOS 125 bytes), so one buffer never needs the size probe.

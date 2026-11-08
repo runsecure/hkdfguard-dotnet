@@ -19,9 +19,9 @@ public class SecretKeysTests
         }
         """;
 
-    private static async Task<FakeRemoteSecretCache> CreateAsync(SecretNameMatching matching = SecretNameMatching.Exact)
+    private static async Task<FakeRemoteSecretCache> CreateAsync(SecretNameMatching matching = SecretNameMatching.Exact, TimeProvider? clock = null)
         => new(TestRing.For(new HkdfGuard.DataEncryptionKey.DataEncryptionKey(await AesGcmCryptoProvider.CreateAsync(
-            new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)), "wrapped"u8.ToArray(), 60))), matching);
+            new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)), "wrapped"u8.ToArray(), 60))), matching) { TimeProvider = clock ?? TimeProvider.System };
 
     private static string DecryptString(IProtectedReadOnlyCache cache, string name)
     {
@@ -68,11 +68,15 @@ public class SecretKeysTests
     [Fact]
     public async Task AKeyTheSecretDoesntHold_IsMissing_AndFetchesAgain_WithoutReplacingWhatIsCached()
     {
-        var cache = await CreateAsync();
+        var clock = new ManualClock();
+        var cache = await CreateAsync(clock: clock);
         cache.OnFetch = (_, sink) => SetJson(sink, """{"a":"first"}""");
         Assert.Equal("first", DecryptString(cache, "s#a"));
 
         Assert.Equal(0, cache.Decrypt("s#b", new byte[16]));
+        Assert.Equal(0, cache.Decrypt("s#b", new byte[16])); // remembered: no second fetch
+        Assert.Equal(2, cache.Fetches.Count);
+        clock.Advance(RemoteSecretCache.DefaultMissLifetime);
 
         cache.OnFetch = (_, sink) => SetJson(sink, """{"a":"second","b":"added"}""");
         Assert.Equal("added", DecryptString(cache, "s#b"));
