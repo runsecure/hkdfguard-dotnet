@@ -46,14 +46,26 @@ internal sealed class SecureBufferWriter : IBufferWriter<byte>, IDisposable
     }
 
     /// <summary>Reads stream to its end into the buffer.</summary>
-    public async Task ReadFromAsync(Stream stream, CancellationToken cancellationToken)
+    public Task ReadFromAsync(Stream stream, CancellationToken cancellationToken)
+        => ReadFromAsync(stream, int.MaxValue, cancellationToken);
+
+    /// <summary>
+    /// Reads stream to its end into the buffer, refusing to hold more than maxLength bytes: each read
+    /// asks for at most one byte past the limit, so an endless or oversized stream is noticed after
+    /// maxLength + 1 bytes, not once it has been read whole.
+    /// </summary>
+    /// <exception cref="InvalidDataException">stream holds more than maxLength bytes</exception>
+    public async Task ReadFromAsync(Stream stream, int maxLength, CancellationToken cancellationToken)
     {
         while (true)
         {
-            var read = await stream.ReadAsync(GetMemory(8192), cancellationToken).ConfigureAwait(false);
+            var room = (int)Math.Min(8192, (long)maxLength - _written + 1);
+            var read = await stream.ReadAsync(GetMemory(room)[..room], cancellationToken).ConfigureAwait(false);
             if (read == 0)
                 return;
             Advance(read);
+            if (_written > maxLength)
+                throw new InvalidDataException($"The response is over the {maxLength}-byte limit.");
         }
     }
 

@@ -601,6 +601,59 @@ public class MacOsNativeLibraryLoaderTests
         Assert.Contains("DYLD_LIBRARY_PATH", ex.Message);
     }
 
+    [Theory]
+    [InlineData("Security")]
+    [InlineData("CoreFoundation")]
+    [InlineData("libSystem.B.dylib")]
+    public void RefuseShadowing_Refuses_WhenADyldLibraryPathDirectoryHoldsASystemLibraryTheLoaderVerifiesWith(string leafName)
+    {
+        var decoy = $"/tmp/decoy/{leafName}";
+
+        var ex = Assert.Throws<SecurityException>(() =>
+            MacOsNativeLibraryLoader.RefuseShadowing(n => n == "DYLD_LIBRARY_PATH" ? "/tmp/decoy" : null, p => p == decoy));
+
+        Assert.Contains(decoy, ex.Message);
+        Assert.Contains("system library", ex.Message);
+    }
+
+    [Fact]
+    public void ShadowableLeafNames_MatchTheSystemLibrariesMacOsNativeBinds()
+    {
+        // MacOsNative is macOS-only; read its private library paths by reflection so this runs everywhere.
+        var paths = typeof(MacOsNativeLibraryLoader).Assembly.GetType("HkdfGuard.KeyWrapping.V1.Interop.MacOsNative")!
+            .GetFields(System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
+            .Where(f => f.IsLiteral && f.FieldType == typeof(string) && ((string)f.GetRawConstantValue()!).StartsWith('/'))
+            .Select(f => Path.GetFileName((string)f.GetRawConstantValue()!))
+            .ToArray();
+
+        Assert.NotEmpty(paths);
+        Assert.All(paths, leaf => Assert.Contains(leaf, MacOsNativeLibraryLoader.ShadowableLeafNames));
+        Assert.Contains(MacOsNativeLibraryLoader.FileName, MacOsNativeLibraryLoader.ShadowableLeafNames);
+    }
+
+    [Fact]
+    public void Load_RefusesAShadowingEnvironment_BeforeAnyOtherCheck()
+    {
+        // Pins the order in Load: RefuseShadowing is the first call after the platform check, so
+        // no system library (Security.framework above all) is called while a substitute could load.
+        var source = System.IO.File.ReadAllText(Path.Combine(RepositoryRoot(), "src", "HkdfGuard.KeyWrapping.V1", "Interop", "MacOsNativeLibraryLoader.cs"));
+        var refuse = source.IndexOf("RefuseShadowing(Environment.GetEnvironmentVariable", StringComparison.Ordinal);
+        Assert.True(refuse > 0);
+        foreach (var later in new[] { "ChoosePath(MacOsNative.Probe", "VerifyLocation(path", "VerifySignature(path", "NativeLibrary.Load(path)" })
+            Assert.True(source.IndexOf(later, StringComparison.Ordinal) > refuse, $"{later} runs before RefuseShadowing");
+
+        static string RepositoryRoot()
+        {
+            for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
+            {
+                if (System.IO.File.Exists(Path.Combine(dir.FullName, "HkdfGuard.sln")))
+                    return dir.FullName;
+            }
+
+            throw new InvalidOperationException("HkdfGuard.sln not found above the test output.");
+        }
+    }
+
     [Fact]
     public void RefuseShadowing_ConsultsOnlyTheDyldVariablesItChecks()
     {

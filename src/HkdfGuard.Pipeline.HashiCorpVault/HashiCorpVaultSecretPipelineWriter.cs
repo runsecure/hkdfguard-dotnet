@@ -162,10 +162,8 @@ public sealed class HashiCorpVaultSecretPipelineWriter : SecretPipelineWriter
             }
         }
 
-        // An error response holds no secret: read whole, as Vault's error list.
-        using var error = new MemoryStream();
-        await body.CopyToAsync(error, timeout.Token).ConfigureAwait(false);
-        var errors = VaultHttp.ReadErrors(error.GetBuffer().AsSpan(0, (int)error.Length));
+        // An error response holds no secret: read as Vault's error list, up to a bound.
+        var errors = await VaultHttp.ReadErrorsAsync(body, timeout.Token).ConfigureAwait(false);
 
         // Nothing at the path: Vault answers 404 with an empty error list - or, for a KV version 2
         // secret whose latest version is deleted, with its metadata and none. A 404 naming an error

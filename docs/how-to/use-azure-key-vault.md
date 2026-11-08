@@ -108,6 +108,12 @@ var wrapper = new AzureKeyVaultKeyWrapper(
   and every key file records the versions it was made with, so both keys can be rotated in Key
   Vault with no change here. Keep an old version enabled for as long as key files made with it are
   in use.
+- **Revoking a signing key version reaches running processes within 5 minutes.** The SDK verifies
+  signatures in your process with a public key it fetched once, so the wrapper replaces each Key
+  Vault client after `ClientLifetime` (5 minutes by default, at most 1 hour). If the pipeline's
+  signing identity is compromised, rotate the signing key, then disable or purge the old version:
+  key files signed under it stop being accepted within one lifetime. Pass `clientLifetime` to the
+  constructor to shorten that window.
 - **The context** is bound into every key file's signature and must be given again, exactly, to
   reveal it. Use one value per application, so a key file made for one can't be used by another
   that shares the keys. It isn't secret.

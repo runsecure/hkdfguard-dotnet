@@ -42,9 +42,19 @@ public sealed class VaultResponseException : HttpRequestException
             return new VaultResponseException($"{(int)status} {reason}: {string.Join(", ", errors)}", status, errors, null, method, uri);
 
         var raw = body.IsEmpty ? null : body.ToArray();
-        var message = raw is null ? $"{(int)status} {reason}" : $"{(int)status} {reason}: {Encoding.UTF8.GetString(raw)}";
+        var message = raw is null ? $"{(int)status} {reason}" : $"{(int)status} {reason}: {Quote(raw)}";
         return new VaultResponseException(message, status, [], raw, method, uri);
     }
+
+    /// <summary>The most bytes of a body that isn't Vault's error list quoted in the message; RawResponseBytes holds it whole.</summary>
+    internal const int MaxQuotedBodyBytes = 1024;
+
+    // A body that isn't Vault's - a proxy's HTML page, say - can be large, and the message is what
+    // gets logged: quote its start only.
+    private static string Quote(byte[] raw)
+        => raw.Length <= MaxQuotedBodyBytes
+            ? Encoding.UTF8.GetString(raw)
+            : $"{Encoding.UTF8.GetString(raw, 0, MaxQuotedBodyBytes)}... ({raw.Length} bytes in all)";
 
     private static List<string>? ReadErrors(ReadOnlySpan<byte> body)
     {

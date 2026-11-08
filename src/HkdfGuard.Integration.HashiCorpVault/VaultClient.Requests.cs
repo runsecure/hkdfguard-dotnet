@@ -17,7 +17,7 @@ public sealed partial class VaultClient
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(path);
-        return SendAsync<Dictionary<string, JsonElement>>(HttpMethod.Get, V1Path(path), null, QueryParameters(options), options, cancellationToken);
+        return SendAsync<Dictionary<string, JsonElement>>(HttpMethod.Get, GenericPath(path), null, QueryParameters(options), options, cancellationToken);
     }
 
     /// <summary>
@@ -28,7 +28,7 @@ public sealed partial class VaultClient
     public async Task<HttpResponseMessage> ReadRawAsync(string path, VaultRequestOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(path);
-        var (response, _) = await SendCoreAsync(HttpMethod.Get, V1Path(path), null, QueryParameters(options), options, cancellationToken)
+        var (response, _) = await SendCoreAsync(HttpMethod.Get, GenericPath(path), null, QueryParameters(options), options, cancellationToken)
             .ConfigureAwait(false);
         return response;
     }
@@ -40,7 +40,7 @@ public sealed partial class VaultClient
     {
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(body);
-        return SendAsync<Dictionary<string, JsonElement>>(HttpMethod.Post, V1Path(path), body, QueryParameters(options), options, cancellationToken);
+        return SendAsync<Dictionary<string, JsonElement>>(HttpMethod.Post, GenericPath(path), body, QueryParameters(options), options, cancellationToken);
     }
 
     /// <summary>Writes body as it is to path (POST /v1/path).</summary>
@@ -49,7 +49,7 @@ public sealed partial class VaultClient
         VaultRequestOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(path);
-        return SendBytesAsync<Dictionary<string, JsonElement>>(HttpMethod.Post, V1Path(path), body, QueryParameters(options), options, cancellationToken);
+        return SendBytesAsync<Dictionary<string, JsonElement>>(HttpMethod.Post, GenericPath(path), body, QueryParameters(options), options, cancellationToken);
     }
 
     /// <summary>
@@ -75,7 +75,7 @@ public sealed partial class VaultClient
         ArgumentNullException.ThrowIfNull(path);
         var query = QueryParameters(options);
         query.Add(new("list", "true"));
-        return SendAsync<Dictionary<string, JsonElement>>(HttpMethod.Get, V1Path(path), null, query, options, cancellationToken);
+        return SendAsync<Dictionary<string, JsonElement>>(HttpMethod.Get, GenericPath(path), null, query, options, cancellationToken);
     }
 
     /// <summary>Deletes the value at path (DELETE /v1/path).</summary>
@@ -84,7 +84,7 @@ public sealed partial class VaultClient
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(path);
-        return SendAsync<Dictionary<string, JsonElement>>(HttpMethod.Delete, V1Path(path), null, QueryParameters(options), options, cancellationToken);
+        return SendAsync<Dictionary<string, JsonElement>>(HttpMethod.Delete, GenericPath(path), null, QueryParameters(options), options, cancellationToken);
     }
 
     /// <summary>
@@ -129,12 +129,28 @@ public sealed partial class VaultClient
             using (request)
             using (response)
             {
+                // Bounded: a misrouted proxy or an impostor could otherwise send a body of any size
+                // into pinned memory. A Content-Length over the limit is refused before reading.
+                var maxLength = _options.MaxResponseBytes;
+                if (response.Content.Headers.ContentLength > maxLength)
+                    throw new InvalidDataException(
+                        $"Vault's response to {method} {path} is {response.Content.Headers.ContentLength} bytes, over MaxResponseBytes ({maxLength}).");
+
                 // Unbuffered by HttpClient, whose pooled buffer would be returned uncleared: read into
                 // pinned memory, zeroed once parsed.
                 using var content = new SecureBufferWriter(response.Content.Headers.ContentLength);
                 var stream = await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
                 await using (stream.ConfigureAwait(false))
-                    await content.ReadFromAsync(stream, token).ConfigureAwait(false);
+                {
+                    try
+                    {
+                        await content.ReadFromAsync(stream, maxLength, token).ConfigureAwait(false);
+                    }
+                    catch (InvalidDataException e)
+                    {
+                        throw new InvalidDataException($"Vault's response to {method} {path} is over MaxResponseBytes ({maxLength}).", e);
+                    }
+                }
 
                 // sys/health answers 429, 472, 473, 501 and 503 with the health status itself.
                 if (!IsSuccess(response.StatusCode) && path != HealthPath)
@@ -367,6 +383,51 @@ public sealed partial class VaultClient
         return "?" + string.Join('&', query
             .OrderBy(p => p.Key, StringComparer.Ordinal)
             .Select(p => Uri.EscapeDataString(p.Key) + "=" + Uri.EscapeDataString(p.Value)));
+    }
+
+    // A caller's path for the generic methods, under /v1/ - refused if System.Uri would send it
+    // anywhere but where it reads. Uri resolves "." and ".." segments ("secret/data/../../sys/..."
+    // leaves the mount), ends the path at '?' or '#' ("foo?list=true" turns a read into a list),
+    // decodes some %-escapes before resolving them, and treats '\' as '/'. A path built from
+    // anything the caller doesn't control would otherwise reach paths other than the one intended,
+    // with the client's token.
+    internal static string GenericPath(string path)
+    {
+        if (!IsValidGenericPath(path))
+            throw new ArgumentException(
+                "The path must be '/'-separated segments with none empty, '.' or '..', and no '?', '#', '%', '\\' or control character; " +
+                "escape or validate names that come from outside the application before putting them in a path.", nameof(path));
+        return V1Path(path);
+    }
+
+    /// <summary>
+    /// Whether path is safe for the generic methods: one optional leading and one optional trailing
+    /// '/', between them non-empty segments other than "." and "..", and no '?', '#', '%', '\' or
+    /// control character. Any other character, non-ASCII included, is sent percent-encoded as itself.
+    /// </summary>
+    internal static bool IsValidGenericPath(ReadOnlySpan<char> path)
+    {
+        if (path.StartsWith('/'))
+            path = path[1..];
+        if (path.EndsWith('/'))
+            path = path[..^1];
+        if (path.IsEmpty)
+            return false;
+
+        foreach (var c in path)
+        {
+            if (c is '?' or '#' or '%' or '\\' || char.IsControl(c))
+                return false;
+        }
+
+        foreach (var range in path.Split('/'))
+        {
+            var segment = path[range];
+            if (segment.IsEmpty || segment is "." or "..")
+                return false;
+        }
+
+        return true;
     }
 
     // path under /v1/, whether or not it starts with "/", "v1/" or "/v1/" already.

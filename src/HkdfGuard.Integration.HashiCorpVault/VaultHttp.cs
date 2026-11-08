@@ -375,6 +375,30 @@ public static class VaultHttp
         _ => false,
     };
 
+    /// <summary>The most bytes <see cref="ReadErrorsAsync"/> reads of an error body; Vault's own are far smaller.</summary>
+    public const int MaxErrorBodyBytes = 64 * 1024;
+
+    /// <summary>
+    /// <see cref="ReadErrors"/> over an error response body read from stream, reading at most
+    /// <see cref="MaxErrorBodyBytes"/> + 1 bytes: a longer body isn't Vault's, so it gives null without
+    /// being read whole.
+    /// </summary>
+    public static async Task<string[]?> ReadErrorsAsync(Stream body, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(body);
+        var buffer = new byte[MaxErrorBodyBytes + 1];
+        var length = 0;
+        while (length < buffer.Length)
+        {
+            var read = await body.ReadAsync(buffer.AsMemory(length), cancellationToken).ConfigureAwait(false);
+            if (read == 0)
+                break;
+            length += read;
+        }
+
+        return length > MaxErrorBodyBytes ? null : ReadErrors(buffer.AsSpan(0, length));
+    }
+
     /// <summary>
     /// The errors Vault listed in an error response body: its "errors" array, each as text; empty if
     /// it has none; null if the body isn't Vault's JSON - a proxy's page, say.

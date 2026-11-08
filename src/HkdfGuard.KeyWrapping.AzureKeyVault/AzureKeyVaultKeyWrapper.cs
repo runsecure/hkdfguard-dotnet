@@ -31,6 +31,15 @@ namespace HkdfGuard.KeyWrapping.AzureKeyVault;
 /// naming a version Key Vault refuses leaves nothing behind.
 /// </para>
 /// <para>
+/// A kept client is replaced once it is <see cref="ClientLifetime"/> old (5 minutes unless
+/// configured otherwise). The Azure SDK verifies a signature in this process, with a public key it
+/// fetched once and never checks again, so a client kept for good would go on accepting key files
+/// signed under a version you have since disabled or purged - after a signing identity is
+/// compromised, exactly the files you are trying to refuse. A fresh client asks Key Vault again, so
+/// disabling or purging a signing key version stops a running process accepting it within one
+/// lifetime. The cost is one key read per key version per lifetime.
+/// </para>
+/// <para>
 /// The optional context is bound into the signature, and must be given again, exactly, to reveal
 /// the DEK: a key file made for one application can't be used by another that shares the keys.
 /// Key Vault has no "generate data key", so <see cref="GenerateAndWrapAsync"/> generates the DEK in
@@ -47,12 +56,20 @@ public sealed class AzureKeyVaultKeyWrapper : IKeyWrapper
     /// <summary>The largest plaintext RSA-OAEP-256 wraps under a 2048-bit key, in bytes.</summary>
     public const int MaxPlaintextLength = 190;
 
+    /// <summary>How long a Key Vault client is kept for a key version, unless configured otherwise: 5 minutes.</summary>
+    public static readonly TimeSpan DefaultClientLifetime = TimeSpan.FromMinutes(5);
+
+    /// <summary>The longest <see cref="ClientLifetime"/> accepted: 1 hour.</summary>
+    public static readonly TimeSpan MaxClientLifetime = TimeSpan.FromHours(1);
+
     private readonly KeyVaultKeyIdentifier _wrappingKey;
     private readonly KeyVaultKeyIdentifier _signingKey;
     private readonly Uri _wrappingKeyId;
     private readonly Uri _signingKeyId;
     private readonly Func<Uri, CryptographyClient> _clientFactory;
-    private readonly ConcurrentDictionary<Uri, CryptographyClient> _clients = new();
+    // Each kept client with the TimeProvider timestamp it was created at.
+    private readonly ConcurrentDictionary<Uri, (CryptographyClient Client, long CreatedAt)> _clients = new();
+    private readonly TimeProvider _timeProvider;
     private readonly byte[] _context;
     private readonly KeyFileTrust _keyFileTrust;
 
@@ -66,20 +83,31 @@ public sealed class AzureKeyVaultKeyWrapper : IKeyWrapper
     /// <param name="keyFileTrust">Who besides the operating system's administrators may have
     /// written a key file <see cref="ReadKeyFileAsync"/> reads; null trusts administrators only.</param>
     /// <param name="options">Options for the Key Vault clients; null for the defaults.</param>
+    /// <param name="clientLifetime">How long a Key Vault client is kept for a key version before a
+    /// fresh one replaces it, which bounds how long a disabled or purged signing key version keeps
+    /// verifying in a running process; null for <see cref="DefaultClientLifetime"/>.</param>
     /// <exception cref="ArgumentNullException">A key identifier or the credential is null</exception>
     /// <exception cref="ArgumentException">A key identifier isn't a Key Vault key's, both name the
     /// same key, or the context is too long</exception>
+    /// <exception cref="ArgumentOutOfRangeException">clientLifetime is not positive, or is over
+    /// <see cref="MaxClientLifetime"/></exception>
     public AzureKeyVaultKeyWrapper(Uri wrappingKeyId, Uri signingKeyId, TokenCredential credential,
-        string? context = null, KeyFileTrust? keyFileTrust = null, CryptographyClientOptions? options = null)
-        : this(wrappingKeyId, signingKeyId, ClientFactory(credential, options), context, keyFileTrust)
+        string? context = null, KeyFileTrust? keyFileTrust = null, CryptographyClientOptions? options = null,
+        TimeSpan? clientLifetime = null)
+        : this(wrappingKeyId, signingKeyId, ClientFactory(credential, options), context, keyFileTrust, clientLifetime)
     {
     }
 
     internal AzureKeyVaultKeyWrapper(Uri wrappingKeyId, Uri signingKeyId, Func<Uri, CryptographyClient> clientFactory,
-        string? context, KeyFileTrust? keyFileTrust)
+        string? context, KeyFileTrust? keyFileTrust, TimeSpan? clientLifetime = null, TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(wrappingKeyId);
         ArgumentNullException.ThrowIfNull(signingKeyId);
+
+        var lifetime = clientLifetime ?? DefaultClientLifetime;
+        if (lifetime <= TimeSpan.Zero || lifetime > MaxClientLifetime)
+            throw new ArgumentOutOfRangeException(nameof(clientLifetime), lifetime,
+                $"The client lifetime must be positive and at most {MaxClientLifetime}.");
 
         _wrappingKey = new KeyVaultKeyIdentifier(wrappingKeyId);
         _signingKey = new KeyVaultKeyIdentifier(signingKeyId);
@@ -92,7 +120,16 @@ public sealed class AzureKeyVaultKeyWrapper : IKeyWrapper
         _clientFactory = clientFactory;
         _context = WrappedDekEnvelope.EncodeContext(context);
         _keyFileTrust = keyFileTrust ?? KeyFileTrust.AdministratorsOnly;
+        ClientLifetime = lifetime;
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
+
+    /// <summary>
+    /// How long a Key Vault client is kept for a key version before a fresh one replaces it - and so
+    /// how long, at most, a running process goes on verifying under a signing key version that has
+    /// been disabled or purged.
+    /// </summary>
+    public TimeSpan ClientLifetime { get; }
 
     /// <inheritdoc/>
     /// <exception cref="ArgumentException">plaintext is empty or over <see cref="MaxPlaintextLength"/>
@@ -256,18 +293,28 @@ public sealed class AzureKeyVaultKeyWrapper : IKeyWrapper
     // public key it verifies with, and a ring's refresh unwraps under the same versions every
     // interval. But a client is kept only once a call through it succeeds and its response is
     // accepted: the versions unwrap uses come from the wrapped DEK, so a payload naming a version
-    // Key Vault refuses, or whose signature doesn't verify, leaves nothing behind. CryptographyClient
-    // holds nothing to dispose, so a client that isn't kept - refused, or another call cached one for
-    // the same key first - is simply dropped.
+    // Key Vault refuses, or whose signature doesn't verify, leaves nothing behind. A kept client is
+    // used for ClientLifetime and then dropped, so the next call fetches the key again and a version
+    // disabled or purged since is refused (see the class remarks). CryptographyClient holds nothing
+    // to dispose, so a client that isn't kept is simply dropped.
     private async Task<TResult> CallAsync<T, TResult>(Uri keyId, Func<CryptographyClient, Task<T>> call, Func<T, TResult> accept,
         string operation, KeyVaultKeyIdentifier key)
     {
         if (_clients.TryGetValue(keyId, out var cached))
-            return accept(await CallAsync(() => call(cached), operation, key).ConfigureAwait(false));
+        {
+            if (_timeProvider.GetElapsedTime(cached.CreatedAt) < ClientLifetime)
+                return accept(await CallAsync(() => call(cached.Client), operation, key).ConfigureAwait(false));
 
+            // Expired: never used again, whether or not its replacement succeeds.
+            _clients.TryRemove(new KeyValuePair<Uri, (CryptographyClient, long)>(keyId, cached));
+        }
+
+        var createdAt = _timeProvider.GetTimestamp();
         var client = _clientFactory(keyId);
         var result = accept(await CallAsync(() => call(client), operation, key).ConfigureAwait(false));
-        _clients.TryAdd(keyId, client);
+        // Keep the newer of this client and one a concurrent call kept meanwhile.
+        _clients.AddOrUpdate(keyId, (client, createdAt),
+            (_, existing) => existing.CreatedAt >= createdAt ? existing : (client, createdAt));
         return result;
     }
 

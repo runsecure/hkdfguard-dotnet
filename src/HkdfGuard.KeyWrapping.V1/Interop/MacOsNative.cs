@@ -9,8 +9,10 @@ namespace HkdfGuard.KeyWrapping.V1.Interop;
 /// The macOS system calls MacOsNativeLibraryLoader's checks rely on: lstat for ownership,
 /// permissions and type; geteuid and getpwuid_r for the user's home; dladdr for which file dyld really loaded; and the Security
 /// framework's static code signature check. Every import names a system library by absolute
-/// path - and the runtime resolves these by name, not through dlopen with a path, so
-/// DYLD_LIBRARY_PATH's leaf-name override (see the loader) does not apply to them.
+/// path. The runtime dlopens that path as given, and dyld still looks for its leaf name in every
+/// DYLD_LIBRARY_PATH directory first (dlopen(3)) - or, for a framework, in DYLD_FRAMEWORK_PATH - so
+/// the loader refuses both before any of these is first called (see
+/// MacOsNativeLibraryLoader.RefuseShadowing and ShadowableLeafNames).
 /// </summary>
 [SupportedOSPlatform("macos")]
 [ExcludeFromCodeCoverage(Justification = "Thin P/Invoke bindings to macOS system libraries; the policy they feed is covered by MacOsNativeLibraryLoaderTests on every platform.")]
@@ -18,6 +20,7 @@ internal static unsafe partial class MacOsNative
 {
     private const string LibSystem = "/usr/lib/libSystem.B.dylib";
     private const string CoreFoundation = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
+    // Their leaf names are listed again in MacOsNativeLibraryLoader.ShadowableLeafNames: keep both in step.
     private const string Security = "/System/Library/Frameworks/Security.framework/Security";
 
     // struct stat on arm64, the only architecture the loader runs on (it refuses x64 first, so the

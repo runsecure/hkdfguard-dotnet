@@ -117,6 +117,13 @@ var keys = await vault.ListAsync("secret/metadata/myapp");
 await vault.DeleteAsync("secret/metadata/myapp/flags");
 ```
 
+The generic methods refuse a path with an empty, `.` or `..` segment, or holding `?`, `#`, `%`,
+`\` or a control character, with `ArgumentException`. Each of these would otherwise make the
+request reach a different path than the one written: `secret/data/` + `../../sys/policies/acl/root`
+leaves the mount, and `foo?list=true` turns a read into a list. Put query parameters in
+`VaultRequestOptions.QueryParameters` instead. A name from outside your application can still
+name any secret under the path you put it in, so check it against what that caller may read.
+
 `VaultRequestOptions` sets things for one request: another token, a namespace, extra headers or
 query parameters, MFA credentials, response wrapping, or a forwarding mode. The client's own
 `Set...` methods set them for every later request, and a request's settings win over the client's.

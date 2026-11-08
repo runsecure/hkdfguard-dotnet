@@ -116,18 +116,53 @@ internal sealed record RequestModifiers
         }
     }
 
-    /// <exception cref="ArgumentException">A header is named X-Vault-*, or has no name</exception>
+    /// <summary>
+    /// Refuses custom headers that could change the request beyond themselves. Headers are added
+    /// without .NET's own validation (which would reject some values Vault accepts), and .NET then
+    /// writes a value's characters to the wire as they are - so a CR or LF in a value would end the
+    /// header and start another, such as an X-Vault-Token or X-Vault-Namespace of the caller's choosing.
+    /// Names must be RFC 9110 tokens, and values printable ASCII, space or tab.
+    /// </summary>
+    /// <exception cref="ArgumentException">A header has no name or an invalid one, is named X-Vault-*,
+    /// has no values, or has a null value or one holding a CR, LF or other control or non-ASCII character</exception>
     public static void ValidateCustomHeaders(IReadOnlyDictionary<string, IReadOnlyList<string>>? headers)
     {
         if (headers is null)
             return;
 
-        foreach (var name in headers.Keys)
+        foreach (var (name, values) in headers)
         {
-            if (string.IsNullOrWhiteSpace(name))
-                throw new ArgumentException("A custom header must have a name.", nameof(headers));
+            if (string.IsNullOrEmpty(name) || name.AsSpan().ContainsAnyExcept(HeaderNameCharacters))
+                throw new ArgumentException("A custom header must have a name of letters, digits and !#$%&'*+-.^_`|~ only.", nameof(headers));
             if (name.StartsWith("X-Vault-", StringComparison.OrdinalIgnoreCase))
                 throw new ArgumentException($"The custom header '{name}' isn't allowed: the 'X-Vault-' prefix is for the client's own use.", nameof(headers));
+            if (values is null)
+                throw new ArgumentException($"The custom header '{name}' has no values.", nameof(headers));
+
+            foreach (var value in values)
+            {
+                // The value isn't quoted: it may be a credential.
+                if (value is null || !IsValidHeaderValue(value))
+                    throw new ArgumentException(
+                        $"A value of the custom header '{name}' is null or holds a character other than printable ASCII, space or tab, such as CR or LF.", nameof(headers));
+            }
         }
+    }
+
+    // RFC 9110 tchar.
+    private static readonly System.Buffers.SearchValues<char> HeaderNameCharacters =
+        System.Buffers.SearchValues.Create("!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz");
+
+    // RFC 9110 field-value restricted to ASCII: VCHAR, SP and HTAB. CR, LF, NUL and every other
+    // control character are refused.
+    private static bool IsValidHeaderValue(ReadOnlySpan<char> value)
+    {
+        foreach (var c in value)
+        {
+            if (c is not ('\t' or (>= ' ' and <= '~')))
+                return false;
+        }
+
+        return true;
     }
 }

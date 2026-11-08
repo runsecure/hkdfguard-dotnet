@@ -304,6 +304,75 @@ public sealed class AzureKeyVaultKeyWrapperTests : IDisposable
         Assert.Equal(0, wrapper.CachedClientCount);
     }
 
+    private sealed class ManualClock : TimeProvider
+    {
+        public long Ticks { get; set; }
+
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+
+        public override long GetTimestamp() => Ticks;
+
+        public void Advance(TimeSpan by) => Ticks += by.Ticks;
+    }
+
+    [Fact]
+    public async Task APurgedSigningVersion_KeepsVerifyingOnlyUntilTheClientLifetimeRunsOut()
+    {
+        var dek = RandomNumberGenerator.GetBytes(32);
+        var wrapped = await Wrap(Wrapper(), dek);
+        var signingVersion = WrappedDekEnvelope.Parse(wrapped).SigningKeyVersion;
+        var clock = new ManualClock();
+        var wrapper = new AzureKeyVaultKeyWrapper(FakeKeyVault.WrappingKeyId, FakeKeyVault.SigningKeyId, _vault.Client, Context,
+            keyFileTrust: null, clientLifetime: TimeSpan.FromMinutes(5), timeProvider: clock);
+        Assert.Equal(dek, await Unwrap(wrapper, wrapped));
+
+        // Revoke the signing version, as an operator would after the signing identity leaked. The
+        // kept client verifies locally with the public key it already holds, so it still accepts.
+        _vault.AddVersion(FakeKeyVault.SigningKeyName, ECDsa.Create(ECCurve.NamedCurves.nistP256));
+        _vault.Purge(FakeKeyVault.SigningKeyName, signingVersion);
+        clock.Advance(TimeSpan.FromMinutes(4));
+        Assert.Equal(dek, await Unwrap(wrapper, wrapped));
+
+        // Past the lifetime a fresh client asks Key Vault, which no longer has the version.
+        clock.Advance(TimeSpan.FromMinutes(1));
+        var ex = await Assert.ThrowsAsync<CryptographicException>(async () => await Unwrap(wrapper, wrapped));
+        Assert.IsType<RequestFailedException>(ex.InnerException);
+    }
+
+    [Fact]
+    public async Task AnExpiredClient_IsReplaced_AndTheReplacementIsKept()
+    {
+        var dek = RandomNumberGenerator.GetBytes(32);
+        var wrapped = await Wrap(Wrapper(), dek);
+        var clock = new ManualClock();
+        var created = 0;
+        var wrapper = new AzureKeyVaultKeyWrapper(FakeKeyVault.WrappingKeyId, FakeKeyVault.SigningKeyId,
+            keyId => { Interlocked.Increment(ref created); return _vault.Client(keyId); }, Context,
+            keyFileTrust: null, clientLifetime: TimeSpan.FromMinutes(5), timeProvider: clock);
+
+        await Unwrap(wrapper, wrapped);
+        await Unwrap(wrapper, wrapped);
+        Assert.Equal(2, created);
+
+        clock.Advance(TimeSpan.FromMinutes(5));
+        await Unwrap(wrapper, wrapped);
+        await Unwrap(wrapper, wrapped);
+        Assert.Equal(4, created);
+        Assert.Equal(2, wrapper.CachedClientCount);
+    }
+
+    [Fact]
+    public void ClientLifetime_DefaultsToFiveMinutes_AndMustBePositiveAndAtMostAnHour()
+    {
+        Assert.Equal(TimeSpan.FromMinutes(5), Wrapper().ClientLifetime);
+        Assert.Equal(TimeSpan.FromHours(1), new AzureKeyVaultKeyWrapper(FakeKeyVault.WrappingKeyId, FakeKeyVault.SigningKeyId,
+            _vault.Client, Context, null, AzureKeyVaultKeyWrapper.MaxClientLifetime).ClientLifetime);
+
+        foreach (var bad in new[] { TimeSpan.Zero, TimeSpan.FromSeconds(-1), AzureKeyVaultKeyWrapper.MaxClientLifetime + TimeSpan.FromTicks(1) })
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                new AzureKeyVaultKeyWrapper(FakeKeyVault.WrappingKeyId, FakeKeyVault.SigningKeyId, _vault.Client, Context, null, bad));
+    }
+
     [Fact]
     public async Task ConcurrentUnwraps_UnderNewVersions_KeepOneClientPerVersion()
     {
