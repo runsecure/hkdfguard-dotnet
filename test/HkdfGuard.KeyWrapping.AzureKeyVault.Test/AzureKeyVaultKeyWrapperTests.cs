@@ -304,6 +304,65 @@ public sealed class AzureKeyVaultKeyWrapperTests : IDisposable
         Assert.Equal(0, wrapper.CachedClientCount);
     }
 
+    [Fact]
+    public async Task Unwrap_OfMoreThanTheWrappedKeyLimit_IsRefused_BeforeParsingOrCallingKeyVault()
+    {
+        var oversized = new byte[WrappedKeyLimits.MaxBytes + 1];
+        var result = RandomNumberGenerator.GetBytes(64);
+
+        var ex = await Assert.ThrowsAsync<CryptographicException>(async () => await Wrapper().UnwrapAsync(oversized, result));
+
+        Assert.Contains($"at most {WrappedKeyLimits.MaxBytes}", ex.Message);
+        Assert.Empty(_vault.Calls);
+        Assert.All(result, b => Assert.Equal(0, b));
+    }
+
+    [Fact]
+    public async Task AVersionedSigningKeyId_AcceptsOnlyFilesSignedUnderThatVersion_WithoutAskingKeyVaultOtherwise()
+    {
+        var dek = RandomNumberGenerator.GetBytes(32);
+        var oldVersion = _vault.CurrentVersion(FakeKeyVault.SigningKeyName);
+        var oldFile = await Wrap(Wrapper(), dek);
+
+        // Rotate the signing key, and make a file under the new version.
+        var newVersion = _vault.AddVersion(FakeKeyVault.SigningKeyName, ECDsa.Create(ECCurve.NamedCurves.nistP256));
+        var newFile = await Wrap(Wrapper(), dek);
+
+        var pinnedOld = Wrapper(signingKeyId: new Uri(FakeKeyVault.SigningKeyId + "/" + oldVersion));
+        var pinnedNew = Wrapper(signingKeyId: new Uri(FakeKeyVault.SigningKeyId + "/" + newVersion.ToUpperInvariant()));
+
+        Assert.Equal(dek, await Unwrap(pinnedOld, oldFile));
+        Assert.Equal(dek, await Unwrap(pinnedNew, newFile)); // versions match ignoring case
+
+        _vault.Calls.Clear();
+        var refused = await Assert.ThrowsAsync<CryptographicException>(async () => await Unwrap(pinnedNew, oldFile));
+        Assert.Contains($"version {oldVersion}", refused.Message);
+        Assert.Contains("pinned", refused.Message);
+        await Assert.ThrowsAsync<CryptographicException>(async () => await Unwrap(pinnedOld, newFile));
+        Assert.Empty(_vault.Calls);
+
+        // Unversioned, both are accepted: rotation needs no change.
+        Assert.Equal(dek, await Unwrap(Wrapper(), oldFile));
+        Assert.Equal(dek, await Unwrap(Wrapper(), newFile));
+    }
+
+    [Fact]
+    public async Task AVersionedWrappingKeyId_AcceptsOnlyFilesWrappedUnderThatVersion()
+    {
+        var dek = RandomNumberGenerator.GetBytes(32);
+        var oldVersion = _vault.CurrentVersion(FakeKeyVault.WrappingKeyName);
+        var oldFile = await Wrap(Wrapper(), dek);
+        _vault.AddVersion(FakeKeyVault.WrappingKeyName, RSA.Create(2048));
+        var newFile = await Wrap(Wrapper(), dek);
+
+        var pinnedOld = Wrapper(wrappingKeyId: new Uri(FakeKeyVault.WrappingKeyId + "/" + oldVersion));
+
+        Assert.Equal(dek, await Unwrap(pinnedOld, oldFile));
+        _vault.Calls.Clear();
+        await Assert.ThrowsAsync<CryptographicException>(async () => await Unwrap(pinnedOld, newFile));
+        Assert.Empty(_vault.Calls);
+    }
+
     private sealed class ManualClock : TimeProvider
     {
         public long Ticks { get; set; }

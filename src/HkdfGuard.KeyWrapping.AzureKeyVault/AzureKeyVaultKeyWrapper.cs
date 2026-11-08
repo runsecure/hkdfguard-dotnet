@@ -26,7 +26,11 @@ namespace HkdfGuard.KeyWrapping.AzureKeyVault;
 /// Both keys are pinned: a wrapped DEK records only the key versions it was made with (see
 /// WrappedDekEnvelope), and the vault and key names always come from the constructor. Rotating
 /// either key in Key Vault therefore needs nothing here - existing key files keep naming the
-/// version that made them, which must stay enabled while they're in use. The wrapper keeps one
+/// version that made them, which must stay enabled while they're in use. A key identifier given
+/// with a version pins that key instead: the wrapper wraps or signs under that version only, and
+/// refuses a wrapped DEK naming any other before calling Key Vault - so after a signing identity is
+/// compromised, pinning the new signing version refuses every file signed under an older one at once,
+/// without waiting on Key Vault. The wrapper keeps one
 /// Key Vault client per key version, but only once a call through it succeeds, so a wrapped DEK
 /// naming a version Key Vault refuses leaves nothing behind.
 /// </para>
@@ -171,14 +175,26 @@ public sealed class AzureKeyVaultKeyWrapper : IKeyWrapper
 
     /// <inheritdoc/>
     /// <exception cref="ArgumentException">result is too small for the revealed key</exception>
-    /// <exception cref="CryptographicException">wrapped isn't a wrapped DEK this wrapper wrote, its
-    /// signature doesn't verify (forged, tampered with, or under a different context), Key Vault
-    /// refused it, or Key Vault could not be reached (the Azure exception is the inner exception)</exception>
+    /// <exception cref="CryptographicException">wrapped is over <see cref="WrappedKeyLimits.MaxBytes"/>
+    /// bytes, isn't a wrapped DEK this wrapper wrote, names a key version other than one a versioned
+    /// key identifier pins, its signature doesn't verify (forged, tampered with, or under a different
+    /// context), Key Vault refused it, or Key Vault could not be reached (the Azure exception is the
+    /// inner exception)</exception>
     public async ValueTask<int> UnwrapAsync(ReadOnlyMemory<byte> wrapped, Memory<byte> result, CancellationToken cancellationToken = default)
     {
         try
         {
+            // Bounded before anything is parsed or copied, as every other key wrapper is: the
+            // envelope's 16-bit length field would otherwise allow some 64 KiB.
+            if (wrapped.Length > WrappedKeyLimits.MaxBytes)
+                throw new CryptographicException(
+                    $"The wrapped DEK is {wrapped.Length} bytes; a wrapped DEK is at most {WrappedKeyLimits.MaxBytes}.");
+
             var parts = WrappedDekEnvelope.Parse(wrapped.Span);
+
+            // Before any call to Key Vault: a versioned key identifier accepts that version only.
+            RequirePinnedVersion(_signingKey, parts.SigningKeyVersion, "signed");
+            RequirePinnedVersion(_wrappingKey, parts.WrappingKeyVersion, "wrapped");
 
             // The signature first: nothing reaches UnwrapKey that a principal allowed to sign didn't make.
             var signed = WrappedDekEnvelope.SignedData(wrapped.Span[..parts.UnsignedLength], _context);
@@ -262,6 +278,15 @@ public sealed class AzureKeyVaultKeyWrapper : IKeyWrapper
 
     // The number of clients kept, for tests.
     internal int CachedClientCount => _clients.Count;
+
+    // A key identifier given with a version pins it: a wrapped DEK naming any other is refused. One
+    // given without a version accepts whatever version the wrapped DEK names, for rotation.
+    private static void RequirePinnedVersion(KeyVaultKeyIdentifier key, string recorded, string made)
+    {
+        if (!string.IsNullOrEmpty(key.Version) && !string.Equals(key.Version, recorded, StringComparison.OrdinalIgnoreCase))
+            throw new CryptographicException(
+                $"The wrapped DEK was {made} under '{key.Name}' version {recorded}, but this wrapper is pinned to version {key.Version}.");
+    }
 
     private static Uri VersionId(KeyVaultKeyIdentifier key, string version)
         => new($"{key.VaultUri.AbsoluteUri.TrimEnd('/')}/keys/{key.Name}/{version}");
