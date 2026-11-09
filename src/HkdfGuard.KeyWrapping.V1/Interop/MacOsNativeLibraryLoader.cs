@@ -124,13 +124,17 @@ internal static class MacOsNativeLibraryLoader
 
             RequireSupportedPlatform(RuntimeInformation.ProcessArchitecture, Environment.OSVersion.Version);
 
+            // First, before any check that calls a system library: the signature check loads
+            // Security.framework on its first use, and a DYLD_FRAMEWORK_PATH or DYLD_LIBRARY_PATH
+            // substitute for it would then be the one answering "signature valid".
+            RefuseShadowing(Environment.GetEnvironmentVariable, File.Exists);
+
             var (path, isSystem) = ChoosePath(MacOsNative.Probe, MacOsNative.GetAccountHomeDirectory());
 
             uint[] trustedOwners = isSystem ? [0] : [0, MacOsNative.GetEffectiveUserId()];
             VerifyLocation(path, MacOsNative.GetStatus, trustedOwners);
             VerifySignature(path, MacOsNative.CheckCodeSignature);
             VerifyVersion(path, ReadHead(path));
-            RefuseShadowing(Environment.GetEnvironmentVariable, File.Exists);
 
             // dyld may still map a different file than the path asks for (see the class summary),
             // so the loaded image is checked and, if it isn't the verified file, unloaded. The
@@ -357,12 +361,24 @@ internal static class MacOsNativeLibraryLoader
 
         foreach (var directory in searchPath.Split(':', StringSplitOptions.RemoveEmptyEntries))
         {
-            var candidate = $"{directory.TrimEnd('/')}/{FileName}";
-            if (exists(candidate))
-                throw new SecurityException(
-                    $"'{candidate}' is on DYLD_LIBRARY_PATH and would be loaded in place of the verified HkdfGuard native library; refusing to load. Remove it from DYLD_LIBRARY_PATH.");
+            foreach (var leafName in ShadowableLeafNames)
+            {
+                var candidate = $"{directory.TrimEnd('/')}/{leafName}";
+                if (exists(candidate))
+                    throw new SecurityException(leafName == FileName
+                        ? $"'{candidate}' is on DYLD_LIBRARY_PATH and would be loaded in place of the verified HkdfGuard native library; refusing to load. Remove it from DYLD_LIBRARY_PATH."
+                        : $"'{candidate}' is on DYLD_LIBRARY_PATH and would be loaded in place of the system library the loader verifies the HkdfGuard native library with; refusing to load. Remove it from DYLD_LIBRARY_PATH.");
+            }
         }
     }
+
+    /// <summary>
+    /// The leaf names dyld looks for in DYLD_LIBRARY_PATH in place of a library loaded by absolute
+    /// path (dlopen(3)): the HkdfGuard native library's, and those of the system libraries
+    /// MacOsNative binds by absolute path - among them Security.framework, which the signature check
+    /// itself runs in. Keep in step with MacOsNative's library paths.
+    /// </summary>
+    internal static readonly string[] ShadowableLeafNames = [FileName, "libSystem.B.dylib", "CoreFoundation", "Security"];
 
     /// <summary>
     /// Requires that the file dyld reports having loaded is the one that was verified.

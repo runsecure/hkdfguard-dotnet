@@ -12,4 +12,8 @@ internal static partial class Log
     [LoggerMessage(EventId = 2, Level = LogLevel.Information,
         Message = "Vault redirected {Method} {Path} to {Location}; following it.")]
     public static partial void FollowingRedirect(ILogger logger, HttpMethod method, string path, string location);
+
+    [LoggerMessage(EventId = 3, Level = LogLevel.Warning,
+        Message = "Vault's TLS certificate is not being verified (InsecureSkipVerify, VAULT_SKIP_VERIFY): anyone between this process and Vault can read every token and secret. Use this for a throwaway dev server only.")]
+    public static partial void CertificateVerificationSkipped(ILogger logger);
 }

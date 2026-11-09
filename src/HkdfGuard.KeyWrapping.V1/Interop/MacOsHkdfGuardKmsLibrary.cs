@@ -30,6 +30,7 @@ internal sealed partial class MacOsHkdfGuardKmsLibrary : AbstractHkdfGuardKmsLib
     {
         ErrProviderUnavailable => "this Mac has no Secure Enclave",
         ErrPayloadAuthFailed => "AES-GCM authentication failed: the payload was altered, or wrapped for another service under this KEK",
+        ErrPayloadUnsupported => "the wrapped payload's suite is one this native library doesn't implement, or one this Mac's policy refuses (RequirePostQuantum refuses a P-256 payload); check the KEK suite settings in the HkdfGuard policy",
         ErrKekNotFound => "no KEK is provisioned for this service in this keychain mode; run hkdfguard provision",
         ErrKekAccessDenied => "the keychain denied access: it is locked, there is no session to prompt in, or this process isn't allowed",
         ErrKekInvalid => "the keychain item for this service can't be reconstructed into a key",

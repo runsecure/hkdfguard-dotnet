@@ -17,13 +17,21 @@ namespace HkdfGuard.Integration.ConfigurationResolver;
 /// ring's current key, bound to its name as every ProtectedCacheBase entry is, and cached, so later
 /// lookups only decrypt it. A value without items is answered by its source, unchanged.
 /// <para>
-/// <b>Templates are trusted.</b> A template's items may name any value in any source, so every source
-/// must be as trusted as the secrets it can reach: a template comes from whichever source holds its
-/// name, and nothing marks one source as templates only. Items are resolved one level deep: an item
-/// whose value is itself a template inserts that template's text unresolved. A value that is a
-/// template but names a value no source or provider has throws ConfigurationKeyException on lookup,
-/// rather than reporting the name missing. One that resolves to nothing is reported missing, as an
-/// empty value can't be cached.
+/// <b>Only a template source's values are templates.</b> A template's items may name any value in
+/// any source, so whoever can write a template can read, through this application, every secret the
+/// application can. Sources are therefore added in one of two ways. <see cref="AddTemplateSource"/>
+/// registers a source whose values are resolved when they hold items: the application's own
+/// configuration, written only by its deployment pipeline. <see cref="Add"/> registers a source whose
+/// values are answered exactly as stored, items or not, and are never resolved: a shared secret store
+/// whose paths other parties can write. Both kinds answer names and supply a template's items. A
+/// template that names a value in a plain source reads it as intended; a value in a plain source that
+/// happens to hold <c>${...}</c> is returned verbatim, and nothing it names is looked up.
+/// </para>
+/// <para>
+/// Items are resolved one level deep: an item whose value is itself a template inserts that
+/// template's text unresolved. A value that is a template but names a value no source or provider
+/// has throws ConfigurationKeyException on lookup, rather than reporting the name missing. One that
+/// resolves to nothing is reported missing, as an empty value can't be cached.
 /// </para>
 /// <para>
 /// <b>Resolved values are kept until invalidated.</b> When a value a template uses changes - a
@@ -46,6 +54,9 @@ public sealed class ResolvingProtectedCacheCollection : IProtectedReadOnlyCache
     public const int DefaultMaxResolvedLength = 1 << 20;
 
     private readonly List<IProtectedReadOnlyCache> _sources = [];
+    // The sources whose values are resolved when they hold items, by identity: the same instance
+    // added as a plain source and as a template source is one source, and a template source.
+    private readonly HashSet<IProtectedReadOnlyCache> _templateSources = new(ReferenceEqualityComparer.Instance);
     private readonly List<IValueProvider> _valueProviders = [];
     private readonly ResolvedStore _resolved;
     private readonly ConcurrentDictionary<string, IProtectedReadOnlyCache> _plain = new(StringComparer.Ordinal);
@@ -81,13 +92,32 @@ public sealed class ResolvingProtectedCacheCollection : IProtectedReadOnlyCache
 
     /// <summary>
     /// Registers source as an additional lookup source, checked after every source already added -
-    /// for names and for the items in templates alike.
+    /// for names and for the items in templates alike. Its values are never templates: one that
+    /// holds <c>${...}</c> is answered exactly as stored, and nothing it names is looked up. Use this
+    /// for a source other parties can write to, such as a shared secret store; see
+    /// <see cref="AddTemplateSource"/> for one whose values may be templates.
     /// </summary>
     /// <returns>This same collection, for fluent chaining</returns>
     public ResolvingProtectedCacheCollection Add(IProtectedReadOnlyCache source)
     {
         ArgumentNullException.ThrowIfNull(source);
         _sources.Add(source);
+        return this;
+    }
+
+    /// <summary>
+    /// Registers source as an additional lookup source, as <see cref="Add"/> does, whose values are
+    /// also templates: a value of its that holds items is resolved on lookup, from every source (this
+    /// one included) and then every value provider. A template can name any value the application
+    /// can read, so add this way only a source written by parties trusted with every secret in the
+    /// collection - the application's own configuration, say - and never a store others can write to.
+    /// </summary>
+    /// <returns>This same collection, for fluent chaining</returns>
+    public ResolvingProtectedCacheCollection AddTemplateSource(IProtectedReadOnlyCache source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        _sources.Add(source);
+        _templateSources.Add(source);
         return this;
     }
 
@@ -299,6 +329,10 @@ public sealed class ResolvingProtectedCacheCollection : IProtectedReadOnlyCache
         if (source is null)
             return Location.Missing;
 
+        // A plain source's value is never a template: it isn't even read here, let alone parsed.
+        if (!_templateSources.Contains(source))
+            return Remember(name, source, generation);
+
         var template = ReadTemplate(source, name, maxLength, out var length, out var reader);
         if (template is null)
             return Remember(name, source, generation);
@@ -330,6 +364,10 @@ public sealed class ResolvingProtectedCacheCollection : IProtectedReadOnlyCache
         (source, var maxLength) = await FindSourceAsync(name, cancellationToken).ConfigureAwait(false);
         if (source is null)
             return (Location.Missing, null);
+
+        // A plain source's value is never a template: it isn't even read here, let alone parsed.
+        if (!_templateSources.Contains(source))
+            return (Remember(name, source, generation), source);
 
         // The source has the value in hand now, so reading it doesn't fetch.
         var template = ReadTemplate(source, name, maxLength, out var length, out var reader);

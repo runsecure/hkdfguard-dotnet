@@ -17,6 +17,9 @@ namespace HkdfGuard.Cache.HashiCorpVault.Test.TestHelpers;
 /// </summary>
 internal sealed class FakeVault : HttpMessageHandler
 {
+    // Never follows a redirect: says so, as SocketsHttpHandler does, or the Vault code refuses it.
+    public bool AllowAutoRedirect => false;
+
     public const string Token = "hvs.CAESIFakeTokenForTests";
 
     public static readonly Uri Address = new("https://vault.test:8200");

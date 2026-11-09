@@ -94,6 +94,15 @@ public static partial class HkdfGuardLoggerExtensions
         Message = "Key file '{KeyFilePath}' (version {KeyVersion}) has passed its maximum age and no longer encrypts; values under it still decrypt. Deploy a new key file at a higher version.")]
     public static partial void KeyFileExpired(this ILogger logger, int keyVersion, string keyFilePath);
 
+    /// <summary>
+    /// The current key file's last write is further ahead of this host's clock than clock skew
+    /// explains (KeyRingBuilder.KeyFileFutureTolerance), so its age can't be trusted and it doesn't
+    /// encrypt; values under it still decrypt. Logged once per key.
+    /// </summary>
+    [LoggerMessage(EventId = 13, Level = LogLevel.Critical,
+        Message = "Key file '{KeyFilePath}' (version {KeyVersion}) is dated in the future, so its age can't be trusted and it doesn't encrypt; values under it still decrypt. Check the clocks and redeploy the key file.")]
+    public static partial void KeyFileDatedInTheFuture(this ILogger logger, int keyVersion, string keyFilePath);
+
     // ISO 8601 UTC with milliseconds ("2027-01-02T00:00:00.000Z"), whatever the current culture.
     private static string FormatIsoUtc(DateTimeOffset value)
         => value.UtcDateTime.ToString("yyyy'-'MM'-'dd'T'HH':'mm':'ss'.'fff'Z'", System.Globalization.CultureInfo.InvariantCulture);

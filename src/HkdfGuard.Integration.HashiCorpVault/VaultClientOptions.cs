@@ -43,6 +43,18 @@ public sealed class VaultClientOptions
     /// </summary>
     public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromSeconds(60);
 
+    /// <summary>The largest response body the client reads, unless configured otherwise: 16 MiB.</summary>
+    public const int DefaultMaxResponseBytes = 16 * 1024 * 1024;
+
+    /// <summary>
+    /// The largest response body the client reads, in bytes; a larger one fails the request with
+    /// InvalidDataException rather than being read into memory. Vault's own answers are far smaller
+    /// (its whole OpenAPI document is a few MiB); this bounds what a misrouted proxy or an impostor can
+    /// make the client allocate. Not applied to <see cref="VaultClient.ReadRawAsync"/>, whose caller
+    /// reads the body. Default <see cref="DefaultMaxResponseBytes"/>.
+    /// </summary>
+    public int MaxResponseBytes { get; set; } = DefaultMaxResponseBytes;
+
     /// <summary>Which certificates to trust and to present.</summary>
     public VaultTlsOptions Tls { get; set; } = new();
 

@@ -41,6 +41,7 @@ public class KmsLibraryContractTests
         { AbstractHkdfGuardKmsLibrary.ErrFileMalformed, -38 },
         { AbstractHkdfGuardKmsLibrary.ErrFileUntrusted, -39 },
         { AbstractHkdfGuardKmsLibrary.ErrWinGroupInvalid, -64 },
+        { AbstractHkdfGuardKmsLibrary.ErrLinuxGroupInvalid, -80 },
         { AbstractHkdfGuardKmsLibrary.ErrMacAccessControlCreationFailed, -96 },
         { AbstractHkdfGuardKmsLibrary.ErrMacKeyGenerationFailed, -97 },
         { AbstractHkdfGuardKmsLibrary.ErrMacKeychainWriteFailed, -98 },
@@ -72,7 +73,7 @@ public class KmsLibraryContractTests
             Assert.False(string.IsNullOrEmpty(library.DescribeStatus((int)row[0])), $"{platform}: no description for {row[0]}");
 
         // Reserved and unassigned codes, and anything positive, have no meaning to describe.
-        foreach (var unassigned in new[] { -7, -14, -15, -21, -31, -40, -63, -65, -80, -95, -101, 1 })
+        foreach (var unassigned in new[] { -7, -14, -15, -21, -31, -40, -63, -65, -81, -95, -101, 1 })
             Assert.Null(library.DescribeStatus(unassigned));
     }
 
@@ -109,6 +110,10 @@ public class KmsLibraryContractTests
     }
 
     [Fact]
+    public void MacOs_NamesThePolicyThatCanRefuseAPayloadSuite()
+        => Assert.Contains("RequirePostQuantum", new MacOsHkdfGuardKmsLibrary().DescribeStatus(AbstractHkdfGuardKmsLibrary.ErrPayloadUnsupported));
+
+    [Fact]
     public void Linux_DescribesAFingerprintMismatchAsADifferentKek()
         => Assert.Contains("different KEK", new LinuxHkdfGuardKmsLibrary().DescribeStatus(AbstractHkdfGuardKmsLibrary.ErrKekFingerprintMismatch));
 
@@ -136,6 +141,17 @@ public class KmsLibraryContractTests
 
         Assert.Equal(payload, bytes);
         Assert.Equal(@"C:\keys\dek.bin", library.LastOpenFilePath);
+    }
+
+    [Theory]
+    [InlineData("/etc/app/keys/v2.key\0ignored")]
+    [InlineData("\0")]
+    public void OpenFile_RefusesAPathWithANul_WithoutCallingTheNativeLibrary(string path)
+    {
+        var library = new FakeHkdfGuardKmsLibrary { OpenFilePayloadToEmit = new byte[132] };
+
+        Assert.Throws<ArgumentException>("path", () => library.OpenFile(path));
+        Assert.Null(library.LastOpenFilePath);
     }
 
     [Fact]

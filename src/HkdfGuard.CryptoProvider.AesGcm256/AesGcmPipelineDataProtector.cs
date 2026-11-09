@@ -1,3 +1,4 @@
+using System.Buffers.Text;
 using System.Security.Cryptography;
 using System.Text;
 using HkdfGuard.Abstractions;
@@ -90,6 +91,31 @@ public sealed class AesGcmPipelineDataProtector : IPipelineDataProtector
             }
 
             return _base64;
+        }
+    }
+
+    /// <inheritdoc/>
+    /// <exception cref="ObjectDisposedException">This instance has been disposed</exception>
+    public async Task WriteDekAsync(Stream destination, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+
+        // Encoded straight from the key into pinned bytes: never through a string or the char buffer.
+        var ascii = ArrayUtility.AllocatePinned<byte>(Base64.GetMaxEncodedToUtf8Length(KeyLength));
+        try
+        {
+            lock (_gate)
+            {
+                ObjectDisposedException.ThrowIf(_session is null, this);
+                Base64.EncodeToUtf8(_key, ascii, out _, out _);
+            }
+
+            await destination.WriteAsync(ascii, cancellationToken).ConfigureAwait(false);
+            await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            ArrayUtility.ZeroMemory(ascii);
         }
     }
 

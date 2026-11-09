@@ -101,7 +101,7 @@ public static class TrustedKeyFile
         PlaintextKeyLength => true,
         PlaintextKeyLength + 1 => contents[^1] == (byte)'\n',
         PlaintextKeyLength + 2 => contents[^2] == (byte)'\r' && contents[^1] == (byte)'\n',
-        _ => false,
+        _ => false
     };
 
     private static bool IsHexKey(ReadOnlySpan<byte> text)

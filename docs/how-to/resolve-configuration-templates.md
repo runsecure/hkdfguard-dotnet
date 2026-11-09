@@ -117,10 +117,21 @@ var resolver = new ConfigurationResolverBuilder()
 ## 4. Keep templates in the caches themselves
 
 `ResolvingProtectedCacheCollection` resolves templates for you, on lookup. It works like
-`ProtectedCacheCollection`: you add sources, and it checks them in order. When the value it finds
-holds items, it resolves them from the same sources, encrypts the result under your key ring, and
-caches it. Later lookups only decrypt the cached result. A value without items is answered by its
-source, unchanged.
+`ProtectedCacheCollection`: you add sources, and it checks them in order. When a value it finds in
+a **template source** holds items, it resolves them from every source, encrypts the result under
+your key ring, and caches it. Later lookups only decrypt the cached result. A value without items,
+or any value from a plain source, is answered by its source, unchanged.
+
+Sources are added in one of two ways:
+
+- `AddTemplateSource(source)` for a source whose values may be templates. Add this way only a
+  source written by parties you trust with every secret in the collection, such as your own
+  application's configuration, written by its deployment pipeline.
+- `Add(source)` for a source whose values are only ever values. A value from it that happens to
+  hold `${...}` is returned exactly as stored, and nothing it names is looked up. Use this for a
+  shared secret store whose paths other teams or services can write to.
+
+Both kinds answer names and supply the items a template names.
 
 Because it is itself an `IProtectedReadOnlyCache`, anything that reads a cache can read resolved
 templates without knowing they were templates:
@@ -132,7 +143,7 @@ using HkdfGuard.Integration.ConfigurationResolver;
 // "Host=db.internal;Username=${app-config#user};Password=${app-config#password}"
 // under the name "ConnectionStrings:Orders"; vault is a HashiCorpVaultSecretCache.
 var secrets = new ResolvingProtectedCacheCollection(keyRing)
-    .Add(local)
+    .AddTemplateSource(local)
     .Add(vault);
 
 var length = await secrets.GetMaxDecryptedLengthAsync("ConnectionStrings:Orders");
@@ -146,13 +157,18 @@ are asked after every source, such as environment variables for values that aren
 
 ```csharp
 var secrets = new ResolvingProtectedCacheCollection(keyRing)
-    .Add(local)
+    .AddTemplateSource(local)
     .Add(vault)
     .AddValueProvider(new EnvironmentVariableValueProvider());
 ```
 
-> **Security:** Any value in any source that holds `${...}` is a template, and a template can name
-> any value in any source. Add only sources you trust as much as the secrets they can reach.
+> **Security:** A template can name any value in any source and any value provider, so whoever can
+> write a template can read, through your application, everything your application can. That is why
+> only a template source's values are templates. Never add a store that other parties can write to
+> with `AddTemplateSource`: a value they wrote, such as
+> `https://theirs.example/?p=${platform/db-admin#password}`, would otherwise be resolved with your
+> application's access and handed back with the secret inside. Added with `Add`, that value comes
+> back exactly as written.
 
 Some things to know:
 

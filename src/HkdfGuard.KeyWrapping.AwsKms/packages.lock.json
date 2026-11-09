@@ -4,49 +4,49 @@
     "net10.0": {
       "AWSSDK.KeyManagementService": {
         "type": "Direct",
-        "requested": "[4.0.100.19, )",
-        "resolved": "4.0.100.19",
-        "contentHash": "N8qLXZ6dKAAexEzCI2ViroJ/Bm4m8buy1rnVcnkWNlWpO7zmjye9XwVnkx84fpee3kDs4T0fJBGawcNI26eoeg==",
+        "requested": "[4.0.101.2, )",
+        "resolved": "4.0.101.2",
+        "contentHash": "jxF1Ic8EH5Pwv4XqsbD2HlvmcGnbnURCqTotAoAR9Vnr0BHJtXcmYc/rmr/mTc6m+jFzEOhQ8pF3C+qwsnEvuA==",
         "dependencies": {
-          "AWSSDK.Core": "[4.0.102.12, 5.0.0)"
+          "AWSSDK.Core": "[4.0.102.17, 5.0.0)"
         }
       },
       "AWSSDK.Core": {
         "type": "Transitive",
-        "resolved": "4.0.102.12",
-        "contentHash": "/wJwMdRT5e9AbqRFfeazbyAbAZijYMDGlLDGAc07Ob2tPdeEUE0dC0zISIdtdWtCu0lV+oWf3qcsevpd7ejn9g=="
+        "resolved": "4.0.102.17",
+        "contentHash": "GgPhSG8GB0ZkQptRifKaHxEDq7quS4frFW4G9y5fMWv1IwNhWIgLeKeekz6s0+KS9Hpm/niwU60Dwuya9PeeTg=="
       },
       "hkdfguard.abstractions": {
         "type": "Project",
         "dependencies": {
-          "HkdfGuard.Diagnostics": "[1.0.0, )"
+          "HkdfGuard.Diagnostics": "[0.9.1, )"
         }
       },
       "hkdfguard.diagnostics": {
         "type": "Project",
         "dependencies": {
-          "Microsoft.Extensions.Logging.Abstractions": "[10.0.11, )"
+          "Microsoft.Extensions.Logging.Abstractions": "[10.0.14, )"
         }
       },
       "hkdfguard.securefile": {
         "type": "Project",
         "dependencies": {
-          "HkdfGuard.Abstractions": "[1.0.0, )"
+          "HkdfGuard.Abstractions": "[0.9.1, )"
         }
       },
       "Microsoft.Extensions.DependencyInjection.Abstractions": {
         "type": "CentralTransitive",
-        "requested": "[10.0.11, )",
-        "resolved": "10.0.11",
-        "contentHash": "/a1aJz4m7ylhEDf25ugQChLQoN5XwoGjWw/BoR/ZWWKsO1v4DdJElS1uyngahz4B/eOzjFk1KNTkarRLE5wsIg=="
+        "requested": "[10.0.14, )",
+        "resolved": "10.0.14",
+        "contentHash": "QtpQzuSZVyTPCuHW058yCs9Nj0394uUkNyFHS813nOmK9UgUdBdaprJ5PPsBgsQIpxADTsTkbaMMonykem6qdw=="
       },
       "Microsoft.Extensions.Logging.Abstractions": {
         "type": "CentralTransitive",
-        "requested": "[10.0.11, )",
-        "resolved": "10.0.11",
-        "contentHash": "Ljd0Uxoq5XpScD2Bg0nM/r3mwx7Ao5Uq24eo2ARxbGvqJ7Zht6rt2cJtwVRH4Cv+1ZVMdXz6TB43KbpmsxRrvQ==",
+        "requested": "[10.0.14, )",
+        "resolved": "10.0.14",
+        "contentHash": "SwcbEBtkECq3D2oywvHkm46fyrX9Dd2JPWphDnHUc2+cUWR1Mdo41atAjh/9iZjgQxuvbKfZKXqostT/LZfefA==",
         "dependencies": {
-          "Microsoft.Extensions.DependencyInjection.Abstractions": "10.0.11"
+          "Microsoft.Extensions.DependencyInjection.Abstractions": "10.0.14"
         }
       }
     }

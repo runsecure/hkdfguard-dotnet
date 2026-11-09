@@ -58,11 +58,29 @@ public class WindowsKeyFileChecksTests
     [InlineData("S-1-5-32-545")] // Users
     [InlineData("S-1-5-4")]      // Interactive
     [InlineData("S-1-5-7")]      // Anonymous
+    [InlineData("S-1-5-32-546")] // Guests
+    [InlineData("S-1-5-113")]    // Local account
+    [InlineData("S-1-5-2")]      // Network
+    [InlineData("S-1-5-3")]      // Batch
+    [InlineData("S-1-5-6")]      // Service
+    [InlineData("S-1-5-14")]     // Remote Interactive Logon
+    [InlineData("S-1-5-15")]     // This Organization
+    [InlineData("S-1-5-21-1111111111-2222222222-3333333333-513")] // Domain Users (or a workstation's "None")
+    [InlineData("S-1-5-21-1111111111-2222222222-3333333333-514")] // Domain Guests
+    [InlineData("S-1-5-21-4444444444-5555555555-6666666666-515")] // Domain Computers, in another domain
     public void TrustedPrincipals_RefuseGroupsEveryoneIsIn(string sid)
     {
         var ex = Assert.Throws<ArgumentException>(() => Trusted(sid));
         Assert.Contains("every account", ex.Message);
     }
+
+    [WindowsTheory]
+    [InlineData("S-1-5-21-1111111111-2222222222-3333333333-512")]  // Domain Admins
+    [InlineData("S-1-5-21-1111111111-2222222222-3333333333-1513")] // a group whose RID merely ends in 513
+    [InlineData("S-1-5-21-1111111111-2222222222-3333333333")]      // a domain itself
+    [InlineData("S-1-5-80-1111111111-2222222222-3333333333-4444444444-513")] // a service SID, not a domain's
+    public void TrustedPrincipals_AcceptNarrowerGroups(string sid)
+        => Assert.Contains(new SecurityIdentifier(sid), Trusted(sid));
 
     [WindowsFact]
     public void TrustedPrincipals_RefuseSomethingThatIsNotASid()

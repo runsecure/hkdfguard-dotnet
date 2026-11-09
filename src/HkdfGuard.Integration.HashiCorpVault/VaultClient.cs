@@ -8,7 +8,9 @@ namespace HkdfGuard.Integration.HashiCorpVault;
 
 /// <summary>
 /// A HashiCorp Vault client: a port of vault-client-go. Generic <see cref="ReadAsync"/>,
-/// <see cref="WriteAsync"/>, <see cref="ListAsync"/> and <see cref="DeleteAsync"/> reach any path; the
+/// <see cref="WriteAsync"/>, <see cref="ListAsync"/> and <see cref="DeleteAsync"/> reach any path,
+/// refusing one that System.Uri would send somewhere else (a "." or ".." segment, '?', '#', '%' or
+/// '\'), so a name the application didn't choose can't move a request off the path it was put in; the
 /// methods generated from Vault's OpenAPI spec reach every known endpoint, typed, grouped as
 /// <see cref="Auth"/>, <see cref="Identity"/>, <see cref="Secrets"/> and <see cref="System"/>.
 /// <para>
@@ -64,7 +66,8 @@ public sealed partial class VaultClient : IDisposable
     /// holds credentials, a query or a fragment; the namespace can't be sent; the HttpMessageHandler
     /// follows redirects, or isn't a SocketsHttpHandler when TLS options or a unix address need one; or
     /// a certificate can't be read</exception>
-    /// <exception cref="ArgumentOutOfRangeException">The request timeout or a retry wait is negative</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The request timeout or a retry wait is negative, or
+    /// MaxResponseBytes isn't positive</exception>
     public VaultClient(IDataProtector tokenProtector, VaultClientOptions? options = null, ILogger<VaultClient>? logger = null)
     {
         ArgumentNullException.ThrowIfNull(tokenProtector);
@@ -72,6 +75,8 @@ public sealed partial class VaultClient : IDisposable
         _baseAddress = BaseAddress(options);
         if (options.RequestTimeout < TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(options), options.RequestTimeout, "The request timeout must not be negative.");
+        if (options.MaxResponseBytes < 1)
+            throw new ArgumentOutOfRangeException(nameof(options), options.MaxResponseBytes, "MaxResponseBytes must be positive.");
         if (options.Retry.RetryWaitMin < TimeSpan.Zero || options.Retry.RetryWaitMax < TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(options), "The retry waits must not be negative.");
         if (!string.IsNullOrEmpty(options.Namespace) && !IsValidNamespace(options.Namespace))
@@ -84,7 +89,7 @@ public sealed partial class VaultClient : IDisposable
         var handler = options.HttpMessageHandler ?? VaultHttp.CreateHandler();
         try
         {
-            Configure(handler, options);
+            Configure(handler, options, supplied: options.HttpMessageHandler is not null, logger);
         }
         catch when (options.HttpMessageHandler is null)
         {
@@ -206,7 +211,8 @@ public sealed partial class VaultClient : IDisposable
     public void ClearResponseWrapping() => Update(m => m with { ResponseWrappingTtl = TimeSpan.Zero });
 
     /// <summary>Adds headers to every later request, replacing those set before; names starting X-Vault- are refused.</summary>
-    /// <exception cref="ArgumentException">A header has no name, or is named X-Vault-*</exception>
+    /// <exception cref="ArgumentException">A header has no name or an invalid one, is named X-Vault-*, or
+    /// has a value holding a CR, LF or other character that isn't printable ASCII, space or tab</exception>
     public void SetCustomHeaders(IReadOnlyDictionary<string, IReadOnlyList<string>> headers)
     {
         ArgumentNullException.ThrowIfNull(headers);
@@ -278,8 +284,15 @@ public sealed partial class VaultClient : IDisposable
     internal static string MountPathOr(VaultRequestOptions? options, string defaultMountPath)
         => options?.MountPath?.Trim('/') is { Length: > 0 } mountPath ? mountPath : defaultMountPath;
 
-    // For the generated methods: value as one path segment, '/' included.
-    internal static string EscapePathSegment(string value) => Uri.EscapeDataString(value);
+    // For the generated methods: value as one path segment, '/' included. "." and ".." are refused:
+    // escaping leaves them as they are, and System.Uri would then resolve them as dot segments, so
+    // KvV2ReadAsync("..") would read the mount's parent.
+    internal static string EscapePathSegment(string value)
+    {
+        if (value is "." or "..")
+            throw new ArgumentException($"'{value}' can't be a path parameter: it would be resolved as a relative path segment.", nameof(value));
+        return Uri.EscapeDataString(value);
+    }
 
     // For the generated methods: options' query parameters, to add the endpoint's own to.
     internal static List<KeyValuePair<string, string>> QueryParameters(VaultRequestOptions? options)
@@ -328,14 +341,17 @@ public sealed partial class VaultClient : IDisposable
 
     private static string UnixSocketPath(Uri address) => Uri.UnescapeDataString(address.AbsolutePath);
 
-    // A unix address and TLS options configure the SocketsHttpHandler at the bottom of handler's chain.
-    private static void Configure(HttpMessageHandler handler, VaultClientOptions options)
+    // A unix address and TLS options configure the SocketsHttpHandler at the bottom of handler's chain
+    // - a supplied one only where it has nothing set already (see VaultTlsOptions.ApplyTo).
+    private static void Configure(HttpMessageHandler handler, VaultClientOptions options, bool supplied, ILogger? logger)
     {
         var unix = options.Address.Scheme == "unix";
         if (!unix && options.Tls.IsEmpty)
             return;
 
         var sockets = VaultHttp.SocketsHandler(handler, unix ? "a unix socket address" : "TLS options");
+        if (unix && supplied && sockets.ConnectCallback is not null)
+            throw VaultTlsOptions.Occupied("a connect callback");
 
         if (unix)
         {
@@ -357,6 +373,6 @@ public sealed partial class VaultClient : IDisposable
         }
 
         if (!options.Tls.IsEmpty)
-            options.Tls.ApplyTo(sockets);
+            options.Tls.ApplyTo(sockets, supplied, logger);
     }
 }

@@ -55,7 +55,9 @@ public sealed class HashiCorpVaultTransitKeyWrapperOptions
     /// .NET follows a redirect it drops only the Authorization header, so X-Vault-Token would go
     /// wherever the redirect points. Set AllowAutoRedirect to false on a SocketsHttpHandler or
     /// HttpClientHandler - both default to true. The handler at the bottom of a chain of
-    /// DelegatingHandlers is the one checked; one of another type can't be, and is accepted.
+    /// DelegatingHandlers is the one checked. One of another type is asked through its own
+    /// AllowAutoRedirect or AutomaticRedirection property (WinHttpHandler's AutomaticRedirection, say,
+    /// which also defaults to true); one with neither counts as following redirects and is refused.
     /// </para>
     /// </summary>
     public HttpMessageHandler? HttpMessageHandler { get; init; }

@@ -47,6 +47,25 @@ your key ring created for `VaultTlsOptions.PasswordPurpose` (`VaultTlsOptions.Pr
 and decrypted only while the store is read. The transit key wrapper and the secret cache take the
 same `VaultTlsOptions` through their own `Tls` option.
 
+A few rules keep these settings from reaching further than you meant:
+
+- **A custom CA vouches only for TLS server certificates.** A certificate it issued whose extended
+  key usage leaves out server authentication, such as a client certificate, is refused as Vault's.
+- **A handler you supply is never reconfigured behind your back.** If you pass
+  `HttpMessageHandler`, the client sets TLS and unix-socket callbacks on it only where none is set
+  already. It refuses rather than replace yours, or another client's on a shared handler, so give
+  each client a handler of its own.
+- **`InsecureSkipVerify` (`VAULT_SKIP_VERIFY`) is logged and contained.** The client logs a warning
+  whenever certificate verification is off, and refuses it for a handler you supply, where it would
+  turn off verification for everything else that handler serves.
+- **A handler must say it doesn't follow redirects.** The client reads `AllowAutoRedirect`, or
+  `AutomaticRedirection` for handlers such as `WinHttpHandler`. A handler with neither property
+  counts as following redirects and is refused, since one that did would send the token along.
+  For a test double, add `public bool AllowAutoRedirect => false;` to it.
+- **Client private keys never become strings.** PEM keys are decoded into pinned memory and zeroed
+  once loaded. On Windows and macOS the key is held in a temporary key container while the client
+  lives, because their TLS stacks can't sign with an in-memory key.
+
 > **Security:** The address must be `https`. Plain `http` is allowed only on a loopback address (a
 > local Vault Agent or dev server), or when you set `AllowUnencryptedHttp`, because every request
 > carries a token.
@@ -116,6 +135,13 @@ await vault.WriteAsync("secret/data/myapp/flags", new Dictionary<string, object?
 var keys = await vault.ListAsync("secret/metadata/myapp");
 await vault.DeleteAsync("secret/metadata/myapp/flags");
 ```
+
+The generic methods refuse a path with an empty, `.` or `..` segment, or holding `?`, `#`, `%`,
+`\` or a control character, with `ArgumentException`. Each of these would otherwise make the
+request reach a different path than the one written: `secret/data/` + `../../sys/policies/acl/root`
+leaves the mount, and `foo?list=true` turns a read into a list. Put query parameters in
+`VaultRequestOptions.QueryParameters` instead. A name from outside your application can still
+name any secret under the path you put it in, so check it against what that caller may read.
 
 `VaultRequestOptions` sets things for one request: another token, a namespace, extra headers or
 query parameters, MFA credentials, response wrapping, or a forwarding mode. The client's own

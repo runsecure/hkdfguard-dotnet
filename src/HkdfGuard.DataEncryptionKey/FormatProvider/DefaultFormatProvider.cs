@@ -149,11 +149,16 @@ public class DefaultFormatProvider : IEncryptedFormatProvider
         if (!prefix.SequenceEqual(EncPrefix) || !versionSegment.StartsWith(VersionPrefix))
             return false;
 
-        // Only the canonical form Format writes: ASCII digits with an optional leading '-' - no
-        // whitespace, '+', or culture-specific signs/digits.
+        // Only the canonical form Format writes, so each version has exactly one spelling: the text
+        // int.ToString gives in the invariant culture. That refuses whitespace, '+', culture-specific
+        // signs and digits, leading zeros ("v007") and negative zero ("v-0") alike.
         var digits = versionSegment[VersionPrefix.Length..];
-        if (digits.StartsWith('+')
-            || !int.TryParse(digits, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out version))
+        if (!int.TryParse(digits, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out version))
+            return false;
+
+        Span<char> canonical = stackalloc char[11]; // "-2147483648"
+        if (!version.TryFormat(canonical, out var canonicalLength, provider: CultureInfo.InvariantCulture)
+            || !digits.SequenceEqual(canonical[..canonicalLength]))
             return false;
 
         // Only the canonical form Format writes: no whitespace. Base64 validation skips it, but the

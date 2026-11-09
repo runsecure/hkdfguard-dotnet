@@ -510,7 +510,7 @@ public class HashiCorpVaultSecretCacheTests
     }
 
     [Fact]
-    public async Task AMissingSecret_ReturnsZero_AndIsLookedUpAgainUntilItExists()
+    public async Task AMissingSecret_ReturnsZero_AndIsRememberedForTheMissLifetime_WithOneCallToTheStore()
     {
         var (cache, vault) = await CreateAsync();
 
@@ -518,9 +518,11 @@ public class HashiCorpVaultSecretCacheTests
         Assert.False(cache.TryGetMaxDecryptedLength("later", out var max));
         Assert.Equal(0, max);
 
+        // Created meanwhile, but within the miss lifetime it is still answered missing, with no
+        // further call: RemoteSecretCache's own tests cover it being found once the lifetime runs out.
         vault.Set("later", "now here");
-        Assert.Equal("now here", DecryptString(cache, "later"));
-        Assert.Equal(3, vault.Reads.Count);
+        Assert.Equal(0, cache.Decrypt("later", new byte[16]));
+        Assert.Single(vault.Reads);
     }
 
     [Fact]
@@ -794,7 +796,7 @@ public class HashiCorpVaultSecretCacheTests
     public async Task Tls_IsAppliedToASocketsHttpHandler_AndRefusedWhereItCantBeAppliedOrRead()
     {
         var ring = await TestRing.CreateAsync();
-        var tls = new VaultTlsOptions { InsecureSkipVerify = true };
+        var tls = new VaultTlsOptions { ServerName = "vault.internal" };
         using var sockets = new SocketsHttpHandler { AllowAutoRedirect = false };
         using (var cache = NewCache(FakeVault.Address, ring, new HashiCorpVaultSecretCacheOptions { HttpMessageHandler = sockets, Tls = tls }))
             Assert.Equal(0, cache.Decrypt("not:a:path", new byte[16]));
@@ -831,14 +833,16 @@ public class HashiCorpVaultSecretCacheTests
     }
 
     [Fact]
-    public async Task ADelegatingHandlerWithNoInnerHandler_OrOfAnotherType_CantBeChecked_AndIsAccepted()
+    public async Task AHandlerWhoseRedirectsCantBeTold_IsRefused_UnlessRedirectsAreAllowed()
     {
         var ring = await TestRing.CreateAsync();
         using var unchained = new PassThrough(null);
-        using var custom = new FakeVault();
+        using var custom = new FakeVault(); // says AllowAutoRedirect => false
 
-        using var first = NewCache(FakeVault.Address, ring,
-            new HashiCorpVaultSecretCacheOptions { HttpMessageHandler = unchained });
+        Assert.Throws<ArgumentException>("options", () => NewCache(FakeVault.Address, ring,
+            new HashiCorpVaultSecretCacheOptions { HttpMessageHandler = unchained }));
+        using var allowed = NewCache(FakeVault.Address, ring,
+            new HashiCorpVaultSecretCacheOptions { HttpMessageHandler = unchained, AllowRedirects = true });
         using var second = NewCache(FakeVault.Address, ring,
             new HashiCorpVaultSecretCacheOptions { HttpMessageHandler = custom });
     }

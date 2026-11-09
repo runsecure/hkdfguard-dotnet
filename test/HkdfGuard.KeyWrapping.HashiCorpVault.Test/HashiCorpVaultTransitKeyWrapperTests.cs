@@ -128,7 +128,7 @@ public class HashiCorpVaultTransitKeyWrapperTests
     [Fact]
     public void Constructor_AppliesTls_ToASocketsHttpHandler_AndRefusesTlsItCantApplyOrRead()
     {
-        var tls = new VaultTlsOptions { InsecureSkipVerify = true };
+        var tls = new VaultTlsOptions { ServerName = "vault.internal" };
         using var sockets = new SocketsHttpHandler { AllowAutoRedirect = false };
         new HashiCorpVaultTransitKeyWrapper(FakeTransit.Address, FakeTransit.KeyName, new FakeTokenSource(),
             options: new HashiCorpVaultTransitKeyWrapperOptions { HttpMessageHandler = sockets, Tls = tls }).Dispose();

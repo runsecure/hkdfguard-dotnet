@@ -201,7 +201,7 @@ public class AwsSecretsManagerSecretCacheTests
     }
 
     [Fact]
-    public async Task AMissingSecret_ReturnsZero_AndIsLookedUpAgainUntilItExists()
+    public async Task AMissingSecret_ReturnsZero_AndIsRememberedForTheMissLifetime_WithOneCallToTheStore()
     {
         var (cache, aws) = await CreateAsync();
 
@@ -209,9 +209,11 @@ public class AwsSecretsManagerSecretCacheTests
         Assert.False(cache.TryGetMaxDecryptedLength("later", out var max));
         Assert.Equal(0, max);
 
+        // Created meanwhile, but within the miss lifetime it is still answered missing, with no
+        // further call: RemoteSecretCache's own tests cover it being found once the lifetime runs out.
         aws.SetString("later", "now here");
-        Assert.Equal("now here", DecryptString(cache, "later"));
-        Assert.Equal(3, aws.Gets.Count);
+        Assert.Equal(0, cache.Decrypt("later", new byte[16]));
+        Assert.Single(aws.Gets);
     }
 
     [Fact]

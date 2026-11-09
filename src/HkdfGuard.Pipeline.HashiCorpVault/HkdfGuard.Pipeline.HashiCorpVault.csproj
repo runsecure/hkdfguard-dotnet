@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="HkdfGuard.Pipeline.HashiCorpVault.Test" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HkdfGuard.Abstractions\HkdfGuard.Abstractions.csproj" />
+    <ProjectReference Include="..\HkdfGuard.Pipeline\HkdfGuard.Pipeline.csproj" />
+    <ProjectReference Include="..\HkdfGuard.Integration.HashiCorpVault\HkdfGuard.Integration.HashiCorpVault.csproj" />
+  </ItemGroup>
+
+</Project>

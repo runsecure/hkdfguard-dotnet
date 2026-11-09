@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Binder" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Json" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\HkdfGuard.Options.Certificate\HkdfGuard.Options.Certificate.csproj" />
+  </ItemGroup>
+
+  <!-- A folder TrustedFile accepts, for certificate and key files; shared with SecureFile's tests. -->
+  <ItemGroup>
+    <Compile Include="..\HkdfGuard.SecureFile.Test\TestHelpers\WindowsTempDirectory.cs" Link="TestHelpers\WindowsTempDirectory.cs" />
+    <Compile Include="..\HkdfGuard.SecureFile.Test\TestHelpers\TrustedTempDirectory.cs" Link="TestHelpers\TrustedTempDirectory.cs" />
+  </ItemGroup>
+
+</Project>

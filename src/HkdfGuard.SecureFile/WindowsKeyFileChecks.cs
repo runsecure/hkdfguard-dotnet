@@ -39,15 +39,41 @@ internal static class WindowsKeyFileChecks
         TrustedInstaller,
     ];
 
-    // Groups every account, or every signed-in one, is in: trusting one trusts everybody.
+    // Groups every account, every signed-in one, or every one of a broad kind is in: trusting one
+    // trusts far more than a deployer.
     private static readonly SecurityIdentifier[] NeverTrusted =
     [
-        new(WellKnownSidType.WorldSid, null),
-        new(WellKnownSidType.AuthenticatedUserSid, null),
-        new(WellKnownSidType.BuiltinUsersSid, null),
-        new(WellKnownSidType.InteractiveSid, null),
+        new(WellKnownSidType.WorldSid, null),                       // Everyone
+        new(WellKnownSidType.AuthenticatedUserSid, null),           // Authenticated Users
+        new(WellKnownSidType.BuiltinUsersSid, null),                // BUILTIN\Users
+        new(WellKnownSidType.BuiltinGuestsSid, null),               // BUILTIN\Guests
+        new(WellKnownSidType.InteractiveSid, null),                 // every interactive logon
+        new(WellKnownSidType.RemoteLogonIdSid, null),               // every remote desktop logon (S-1-5-14)
+        new(WellKnownSidType.NetworkSid, null),                     // every network logon
+        new(WellKnownSidType.BatchSid, null),                       // every batch logon
+        new(WellKnownSidType.ServiceSid, null),                     // every service process
+        new(WellKnownSidType.ThisOrganizationSid, null),            // everyone in the organization
         new(WellKnownSidType.AnonymousSid, null),
+        new("S-1-5-113"),                                           // Local account: every local account
     ];
+
+    // Groups every account of a domain is in, by their relative ids in that domain (Domain Users,
+    // Domain Guests, Domain Computers): matched in any domain, since the domain's own SID varies.
+    private static readonly int[] NeverTrustedDomainRids = [513, 514, 515];
+
+    // Whether sid is one of NeverTrusted, or a domain's Domain Users, Domain Guests or Domain Computers.
+    internal static bool IsNeverTrusted(SecurityIdentifier sid)
+    {
+        if (Array.IndexOf(NeverTrusted, sid) >= 0)
+            return true;
+        if (sid.AccountDomainSid is null || sid == sid.AccountDomainSid)
+            return false;
+
+        var value = sid.Value;
+        return int.TryParse(value.AsSpan(value.LastIndexOf('-') + 1), System.Globalization.NumberStyles.None,
+                   System.Globalization.CultureInfo.InvariantCulture, out var rid)
+               && Array.IndexOf(NeverTrustedDomainRids, rid) >= 0;
+    }
 
     // Any right that lets a principal change what this path reads: write or append data (on a
     // folder, create files or folders), delete or rename (Delete on the item,
@@ -89,9 +115,9 @@ internal static class WindowsKeyFileChecks
                 throw new ArgumentException($"KeyFileTrust.WindowsPrincipals holds '{value}', which is not a security identifier (S-1-...).", e);
             }
 
-            if (Array.IndexOf(NeverTrusted, sid) >= 0)
+            if (IsNeverTrusted(sid))
                 throw new ArgumentException(
-                    $"KeyFileTrust.WindowsPrincipals holds {Describe(sid)}, which every account (or every signed-in one) is in; trusting it would trust anyone to replace a trusted file.");
+                    $"KeyFileTrust.WindowsPrincipals holds {Describe(sid)}, a group every account, every signed-in one, or every one of a broad kind is in; trusting it would trust far more than a deployer to replace a trusted file. Use a group of the deployers alone.");
             trusted.Add(sid);
         }
 

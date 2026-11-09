@@ -57,4 +57,19 @@ public interface IPipelineDataProtector : IDisposable
     /// variable, which process listings and logs capture.
     /// </summary>
     public ReadOnlySpan<char> GetKeyAsBase64();
+
+    /// <summary>
+    /// Writes the key to <paramref name="destination"/> exactly as the wrap tool's
+    /// <c>--dek-stdin</c> reads it - its base64 form as ASCII, with no line ending - and flushes it.
+    /// For the wrap tool's standard input, local or remote: the stdin of
+    /// <c>hkdfguard wrap … --dek-stdin</c>, or of <c>ssh -T host sudo -n hkdfguard wrap … --dek-stdin</c>.
+    /// The bytes are written from pinned memory, zeroed once the write and flush complete; no string
+    /// is ever made of them. destination is left open: close it afterwards, so the tool sees the end
+    /// of its input.
+    /// </summary>
+    /// <param name="destination">Where to write the key: a process's standard input</param>
+    /// <param name="cancellationToken">Cancels the write</param>
+    /// <exception cref="ArgumentNullException">destination is null</exception>
+    /// <exception cref="ObjectDisposedException">The protector has been disposed</exception>
+    public Task WriteDekAsync(Stream destination, CancellationToken cancellationToken = default);
 }

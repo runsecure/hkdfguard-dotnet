@@ -108,6 +108,8 @@ internal sealed class FakeKeyVault : IDisposable
 /// <summary>A CryptographyClient over one key identifier in a <see cref="FakeKeyVault"/>.</summary>
 internal sealed class Client(FakeKeyVault vault, Uri keyId) : CryptographyClient
 {
+    private (string KeyId, AsymmetricAlgorithm Key)? _verifyKey;
+
     public override Task<WrapResult> WrapKeyAsync(KeyWrapAlgorithm algorithm, byte[] key, CancellationToken cancellationToken = default)
     {
         vault.Record("wrap", keyId);
@@ -149,7 +151,8 @@ internal sealed class Client(FakeKeyVault vault, Uri keyId) : CryptographyClient
     {
         vault.Record("verify", keyId);
         Assert.Equal(SignatureAlgorithm.ES256, algorithm);
-        var (id, ec) = vault.Resolve(keyId);
+        // As the Azure SDK does: the public key is fetched once, then every verify is local.
+        var (id, ec) = _verifyKey ??= vault.Resolve(keyId);
         var valid = ((ECDsa)ec).VerifyData(data, signature, HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
         return Task.FromResult(CryptographyModelFactory.VerifyResult(id, valid, algorithm));
     }

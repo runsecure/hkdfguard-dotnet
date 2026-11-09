@@ -83,6 +83,14 @@ public sealed class KeyRingBuilder
     /// <summary>The fraction of the maximum age after which a warning is logged: 90%, about five weeks of a year.</summary>
     public const double KeyFileAgeWarningFraction = 0.9;
 
+    /// <summary>
+    /// How far ahead of this host's clock a key file's last write may be, allowing for clock skew
+    /// between the pipeline that wrote it and this host: 1 day. A key file dated further ahead
+    /// doesn't encrypt at all, since a future date would otherwise extend its
+    /// <see cref="KeyFileMaxAgeDays"/>; it still decrypts.
+    /// </summary>
+    public static readonly TimeSpan KeyFileFutureTolerance = TimeSpan.FromDays(1);
+
     public string? ServiceName { get; private set; }
     public int? KeyRefreshInterval { get; private set; }
 
@@ -451,6 +459,22 @@ public sealed class KeyRingBuilder
         var refuseAt = lastWritten + maxAge;
         var logger = _logger;
         var written = lastWritten.UtcDateTime.ToString("yyyy'-'MM'-'dd'T'HH':'mm':'ss'.'fff'Z'", CultureInfo.InvariantCulture);
+
+        // A last write in the future would push the deadline past maxAge from today: a clock set
+        // wrong, or a timestamp set by hand, would let the key encrypt for longer than intended. Past
+        // the tolerance for clock skew between the pipeline and this host, it encrypts not at all.
+        var now = _timeProvider.GetUtcNow();
+        if (lastWritten > now + KeyFileFutureTolerance)
+        {
+            return new EncryptionDeadline
+            {
+                WarnAt = now,
+                RefuseAt = now,
+                Reason = $"Key file '{path}' (version {version}) was last written {written}, more than {KeyFileFutureTolerance.TotalHours:0} hours ahead of this host's clock, so its age can't be trusted and it doesn't encrypt. Check both clocks and redeploy the key file; values under it still decrypt.",
+                OnExpired = logger is null ? null : () => logger.KeyFileDatedInTheFuture(version, path),
+            };
+        }
+
         return new EncryptionDeadline
         {
             WarnAt = lastWritten + maxAge * KeyFileAgeWarningFraction,
