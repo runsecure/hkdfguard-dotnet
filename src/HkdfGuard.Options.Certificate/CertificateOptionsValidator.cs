@@ -50,10 +50,14 @@ public sealed class CertificateOptionsValidator : IValidateOptions<CertificateOp
                 failures.Add($"The {source.Name} certificate source can only be used on {source.Name}; this is {Describe(_platform)}.");
         }
 
+        var pinned = options.Thumbprint is not null;
+        if (pinned && Thumbprints.Normalize(options.Thumbprint) is null)
+            failures.Add($"Thumbprint must be a certificate's SHA-1 (40 hex digits) or SHA-256 (64 hex digits) thumbprint, not '{options.Thumbprint}'.");
+
         if (options.Windows is { } windows)
-            ValidateStore(nameof(CertificateOptions.Windows), windows, failures);
+            ValidateStore(nameof(CertificateOptions.Windows), windows, pinned, failures);
         if (options.MacOS is { } macOS)
-            ValidateStore(nameof(CertificateOptions.MacOS), macOS, failures);
+            ValidateStore(nameof(CertificateOptions.MacOS), macOS, pinned, failures);
         if (options.Linux is { } linux)
             ValidateLinux(linux, options.RequirePrivateKey, failures);
         if (options.File is { } file)
@@ -62,16 +66,18 @@ public sealed class CertificateOptionsValidator : IValidateOptions<CertificateOp
         return failures.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(failures);
     }
 
-    private static void ValidateStore(string source, CertificateStoreOptions store, List<string> failures)
+    private static void ValidateStore(string source, CertificateStoreOptions store, bool pinned, List<string> failures)
     {
         if (!Enum.IsDefined(store.StoreLocation))
             failures.Add($"{source}.StoreLocation must be CurrentUser or LocalMachine, not {store.StoreLocation}.");
         if (!Enum.IsDefined(store.StoreName))
             failures.Add($"{source}.StoreName must be a store's name - My, Root, CertificateAuthority, TrustedPeople... - not {store.StoreName}.");
 
+        if (store.Subject is null && pinned)
+            return;
         if (string.IsNullOrWhiteSpace(store.Subject))
         {
-            failures.Add($"{source}.Subject is required: the certificate's subject distinguished name, e.g. \"CN=api.example.com\".");
+            failures.Add($"{source}.Subject is required unless Thumbprint is set: the certificate's subject distinguished name, e.g. \"CN=api.example.com\".");
             return;
         }
 

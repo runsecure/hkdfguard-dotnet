@@ -179,7 +179,14 @@
         "type": "Project",
         "dependencies": {
           "HkdfGuard.Abstractions": "[0.9.1, )",
+          "HkdfGuard.SecureFile": "[0.9.1, )",
           "Microsoft.Extensions.Options": "[10.0.14, )"
+        }
+      },
+      "hkdfguard.securefile": {
+        "type": "Project",
+        "dependencies": {
+          "HkdfGuard.Abstractions": "[0.9.1, )"
         }
       },
       "Microsoft.Extensions.Configuration": {

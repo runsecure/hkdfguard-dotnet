@@ -6,6 +6,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\HkdfGuard.Abstractions\HkdfGuard.Abstractions.csproj" />
+    <!-- Certificate and key files are read through TrustedFile, like every other secret file. -->
+    <ProjectReference Include="..\HkdfGuard.SecureFile\HkdfGuard.SecureFile.csproj" />
   </ItemGroup>
 
   <ItemGroup>
