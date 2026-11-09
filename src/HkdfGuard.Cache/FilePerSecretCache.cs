@@ -98,13 +98,33 @@ public sealed class FilePerSecretCache : IProtectedReadOnlyCache
     /// <summary>The full path of the folder the secrets' files are read from.</summary>
     public string FolderPath { get; }
 
-    /// <summary>Whether name can be a secret's file name: 1-<see cref="MaxNameLength"/> ASCII
-    /// letters, digits, '-', '_' and '.', not starting with '.'.</summary>
+    /// <summary>
+    /// Whether name can be a secret's file name: 1-<see cref="MaxNameLength"/> ASCII letters, digits,
+    /// '-', '_' and '.', neither starting nor ending with '.', and not one of Windows' reserved device
+    /// names (CON, PRN, AUX, NUL, COM0-COM9, LPT0-LPT9), with or without an extension, in any case.
+    /// Windows opens a device for those, and drops a trailing '.', so on any platform such a name
+    /// would read a different file than it names; refusing them everywhere keeps a name valid on
+    /// every platform a pipeline might write it for.
+    /// </summary>
     public static bool IsValidName(string? name)
         => !string.IsNullOrEmpty(name)
            && name.Length <= MaxNameLength
            && name[0] != '.'
-           && name.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.');
+           && name[^1] != '.'
+           && name.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.')
+           && !IsReservedDeviceName(name);
+
+    // CON, PRN, AUX, NUL, COM0-9 and LPT0-9, as the whole name or before its first '.', ignoring case.
+    private static bool IsReservedDeviceName(string name)
+    {
+        var dot = name.IndexOf('.');
+        var stem = dot < 0 ? name.AsSpan() : name.AsSpan(0, dot);
+        if (stem.Length == 3)
+            return stem.Equals("CON", StringComparison.OrdinalIgnoreCase) || stem.Equals("PRN", StringComparison.OrdinalIgnoreCase)
+                   || stem.Equals("AUX", StringComparison.OrdinalIgnoreCase) || stem.Equals("NUL", StringComparison.OrdinalIgnoreCase);
+        return stem.Length == 4 && char.IsAsciiDigit(stem[3])
+               && (stem[..3].Equals("COM", StringComparison.OrdinalIgnoreCase) || stem[..3].Equals("LPT", StringComparison.OrdinalIgnoreCase));
+    }
 
     /// <inheritdoc/>
     /// <exception cref="ArgumentNullException">name is null</exception>

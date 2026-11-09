@@ -15,6 +15,14 @@ namespace HkdfGuard.EncryptedConfiguration;
 /// than caching anything, so a Reload takes effect immediately. Each value is bound to its own
 /// configuration key (see ProtectedConfigurationPurpose): a value moved to a different key fails
 /// authentication rather than being decrypted.
+/// <para>
+/// A key whose value isn't in the protected format at all - a plain setting such as a host name -
+/// is reported missing, as a key with no value is: Decrypt returns 0 and TryGetMaxDecryptedLength
+/// false. So the root can sit in a ProtectedCacheCollection, or supply a template's items, beside
+/// sources that hold those values, and a plain value is never mistaken for a secret. A value in the
+/// protected format that doesn't decrypt - altered, moved from another key, or under a key the ring
+/// doesn't hold - still throws.
+/// </para>
 /// </summary>
 public sealed class ProtectedConfigurationRoot(IConfigurationRoot configurationRoot, KeyRing keyRing)
     : IProtectedConfigurationRoot
@@ -50,10 +58,9 @@ public sealed class ProtectedConfigurationRoot(IConfigurationRoot configurationR
 
         try
         {
-            var value = configurationRoot[name];
-            return value is null
-                ? 0
-                : ProtectorFor(name).Decrypt(value, result);
+            return TryProtected(name, out var value, out var protector, out _)
+                ? protector.Decrypt(value, result)
+                : 0;
         }
         catch (Exception ex)
         {
@@ -71,16 +78,13 @@ public sealed class ProtectedConfigurationRoot(IConfigurationRoot configurationR
 
         try
         {
-            var value = configurationRoot[name];
-            if (value is null)
+            if (!TryProtected(name, out var value, out var protector, out var maxChars))
                 return 0;
 
             // The format provider's max-length bound is computed from the ciphertext's own byte
             // length, so it's a safe upper bound for the decrypted plaintext's UTF8 byte count
             // too, not just its char count.
             // On the stack, or pinned when too large: never somewhere the GC can copy it.
-            var protector = ProtectorFor(name);
-            var maxChars = protector.GetMaxDecryptedLength(value);
             Span<char> charBuffer = maxChars <= ArrayUtility.MaxStackChars
                 ? stackalloc char[maxChars]
                 : ArrayUtility.AllocatePinned<char>(maxChars);
@@ -103,16 +107,29 @@ public sealed class ProtectedConfigurationRoot(IConfigurationRoot configurationR
 
     /// <inheritdoc/>
     public bool TryGetMaxDecryptedLength(string name, out int maxLength)
+        => TryProtected(name, out _, out _, out maxLength);
+
+    // name's value and its protector, if it has a value in the protected format; false - reported
+    // missing - if it has no value, or a plain one the format provider doesn't parse.
+    private bool TryProtected(string name, out string value, out IDataProtector protector, out int maxLength)
     {
-        var value = configurationRoot[name];
+        value = configurationRoot[name]!;
+        protector = null!;
+        maxLength = 0;
         if (value is null)
+            return false;
+
+        protector = ProtectorFor(name);
+        try
         {
-            maxLength = 0;
+            maxLength = protector.GetMaxDecryptedLength(value);
+            return true;
+        }
+        catch (FormatException)
+        {
+            // Not a protected value at all - nothing to decrypt, and nothing to report but that.
             return false;
         }
-
-        maxLength = ProtectorFor(name).GetMaxDecryptedLength(value);
-        return true;
     }
 
     // Bound to this one key, so a value copied in from another key fails its tag check.

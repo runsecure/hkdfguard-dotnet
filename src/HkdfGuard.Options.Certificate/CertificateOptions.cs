@@ -12,6 +12,7 @@ namespace HkdfGuard.Options.Certificate;
 /// instance per name (named options).
 /// <code>
 /// "Certificate": { "Windows": { "StoreLocation": "LocalMachine", "StoreName": "My", "Subject": "CN=api.example.com" } }
+/// "Certificate": { "Thumbprint": "3A1F...C9", "Windows": { "StoreLocation": "LocalMachine", "StoreName": "My" } }
 /// "Certificate": { "MacOS": { "StoreLocation": "LocalMachine", "Subject": "CN=api.example.com" } }
 /// "Certificate": { "Linux": { "Provider": "tpm2", "KeyUri": "handle:0x81000001", "CertificateFile": "/etc/myapp/tls.crt" } }
 /// "Certificate": { "File": { "Path": "/etc/myapp/tls.pfx", "PasswordSecretName": "tls-pfx-password" } }
@@ -36,18 +37,36 @@ public sealed class CertificateOptions
     /// as a TLS server or client certificate, or used to sign; false for one only to be trusted.
     /// </summary>
     public bool RequirePrivateKey { get; set; } = true;
+
+    /// <summary>
+    /// Pins the one certificate to open, by its thumbprint: the SHA-1 (40 hex digits, as Windows and
+    /// macOS show it) or SHA-256 (64 hex digits) hash of the certificate. Spaces, colons and the
+    /// invisible marks Windows' certificate dialog copies along are ignored, and so is case.
+    /// <para>
+    /// From a store, only the certificate with this thumbprint is chosen - and with
+    /// <see cref="CertificateStoreOptions.Subject"/> set too, it must have that subject as well - so
+    /// another certificate added to the store under the same subject, by whoever can write to it, is
+    /// never picked. The price is renewal: a renewed certificate has a new thumbprint, so this must
+    /// be changed with it. From a file or a Linux certificate file, the certificate read must have
+    /// this thumbprint, so a replaced file is refused. Null (the default) pins nothing.
+    /// </para>
+    /// </summary>
+    public string? Thumbprint { get; set; }
 }
 
 /// <summary>
-/// A certificate in an operating system certificate store, found by its subject, so a renewed
-/// certificate an administrator adds under the same subject is picked up with no change to
-/// configuration. Of the certificates with that subject, the one opened is the one valid now - and
-/// with its private key, when one is required - that expires last; an expired or not-yet-valid one
-/// is never chosen. Its private key stays in the store: CNG (or the TPM) on Windows, the keychain on
-/// macOS, where CurrentUser is the login keychain and LocalMachine the System keychain.
+/// A certificate in an operating system certificate store, found by its subject, its thumbprint
+/// (<see cref="CertificateOptions.Thumbprint"/>), or both. By subject alone, a renewed certificate an
+/// administrator adds under the same subject is picked up with no change to configuration. Of the
+/// certificates that match, the one opened is the one valid now - and with its private key, when one
+/// is required - that expires last; an expired or not-yet-valid one is never chosen. Its private key
+/// stays in the store: CNG (or the TPM) on Windows, the keychain on macOS, where CurrentUser is the
+/// login keychain and LocalMachine the System keychain.
 /// <para>
-/// Matching by subject trusts whoever can add a certificate to the store to choose it: keep it to a
-/// store only administrators can write, such as LocalMachine's My.
+/// Matching by subject alone trusts whoever can add a certificate to the store to choose it - add one
+/// with the same subject, a later expiry and their own key, and it is the one opened. Keep it to a
+/// store only administrators can write, such as LocalMachine's My, or pin the certificate by
+/// <see cref="CertificateOptions.Thumbprint"/>, which no other certificate can match.
 /// </para>
 /// </summary>
 public sealed class CertificateStoreOptions
@@ -61,7 +80,8 @@ public sealed class CertificateStoreOptions
     /// <summary>
     /// The certificate's subject distinguished name, as the certificate states it:
     /// "CN=api.example.com, O=Contoso". Compared to each certificate's whole subject, ignoring case -
-    /// never as a substring, so "CN=api" doesn't match "CN=api.example.com".
+    /// never as a substring, so "CN=api" doesn't match "CN=api.example.com". Required unless
+    /// <see cref="CertificateOptions.Thumbprint"/> is set.
     /// </summary>
     public string? Subject { get; set; }
 }
@@ -102,6 +122,12 @@ public enum CertificateFileFormat
 /// password - a password-protected PKCS#12 file, or an encrypted PKCS#8 PEM key - and the password
 /// comes from the secret <see cref="PasswordSecretName"/> names, never from configuration. An
 /// unprotected key file is refused unless <see cref="AllowUnprotectedPrivateKey"/> is set.
+/// <para>
+/// Each file is read as every other secret file is (TrustedFile): refused unless only the operating
+/// system's administrators, and the principals the loader is given to trust, could have written or
+/// replaced it and every folder above it - so nobody else can swap in their own certificate and key.
+/// Its contents are read into pinned memory, zeroed once parsed.
+/// </para>
 /// </summary>
 public sealed class CertificateFileOptions
 {

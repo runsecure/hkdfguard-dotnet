@@ -29,6 +29,12 @@
           "Microsoft.Extensions.Logging.Abstractions": "[10.0.14, )"
         }
       },
+      "hkdfguard.securefile": {
+        "type": "Project",
+        "dependencies": {
+          "HkdfGuard.Abstractions": "[0.9.1, )"
+        }
+      },
       "Microsoft.Extensions.DependencyInjection.Abstractions": {
         "type": "CentralTransitive",
         "requested": "[10.0.14, )",

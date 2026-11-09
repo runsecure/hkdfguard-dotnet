@@ -84,6 +84,30 @@ public class CertificateOptionsValidatorTests
     }
 
     [Theory]
+    [InlineData("3A1F5B2C9D4E6F708192A3B4C5D6E7F801234567")]                         // SHA-1
+    [InlineData("3a 1f 5b 2c 9d 4e 6f 70 81 92 a3 b4 c5 d6 e7 f8 01 23 45 67")]       // as copied, spaced and lower-case
+    [InlineData("‎3A:1F:5B:2C:9D:4E:6F:70:81:92:A3:B4:C5:D6:E7:F8:01:23:45:67")] // with Windows' invisible mark and colons
+    [InlineData("0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF")] // SHA-256
+    public void AThumbprint_PinsAStore_WithoutASubject(string thumbprint)
+    {
+        Assert.Empty(Failures(new CertificateOptions { Thumbprint = thumbprint, Windows = new CertificateStoreOptions() }, OSPlatform.Windows));
+        Assert.Empty(Failures(new CertificateOptions { Thumbprint = thumbprint, MacOS = new CertificateStoreOptions { Subject = Subject } }, OSPlatform.OSX));
+        Assert.Empty(Failures(new CertificateOptions { Thumbprint = thumbprint, File = ProtectedFile().File }, OSPlatform.Linux));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("3A1F5B2C")]                                      // too short
+    [InlineData("3A1F5B2C9D4E6F708192A3B4C5D6E7F80123456")]       // 39 digits
+    [InlineData("ZZ1F5B2C9D4E6F708192A3B4C5D6E7F801234567")]      // not hex
+    [InlineData("CN=api.example.com")]
+    public void AThumbprint_ThatIsntOne_IsRefused(string thumbprint)
+    {
+        var failure = Assert.Single(Failures(new CertificateOptions { Thumbprint = thumbprint, Windows = new CertificateStoreOptions { Subject = Subject } }, OSPlatform.Windows));
+        Assert.StartsWith("Thumbprint must be", failure);
+    }
+
+    [Theory]
     [InlineData(null, "Subject is required")]
     [InlineData(" ", "Subject is required")]
     [InlineData("api.example.com", "must be a distinguished name")]

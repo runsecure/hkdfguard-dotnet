@@ -2,7 +2,9 @@ using System.Diagnostics.CodeAnalysis;
 using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Text;
 using HkdfGuard.Abstractions;
+using HkdfGuard.SecureFile;
 using Microsoft.Extensions.Options;
 
 namespace HkdfGuard.Options.Certificate;
@@ -24,8 +26,12 @@ namespace HkdfGuard.Options.Certificate;
 /// Windows a PEM key, which .NET imports as an ephemeral key that SChannel can't use as a TLS
 /// server's, is moved into the same kind of key by an export, zeroed at once, and an import.</item>
 /// </list>
-/// Whatever the source, a certificate that isn't valid now, or that has no private key when one is
-/// required, is refused.
+/// Every file - a PKCS#12 file, a PEM certificate or key, a Linux certificate file - is read through
+/// TrustedFile with the loader's <see cref="KeyFileTrust"/>: refused unless only administrators and
+/// the principals it trusts could have written or replaced it, as every other secret file is, and
+/// read into pinned memory zeroed once parsed. Whatever the source, a certificate that isn't valid
+/// now, that has no private key when one is required, or that doesn't have
+/// <see cref="CertificateOptions.Thumbprint"/>'s thumbprint when one is set, is refused.
 /// </summary>
 public sealed class CertificateOptionsLoader
 {
@@ -33,10 +39,14 @@ public sealed class CertificateOptionsLoader
     // the import writes is deleted when the certificate is disposed.
     private const X509KeyStorageFlags KeyStorage = X509KeyStorageFlags.DefaultKeySet;
 
+    // Far more than any certificate chain or key file holds; a wrong path can't make a read run on.
+    private const int MaxFileBytes = 1024 * 1024;
+
     private const string RsaAlgorithm = "1.2.840.113549.1.1.1";
     private const string EcAlgorithm = "1.2.840.10045.2.1";
 
     private readonly IProtectedReadOnlyCache? _passwords;
+    private readonly KeyFileTrust _fileTrust;
     private readonly TimeProvider _time;
     private readonly IValidateOptions<CertificateOptions> _validator;
     private readonly Func<StoreName, StoreLocation, X509Certificate2Collection> _openStore;
@@ -48,17 +58,20 @@ public sealed class CertificateOptionsLoader
     /// <see cref="CertificateFileOptions.PasswordSecretName"/> - a FilePerSecretCache, a remote secret
     /// cache, protected configuration. Needed only for a file with a password.</param>
     /// <param name="timeProvider">The clock a certificate's validity is judged by; null for the system's.</param>
-    public CertificateOptionsLoader(IProtectedReadOnlyCache? passwords = null, TimeProvider? timeProvider = null)
-        : this(passwords, timeProvider, new CertificateOptionsValidator(), ReadStore, OperatingSystem.IsWindows())
+    /// <param name="fileTrust">Who besides the operating system's administrators may have written a
+    /// certificate or key file and the folders above it; null trusts administrators only.</param>
+    public CertificateOptionsLoader(IProtectedReadOnlyCache? passwords = null, TimeProvider? timeProvider = null, KeyFileTrust? fileTrust = null)
+        : this(passwords, timeProvider, new CertificateOptionsValidator(), ReadStore, OperatingSystem.IsWindows(), fileTrust)
     {
     }
 
     /// <summary>A loader with its validator, store reader and platform behavior given, for tests.</summary>
     internal CertificateOptionsLoader(IProtectedReadOnlyCache? passwords, TimeProvider? timeProvider,
         IValidateOptions<CertificateOptions> validator, Func<StoreName, StoreLocation, X509Certificate2Collection> openStore,
-        bool reimportPemKeys)
+        bool reimportPemKeys, KeyFileTrust? fileTrust = null)
     {
         _passwords = passwords;
+        _fileTrust = fileTrust ?? KeyFileTrust.AdministratorsOnly;
         _time = timeProvider ?? TimeProvider.System;
         _validator = validator;
         _openStore = openStore;
@@ -76,12 +89,16 @@ public sealed class CertificateOptionsLoader
     /// <exception cref="InvalidOperationException">No certificate valid now (with its private key, when
     /// required) was found, or a password is needed and the loader has no password source</exception>
     /// <exception cref="KeyNotFoundException">The password source holds no secret by the name given</exception>
-    /// <exception cref="CryptographicException">A file isn't a certificate or key, or the password is wrong</exception>
+    /// <exception cref="CryptographicException">A file isn't a certificate or key, the password is
+    /// wrong, or the certificate doesn't have the thumbprint pinned</exception>
+    /// <exception cref="UnauthorizedAccessException">A file, or a folder above it, could have been
+    /// written by someone other than administrators and the principals trusted</exception>
+    /// <exception cref="InvalidDataException">A file is over 1 MiB</exception>
     public X509Certificate2 Load(CertificateOptions options, string? name = null)
     {
         Validate(options, name);
         if (options.File is not { } file || PasswordName(file, options) is not { } passwordName)
-            return Open(options, []);
+            return Block(OpenAsync(options, null, 0, CancellationToken.None));
 
         var passwords = PasswordSource();
         if (!passwords.TryGetMaxDecryptedLength(passwordName, out var maxLength))
@@ -91,7 +108,7 @@ public sealed class CertificateOptionsLoader
         try
         {
             var length = passwords.Decrypt(passwordName, password.AsSpan());
-            return Open(options, password.AsSpan(0, length));
+            return Block(OpenAsync(options, password, length, CancellationToken.None));
         }
         finally
         {
@@ -107,12 +124,14 @@ public sealed class CertificateOptionsLoader
     /// <exception cref="OptionsValidationException">The options aren't valid on this operating system</exception>
     /// <exception cref="InvalidOperationException">As for <see cref="Load"/></exception>
     /// <exception cref="KeyNotFoundException">The password source holds no secret by the name given</exception>
-    /// <exception cref="CryptographicException">A file isn't a certificate or key, or the password is wrong</exception>
+    /// <exception cref="CryptographicException">As for <see cref="Load"/></exception>
+    /// <exception cref="UnauthorizedAccessException">As for <see cref="Load"/></exception>
+    /// <exception cref="InvalidDataException">As for <see cref="Load"/></exception>
     public async Task<X509Certificate2> LoadAsync(CertificateOptions options, string? name = null, CancellationToken cancellationToken = default)
     {
         Validate(options, name);
         if (options.File is not { } file || PasswordName(file, options) is not { } passwordName)
-            return Open(options, []);
+            return await OpenAsync(options, null, 0, cancellationToken).ConfigureAwait(false);
 
         var passwords = PasswordSource();
         var maxLength = await passwords.GetMaxDecryptedLengthAsync(passwordName, cancellationToken).ConfigureAwait(false);
@@ -124,7 +143,7 @@ public sealed class CertificateOptionsLoader
         try
         {
             var length = await passwords.DecryptAsync(passwordName, password.AsMemory(), cancellationToken).ConfigureAwait(false);
-            return Open(options, password.AsSpan(0, length));
+            return await OpenAsync(options, password, length, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -152,16 +171,25 @@ public sealed class CertificateOptionsLoader
     private static KeyNotFoundException MissingPassword(string passwordName)
         => new($"The password source holds no secret named '{passwordName}'.");
 
+    // Load is synchronous by contract: the files it reads are local, and it blocks on them.
+    private static X509Certificate2 Block(ValueTask<X509Certificate2> opening) => opening.AsTask().GetAwaiter().GetResult();
+
     // Opens the one source options sets, which validation has made sure of, and checks the result.
-    private X509Certificate2 Open(CertificateOptions options, ReadOnlySpan<char> password)
+    // password is pinned and the caller's to zero; its first passwordLength chars are the password.
+    private async ValueTask<X509Certificate2> OpenAsync(CertificateOptions options, char[]? password, int passwordLength,
+        CancellationToken cancellationToken)
     {
-        var certificate = options.Windows is { } windows ? FromStore(windows, options.RequirePrivateKey)
-            : options.MacOS is { } macOS ? FromStore(macOS, options.RequirePrivateKey)
-            : options.Linux is { } linux ? FromProvider(linux, options.RequirePrivateKey)
-            : FromFile(options.File!, options.RequirePrivateKey, password);
+        var thumbprint = Thumbprints.Normalize(options.Thumbprint);
+        var certificate = options.Windows is { } windows ? FromStore(windows, options.RequirePrivateKey, thumbprint)
+            : options.MacOS is { } macOS ? FromStore(macOS, options.RequirePrivateKey, thumbprint)
+            : options.Linux is { } linux ? await FromProviderAsync(linux, options.RequirePrivateKey, cancellationToken).ConfigureAwait(false)
+            : await FromFileAsync(options.File!, options.RequirePrivateKey, password, passwordLength, cancellationToken).ConfigureAwait(false);
 
         try
         {
+            if (thumbprint is not null && !Thumbprints.Matches(certificate, thumbprint))
+                throw new CryptographicException(
+                    $"The certificate '{certificate.Subject}' (thumbprint {certificate.Thumbprint}) isn't the one Thumbprint pins ({options.Thumbprint}).");
             if (options.RequirePrivateKey && !certificate.HasPrivateKey)
                 throw new InvalidOperationException($"The certificate '{certificate.Subject}' has no private key.");
             if (!IsValidNow(certificate))
@@ -176,20 +204,30 @@ public sealed class CertificateOptionsLoader
         }
     }
 
-    private X509Certificate2 FromStore(CertificateStoreOptions store, bool requirePrivateKey)
+    private X509Certificate2 FromStore(CertificateStoreOptions store, bool requirePrivateKey, string? thumbprint)
     {
-        var subject = new X500DistinguishedName(store.Subject!).Name;
+        var subject = store.Subject is null ? null : new X500DistinguishedName(store.Subject).Name;
         using var found = new Disposing(_openStore(store.StoreName, store.StoreLocation));
 
         // Compared decoded, as each certificate states its subject, so how either side spells its
-        // string types doesn't matter; ignoring case, as distinguished names compare.
-        var named = found.Certificates.Where(c => string.Equals(c.SubjectName.Name, subject, StringComparison.OrdinalIgnoreCase)).ToList();
+        // string types doesn't matter; ignoring case, as distinguished names compare. A thumbprint,
+        // when pinned, narrows that to the one certificate no other can stand in for.
+        var named = found.Certificates
+            .Where(c => subject is null || string.Equals(c.SubjectName.Name, subject, StringComparison.OrdinalIgnoreCase))
+            .Where(c => thumbprint is null || Thumbprints.Matches(c, thumbprint))
+            .ToList();
         var chosen = named.Where(c => IsValidNow(c) && (!requirePrivateKey || c.HasPrivateKey)).MaxBy(c => c.NotAfter);
         if (chosen is null)
         {
+            var wanted = (subject, thumbprint) switch
+            {
+                (null, _) => $"whose thumbprint is {thumbprint}",
+                (_, null) => $"whose subject is '{store.Subject}'",
+                _ => $"whose subject is '{store.Subject}' and thumbprint {thumbprint}",
+            };
             throw new InvalidOperationException(named.Count == 0
-                ? $"The {store.StoreLocation} {store.StoreName} store holds no certificate whose subject is '{store.Subject}'."
-                : $"The {store.StoreLocation} {store.StoreName} store's {named.Count} certificate(s) whose subject is '{store.Subject}' are all "
+                ? $"The {store.StoreLocation} {store.StoreName} store holds no certificate {wanted}."
+                : $"The {store.StoreLocation} {store.StoreName} store's {named.Count} certificate(s) {wanted} are all "
                   + (requirePrivateKey ? "expired, not yet valid, or without a private key." : "expired or not yet valid."));
         }
 
@@ -197,23 +235,54 @@ public sealed class CertificateOptionsLoader
         return chosen;
     }
 
-    private X509Certificate2 FromFile(CertificateFileOptions file, bool requirePrivateKey, ReadOnlySpan<char> password)
+    // Every file through TrustedFile: refused unless only administrators and _fileTrust could have
+    // written or replaced it; anything secret read into pinned memory, zeroed once parsed.
+    private async ValueTask<X509Certificate2> FromFileAsync(CertificateFileOptions file, bool requirePrivateKey,
+        char[]? password, int passwordLength, CancellationToken cancellationToken)
     {
         if (file.Format == CertificateFileFormat.Pkcs12)
-            return X509CertificateLoader.LoadPkcs12FromFile(file.Path!, password, KeyStorage);
+        {
+            return await TrustedFile.ReadAsync(file.Path!, _fileTrust, MaxFileBytes,
+                data => X509CertificateLoader.LoadPkcs12(data, Password(password, passwordLength), KeyStorage),
+                cancellationToken).ConfigureAwait(false);
+        }
 
+        // The certificate holds nothing secret.
+        var certificateBytes = await TrustedFile.ReadAsync(file.Path!, _fileTrust, MaxFileBytes, cancellationToken).ConfigureAwait(false);
         if (!requirePrivateKey)
-            return X509CertificateLoader.LoadCertificateFromFile(file.Path!);
+            return X509CertificateLoader.LoadCertificate(certificateBytes);
 
-        var certificate = file.PasswordSecretName is null
-            ? X509Certificate2.CreateFromPemFile(file.Path!, file.KeyPath)
-            : X509Certificate2.CreateFromEncryptedPemFile(file.Path!, password, file.KeyPath);
+        var certificatePem = Encoding.UTF8.GetString(certificateBytes);
+        var certificate = await TrustedFile.ReadAsync(file.KeyPath!, _fileTrust, MaxFileBytes,
+            key => FromPem(certificatePem, key, file.PasswordSecretName is null ? null : password, passwordLength),
+            cancellationToken).ConfigureAwait(false);
         if (!_reimportPemKeys)
             return certificate;
 
         using (certificate)
             return Reimported(certificate);
     }
+
+    // The certificate with the PEM key keyUtf8 holds, decrypted with password when there is one. The
+    // key is decoded into a pinned array, zeroed once the key is imported: it never becomes a string.
+    private static X509Certificate2 FromPem(string certificatePem, ReadOnlySpan<byte> keyUtf8, char[]? password, int passwordLength)
+    {
+        var key = ArrayUtility.AllocatePinned<char>(Encoding.UTF8.GetMaxCharCount(keyUtf8.Length));
+        try
+        {
+            var keyLength = Encoding.UTF8.GetChars(keyUtf8, key);
+            return password is null
+                ? X509Certificate2.CreateFromPem(certificatePem, key.AsSpan(0, keyLength))
+                : X509Certificate2.CreateFromEncryptedPem(certificatePem, key.AsSpan(0, keyLength), password.AsSpan(0, passwordLength));
+        }
+        finally
+        {
+            ArrayUtility.ZeroMemory(key.AsSpan());
+        }
+    }
+
+    private static ReadOnlySpan<char> Password(char[]? password, int length)
+        => password is null ? ReadOnlySpan<char>.Empty : password.AsSpan(0, length);
 
     // A PEM key is imported ephemeral, which SChannel can't present as a TLS server's key: moved into
     // a key like a PKCS#12 one's through an export, pinned and zeroed at once, and an import.
@@ -233,9 +302,11 @@ public sealed class CertificateOptionsLoader
         }
     }
 
-    private static X509Certificate2 FromProvider(LinuxOpenSslProviderOptions linux, bool requirePrivateKey)
+    private async ValueTask<X509Certificate2> FromProviderAsync(LinuxOpenSslProviderOptions linux, bool requirePrivateKey,
+        CancellationToken cancellationToken)
     {
-        var certificate = X509CertificateLoader.LoadCertificateFromFile(linux.CertificateFile!);
+        var certificate = X509CertificateLoader.LoadCertificate(
+            await TrustedFile.ReadAsync(linux.CertificateFile!, _fileTrust, MaxFileBytes, cancellationToken).ConfigureAwait(false));
         if (!requirePrivateKey)
             return certificate;
 

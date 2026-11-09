@@ -42,8 +42,12 @@ public enum SecretNameMatching
 /// A name whose secret <see cref="IsValidName"/> rejects, or whose key isn't one, is reported
 /// missing without a fetch, so a cache can sit in a ProtectedCacheCollection beside sources with
 /// other naming rules. A name the fetch hands no value for, or an empty one, is reported missing -
-/// Decrypt returns 0 - and isn't remembered, so it is fetched again on the next request (a key a
-/// cached secret doesn't hold costs a fetch every time). An exception from <see cref="Fetch"/>
+/// Decrypt returns 0 - and that is remembered for <see cref="MissLifetime"/> (30 seconds unless
+/// configured otherwise): lookups of it in that time are answered missing without a fetch, so a
+/// name that doesn't exist - or a key a cached secret doesn't hold - costs one call to the store
+/// per lifetime rather than one per lookup. At most <see cref="MaxRememberedMisses"/> misses are
+/// remembered at once, so names a caller chooses can't grow memory without bound; past that, a miss
+/// is simply fetched again. An exception from <see cref="Fetch"/>
 /// propagates to the caller unchanged, and nothing that fetch handed over is cached. Concurrent
 /// lookups of the same uncached secret - of any of its keys, synchronous or asynchronous - share one
 /// fetch. A cached value is
@@ -79,6 +83,17 @@ public abstract class RemoteSecretCache : IProtectedReadOnlyCache
 
     private const char UpperCaseMarker = '!';
 
+    /// <summary>How long a missing name is remembered, unless configured otherwise: 30 seconds.</summary>
+    public static readonly TimeSpan DefaultMissLifetime = TimeSpan.FromSeconds(30);
+
+    /// <summary>The longest <see cref="MissLifetime"/> accepted: 1 hour.</summary>
+    public static readonly TimeSpan MaxMissLifetime = TimeSpan.FromHours(1);
+
+    /// <summary>The most missing names remembered at once.</summary>
+    public const int MaxRememberedMisses = 1024;
+
+    private readonly TimeSpan _missLifetime = DefaultMissLifetime;
+
     private readonly Store _store;
     private readonly SecretNameMatching _matching;
     private readonly ILogger? _logger;
@@ -96,6 +111,30 @@ public abstract class RemoteSecretCache : IProtectedReadOnlyCache
         _matching = matching;
         _logger = logger;
     }
+
+    /// <summary>
+    /// How long a name the store had no value for is remembered as missing, so lookups of it in that
+    /// time don't call the store again: <see cref="DefaultMissLifetime"/> unless set, from zero (never
+    /// remembered) to <see cref="MaxMissLifetime"/>. A secret created in the meantime is found once the
+    /// lifetime runs out. A fetch that fails, rather than finding nothing, is never remembered.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is negative or over <see cref="MaxMissLifetime"/></exception>
+    public TimeSpan MissLifetime
+    {
+        get => _missLifetime;
+        init
+        {
+            if (value < TimeSpan.Zero || value > MaxMissLifetime)
+                throw new ArgumentOutOfRangeException(nameof(value), value, $"MissLifetime must be between zero and {MaxMissLifetime}.");
+            _missLifetime = value;
+        }
+    }
+
+    /// <summary>The clock misses are timed by; tests replace it.</summary>
+    internal TimeProvider TimeProvider { get; init; } = TimeProvider.System;
+
+    /// <summary>How many missing names are remembered now, for tests.</summary>
+    internal int RememberedMissCount => _store.RememberedMissCount;
 
     /// <summary>
     /// The key a name without one reads, for a store whose secrets are all sets of keys (HashiCorp
@@ -280,16 +319,72 @@ public abstract class RemoteSecretCache : IProtectedReadOnlyCache
         // removed once it completes, whatever the outcome.
         private readonly ConcurrentDictionary<string, Task<bool>> _fetches = new(NameComparer);
 
+        // Entry names a completed fetch found nothing for, with the timestamp it completed at.
+        private readonly ConcurrentDictionary<string, long> _misses = new(NameComparer);
+
+        internal int RememberedMissCount => _misses.Count;
+
         internal KeyTrackingValue EncryptEntry(string entryName, Span<byte> plaintext) => Encrypt(entryName, plaintext);
 
-        internal void Add(string entryName, KeyTrackingValue value) => Data.TryAdd(entryName, value);
+        internal void Add(string entryName, KeyTrackingValue value)
+        {
+            Data.TryAdd(entryName, value);
+            _misses.TryRemove(entryName, out _);
+        }
 
-        // Fetches the secret name belongs to; ProtectedCacheBase then looks name up again.
+        // Fetches the secret name belongs to, unless it was found missing within the lifetime;
+        // ProtectedCacheBase then looks name up again.
         protected override bool TryPopulate(string name)
-            => PopulateSharedAsync(name, synchronously: true, CancellationToken.None).GetAwaiter().GetResult();
+        {
+            if (IsRememberedMissing(name))
+                return false;
 
-        protected override ValueTask<bool> TryPopulateAsync(string name, CancellationToken cancellationToken)
-            => PopulateSharedAsync(name, synchronously: false, cancellationToken);
+            var populated = PopulateSharedAsync(name, synchronously: true, CancellationToken.None).GetAwaiter().GetResult();
+            RememberIfMissing(name);
+            return populated;
+        }
+
+        protected override async ValueTask<bool> TryPopulateAsync(string name, CancellationToken cancellationToken)
+        {
+            if (IsRememberedMissing(name))
+                return false;
+
+            var populated = await PopulateSharedAsync(name, synchronously: false, cancellationToken).ConfigureAwait(false);
+            RememberIfMissing(name);
+            return populated;
+        }
+
+        private bool IsRememberedMissing(string name)
+        {
+            if (!_misses.TryGetValue(name, out var at))
+                return false;
+            if (owner.TimeProvider.GetElapsedTime(at) < owner.MissLifetime)
+                return true;
+
+            _misses.TryRemove(new KeyValuePair<string, long>(name, at));
+            return false;
+        }
+
+        // Called once a fetch completed without throwing: if it left name without a value, remember that.
+        private void RememberIfMissing(string name)
+        {
+            if (owner.MissLifetime == TimeSpan.Zero || Data.ContainsKey(name))
+                return;
+
+            if (_misses.Count >= MaxRememberedMisses)
+            {
+                foreach (var (missed, at) in _misses)
+                {
+                    if (owner.TimeProvider.GetElapsedTime(at) >= owner.MissLifetime)
+                        _misses.TryRemove(new KeyValuePair<string, long>(missed, at));
+                }
+
+                if (_misses.Count >= MaxRememberedMisses)
+                    return; // full of live misses: this one is fetched again next time
+            }
+
+            _misses[name] = owner.TimeProvider.GetTimestamp();
+        }
 
         // Runs the secret's fetch, or waits for the one already running. Synchronously, it blocks
         // rather than awaits, so it returns completed.

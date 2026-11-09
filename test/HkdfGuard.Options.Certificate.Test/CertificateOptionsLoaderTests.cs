@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using HkdfGuard.Abstractions;
+using HkdfGuard.SecureFile.Test.TestHelpers;
 using Microsoft.Extensions.Options;
 
 namespace HkdfGuard.Options.Certificate.Test;
@@ -15,11 +16,15 @@ public sealed class CertificateOptionsLoaderTests : IDisposable
 
     private static readonly DateTimeOffset Now = new(2026, 11, 3, 12, 0, 0, TimeSpan.Zero);
 
-    private readonly string _folder = Directory.CreateTempSubdirectory("hkdfguard-certificate-").FullName;
+    // Certificate and key files are read through TrustedFile: this folder passes its checks once the
+    // current user is trusted, which every loader here does unless a test says otherwise.
+    private readonly TrustedTempDirectory _dir = new();
     private readonly FakePasswords _passwords = new() { ["tls-password"] = Password };
     private readonly FixedTime _time = new(Now);
 
-    public void Dispose() => Directory.Delete(_folder, recursive: true);
+    private string _folder => _dir.Path;
+
+    public void Dispose() => _dir.Dispose();
 
     // A loader that validates for platform and reads the store from certificates, a fresh copy of each per read.
     private CertificateOptionsLoader Loader(OSPlatform platform, params byte[][] storeCertificates)
@@ -32,7 +37,7 @@ public sealed class CertificateOptionsLoaderTests : IDisposable
             foreach (var pfx in storeCertificates)
                 collection.Add(X509CertificateLoader.LoadPkcs12(pfx, password: null, X509KeyStorageFlags.Exportable));
             return collection;
-        }, reimportPemKeys);
+        }, reimportPemKeys, _dir.Trust);
 
     private CertificateOptionsLoader Loader(params byte[][] storeCertificates) => Loader(OSPlatform.Windows, storeCertificates);
 
@@ -204,7 +209,7 @@ public sealed class CertificateOptionsLoaderTests : IDisposable
         Assert.Throws<KeyNotFoundException>(() => Loader().Load(Pfx(path, "absent")));
         await Assert.ThrowsAsync<KeyNotFoundException>(() => Loader().LoadAsync(Pfx(path, "absent")));
 
-        var noSource = new CertificateOptionsLoader(timeProvider: _time);
+        var noSource = new CertificateOptionsLoader(timeProvider: _time, fileTrust: _dir.Trust);
         Assert.Throws<InvalidOperationException>(() => noSource.Load(Pfx(path)));
         await Assert.ThrowsAsync<InvalidOperationException>(() => noSource.LoadAsync(Pfx(path)));
     }
@@ -213,7 +218,7 @@ public sealed class CertificateOptionsLoaderTests : IDisposable
     public async Task AnUnprotectedPfx_IsOpened_WhenAllowed()
     {
         var path = Write("tls.pfx", StoreEntry(-1, 100));
-        var loader = new CertificateOptionsLoader(timeProvider: _time);
+        var loader = new CertificateOptionsLoader(timeProvider: _time, fileTrust: _dir.Trust);
 
         using var loaded = loader.Load(Pfx(path, passwordSecretName: null, allowUnprotected: true));
         using var loadedAsync = await loader.LoadAsync(Pfx(path, passwordSecretName: null, allowUnprotected: true));
@@ -341,6 +346,100 @@ public sealed class CertificateOptionsLoaderTests : IDisposable
 
         Assert.Throws<ArgumentNullException>(() => Loader().Load(null!));
         await Assert.ThrowsAsync<ArgumentNullException>(() => Loader().LoadAsync(null!));
+    }
+
+    private static string ThumbprintOf(byte[] storeEntry, bool sha256 = false)
+    {
+        using var certificate = X509CertificateLoader.LoadPkcs12(storeEntry, password: null);
+        return sha256 ? certificate.GetCertHashString(HashAlgorithmName.SHA256) : certificate.Thumbprint;
+    }
+
+    [Fact]
+    public void AStoreThumbprint_ChoosesThatCertificate_NotTheSameSubjectsLatest()
+    {
+        // The substitution a subject alone allows: a certificate added under the same subject, with a
+        // later expiry and its own key. Pinned by thumbprint, the intended one is opened regardless.
+        var intended = StoreEntry(-10, 100);
+        var planted = StoreEntry(-1, 900);
+        var loader = Loader(intended, planted);
+
+        using var bySubject = loader.Load(Store());
+        Assert.Equal(ThumbprintOf(planted), bySubject.Thumbprint);
+
+        foreach (var thumbprint in new[] { ThumbprintOf(intended), ThumbprintOf(intended, sha256: true), "‎" + string.Join(' ', ThumbprintOf(intended).Chunk(2).Select(c => new string(c))).ToLowerInvariant() })
+        {
+            using var pinned = loader.Load(new CertificateOptions { Thumbprint = thumbprint, Windows = new CertificateStoreOptions { Subject = Subject } });
+            Assert.Equal(ThumbprintOf(intended), pinned.Thumbprint);
+            using var withoutSubject = loader.Load(new CertificateOptions { Thumbprint = thumbprint, Windows = new CertificateStoreOptions() });
+            Assert.Equal(ThumbprintOf(intended), withoutSubject.Thumbprint);
+        }
+    }
+
+    [Fact]
+    public void AStoreThumbprint_ThatNoValidCertificateHas_IsRefused()
+    {
+        var expired = StoreEntry(-400, -1);
+        var otherSubject = StoreEntry(-1, 100, subject: "CN=other.example.com");
+        var loader = Loader(expired, otherSubject, StoreEntry(-1, 100));
+
+        var none = Assert.Throws<InvalidOperationException>(() => loader.Load(new CertificateOptions { Thumbprint = new string('A', 40), Windows = new CertificateStoreOptions() }));
+        Assert.Contains("holds no certificate whose thumbprint is", none.Message);
+
+        var stale = Assert.Throws<InvalidOperationException>(() => loader.Load(new CertificateOptions { Thumbprint = ThumbprintOf(expired), Windows = new CertificateStoreOptions() }));
+        Assert.Contains("expired", stale.Message);
+
+        // Both set, both must match: the other subject's certificate isn't chosen by its thumbprint alone.
+        Assert.Throws<InvalidOperationException>(() => loader.Load(new CertificateOptions { Thumbprint = ThumbprintOf(otherSubject), Windows = new CertificateStoreOptions { Subject = Subject } }));
+    }
+
+    [Fact]
+    public async Task AFileThumbprint_MustMatch_SoAReplacedFileIsRefused()
+    {
+        var entry = StoreEntry(-1, 100);
+        var path = Write("tls.pfx", entry);
+        var loader = Loader();
+
+        using var matching = loader.Load(WithThumbprint(Pfx(path, passwordSecretName: null, allowUnprotected: true), ThumbprintOf(entry)));
+        Assert.Equal(ThumbprintOf(entry), matching.Thumbprint);
+
+        Write("tls.pfx", StoreEntry(-1, 100)); // replaced by another certificate and key
+        var ex = Assert.Throws<CryptographicException>(() => loader.Load(WithThumbprint(Pfx(path, passwordSecretName: null, allowUnprotected: true), ThumbprintOf(entry))));
+        Assert.Contains("isn't the one Thumbprint pins", ex.Message);
+        await Assert.ThrowsAsync<CryptographicException>(() => loader.LoadAsync(WithThumbprint(Pfx(path, passwordSecretName: null, allowUnprotected: true), ThumbprintOf(entry))));
+
+        static CertificateOptions WithThumbprint(CertificateOptions options, string thumbprint)
+        {
+            options.Thumbprint = thumbprint;
+            return options;
+        }
+    }
+
+    [Fact]
+    public async Task CertificateAndKeyFiles_AreRefused_WhereOthersThanTheTrustedCouldHaveWrittenThem()
+    {
+        // The default trusts administrators only; these files belong to the user running the tests.
+        var pfx = Write("tls.pfx", StoreEntry(-1, 100));
+        using var key = NewKey();
+        using var original = SelfSigned(key);
+        var pem = new CertificateOptions
+        {
+            File = new CertificateFileOptions
+            {
+                Format = CertificateFileFormat.Pem,
+                Path = Write("tls.crt", original.ExportCertificatePem()),
+                KeyPath = Write("tls.key", key.ExportPkcs8PrivateKeyPem()),
+                AllowUnprotectedPrivateKey = true,
+            },
+        };
+        var defaultTrust = new CertificateOptionsLoader(_passwords, _time);
+
+        Assert.Throws<UnauthorizedAccessException>(() => defaultTrust.Load(Pfx(pfx)));
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => defaultTrust.LoadAsync(Pfx(pfx)));
+        Assert.Throws<UnauthorizedAccessException>(() => defaultTrust.Load(pem));
+
+        // Trusting the user who wrote them, both are read.
+        using var trusted = Loader().Load(pem);
+        AssertSigns(trusted);
     }
 
     [Fact]

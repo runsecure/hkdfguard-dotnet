@@ -395,7 +395,7 @@ internal static class LinuxNativeLibraryLoader
                 $"This process's dynamic linker '{interpreter}' is not trusted, so it can't be asked what '{library}' would load: {e.Message}", e);
         }
 
-        var output = ListDependencies(trustedInterpreter, library, ListingEnvironment(initialEnvironment));
+        var output = ListDependencies(trustedInterpreter, library, ListingEnvironment(initialEnvironment, Environment.GetEnvironmentVariable));
         VerifyListing(library, ParseListing(library, output), resolveTrusted);
     }
 
@@ -474,10 +474,30 @@ internal static class LinuxNativeLibraryLoader
     /// <param name="initialEnvironment">/proc/self/environ's NUL-separated block, or null if it could not be read.</param>
     /// <exception cref="SecurityException">One of the two variables is not valid UTF-8, so it can't be passed on unchanged.</exception>
     internal static IReadOnlyDictionary<string, string> ListingEnvironment(byte[]? initialEnvironment)
+        => ListingEnvironment(initialEnvironment, static _ => null);
+
+    /// <inheritdoc cref="ListingEnvironment(byte[])"/>
+    /// <param name="initialEnvironment">/proc/self/environ's NUL-separated block, or null if it could not be read.</param>
+    /// <param name="current">Reads a variable from the runtime's copy of the environment. Used only when
+    /// /proc/self/environ can't be read - after a privilege change, or with the process made
+    /// non-dumpable, or with /proc masked - so the listing still runs with the LD_LIBRARY_PATH and
+    /// LD_PRELOAD the dynamic linker uses rather than with neither, which would let it vouch for a
+    /// resolution dlopen won't make. The runtime copies the environment once at startup and changes
+    /// its copy only when managed code sets a variable, so this is the startup value unless code
+    /// already running in this process chose otherwise.</param>
+    internal static IReadOnlyDictionary<string, string> ListingEnvironment(byte[]? initialEnvironment, Func<string, string?> current)
     {
         var environment = new Dictionary<string, string>(StringComparer.Ordinal);
         if (initialEnvironment is null)
+        {
+            foreach (var name in (ReadOnlySpan<string>)[LibraryPathVariable, PreloadVariable])
+            {
+                if (current(name) is { } value)
+                    environment[name] = value;
+            }
+
             return environment;
+        }
 
         var strict = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
         var prefixes = new[] { LibraryPathVariable, PreloadVariable }.Select(n => (Name: n, Prefix: Encoding.ASCII.GetBytes(n + "="))).ToArray();

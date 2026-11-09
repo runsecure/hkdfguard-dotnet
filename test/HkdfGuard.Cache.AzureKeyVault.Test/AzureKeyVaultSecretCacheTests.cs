@@ -183,7 +183,7 @@ public class AzureKeyVaultSecretCacheTests
     }
 
     [Fact]
-    public async Task AMissingSecret_ReturnsZero_AndIsLookedUpAgainUntilItExists()
+    public async Task AMissingSecret_ReturnsZero_AndIsRememberedForTheMissLifetime_WithOneCallToTheStore()
     {
         var (cache, vault) = await CreateAsync();
 
@@ -191,9 +191,11 @@ public class AzureKeyVaultSecretCacheTests
         Assert.False(cache.TryGetMaxDecryptedLength("later", out var max));
         Assert.Equal(0, max);
 
+        // Created meanwhile, but within the miss lifetime it is still answered missing, with no
+        // further call: RemoteSecretCache's own tests cover it being found once the lifetime runs out.
         vault.Set("later", "now here");
-        Assert.Equal("now here", DecryptString(cache, "later"));
-        Assert.Equal(3, vault.Gets.Count);
+        Assert.Equal(0, cache.Decrypt("later", new byte[16]));
+        Assert.Single(vault.Gets);
     }
 
     [Fact]

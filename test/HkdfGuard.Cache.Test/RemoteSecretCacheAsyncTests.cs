@@ -8,9 +8,9 @@ namespace HkdfGuard.Cache.Test;
 /// <summary>RemoteSecretCache's asynchronous lookups: FetchAsync, and fetches shared between callers.</summary>
 public class RemoteSecretCacheAsyncTests
 {
-    private static async Task<FakeRemoteSecretCache> CreateAsync(SecretNameMatching matching = SecretNameMatching.Exact)
+    private static async Task<FakeRemoteSecretCache> CreateAsync(SecretNameMatching matching = SecretNameMatching.Exact, TimeProvider? clock = null)
         => new(TestRing.For(new HkdfGuard.DataEncryptionKey.DataEncryptionKey(await AesGcmCryptoProvider.CreateAsync(
-            new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)), "wrapped"u8.ToArray(), 60))), matching);
+            new FakeKeyWrapper(RandomNumberGenerator.GetBytes(32)), "wrapped"u8.ToArray(), 60))), matching) { TimeProvider = clock ?? TimeProvider.System };
 
     private static async Task<string> DecryptStringAsync(FakeRemoteSecretCache cache, string name, CancellationToken cancellationToken = default)
     {
@@ -85,15 +85,20 @@ public class RemoteSecretCacheAsyncTests
     }
 
     [Fact]
-    public async Task AMissingSecret_ReturnsZero_AndIsFetchedAgain()
+    public async Task AMissingSecret_ReturnsZero_IsRememberedForItsLifetime_ThenFetchedAgain()
     {
-        var cache = await CreateAsync();
+        var clock = new ManualClock();
+        var cache = await CreateAsync(clock: clock);
 
         Assert.Equal(0, await cache.DecryptAsync("later", new byte[16].AsMemory()));
         Assert.Equal(0, await cache.GetMaxDecryptedLengthAsync("later"));
         cache.Set("later", "now here");
+        Assert.Equal(0, await cache.DecryptAsync("later", new char[16].AsMemory()));
+        Assert.Single(cache.AsyncFetches);
+
+        clock.Advance(RemoteSecretCache.DefaultMissLifetime);
         Assert.Equal("now here", await DecryptStringAsync(cache, "later"));
-        Assert.Equal(3, cache.AsyncFetches.Count);
+        Assert.Equal(2, cache.AsyncFetches.Count);
     }
 
     [Theory]
