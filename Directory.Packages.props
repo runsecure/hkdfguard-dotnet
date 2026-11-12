@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
-    <CoreLibVersion>10.0.14</CoreLibVersion>
+    <CoreLibVersion>10.0.15</CoreLibVersion>
   </PropertyGroup>
 
   <ItemGroup>
@@ -17,8 +17,8 @@
     <PackageVersion Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="$(CoreLibVersion)" />
 
     <!-- AWS (HkdfGuard.KeyWrapping.AwsKms, HkdfGuard.Cache.AwsSecretsManager, HkdfGuard.Pipeline.AwsSecretsManager) -->
-    <PackageVersion Include="AWSSDK.KeyManagementService" Version="4.0.101.2" />
-    <PackageVersion Include="AWSSDK.SecretsManager" Version="4.0.100.23" />
+    <PackageVersion Include="AWSSDK.KeyManagementService" Version="4.1.0" />
+    <PackageVersion Include="AWSSDK.SecretsManager" Version="4.1.0" />
 
     <!-- Azure (HkdfGuard.KeyWrapping.AzureKeyVault, HkdfGuard.Cache.AzureKeyVault, HkdfGuard.Pipeline.AzureKeyVault; Azure.Identity for their integration tests only) -->
     <PackageVersion Include="Azure.Security.KeyVault.Keys" Version="4.10.2" />
@@ -34,7 +34,7 @@
 
     <!-- Test infrastructure -->
     <PackageVersion Include="coverlet.collector" Version="10.1.0" />
-    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.12.0" />
     <PackageVersion Include="xunit" Version="2.9.3" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="4.0.1" />
 

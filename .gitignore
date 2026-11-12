@@ -69,3 +69,6 @@ runtimes/
 
 # Local test run settings (e.g. the AWS KMS key ARN for integration tests). Never committed.
 *.runsettings
+
+# Command output a tool writes beside the solution (e.g. a restore/benchmark run log). Never committed.
+.output.txt

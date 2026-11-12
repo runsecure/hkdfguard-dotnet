@@ -7,10 +7,25 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\HkdfGuard.CryptoProvider.AesGcm256\HkdfGuard.CryptoProvider.AesGcm256.csproj" />
+    <ProjectReference Include="..\..\src\HkdfGuard.DataEncryptionKey\HkdfGuard.DataEncryptionKey.csproj" />
+    <ProjectReference Include="..\..\src\HkdfGuard.Cache\HkdfGuard.Cache.csproj" />
+    <ProjectReference Include="..\..\src\HkdfGuard.Cache.JsonSecretsFile\HkdfGuard.Cache.JsonSecretsFile.csproj" />
+    <ProjectReference Include="..\..\src\HkdfGuard.EncryptedConfiguration\HkdfGuard.EncryptedConfiguration.csproj" />
+    <ProjectReference Include="..\..\src\HkdfGuard.Integration.ConfigurationResolver\HkdfGuard.Integration.ConfigurationResolver.csproj" />
+    <ProjectReference Include="..\..\src\HkdfGuard.KeyWrapping.V1\HkdfGuard.KeyWrapping.V1.csproj" />
+    <ProjectReference Include="..\..\src\HkdfGuard.Pipeline\HkdfGuard.Pipeline.csproj" />
+    <ProjectReference Include="..\..\src\HkdfGuard.SecureFile\HkdfGuard.SecureFile.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="BenchmarkDotNet" />
+  </ItemGroup>
+
+  <!-- A folder FilePerSecretCache and JsonSecretsFileReadOnlyCache trust, owned by the current
+       account: the same helper the cache tests use. -->
+  <ItemGroup>
+    <Compile Include="..\..\test\HkdfGuard.SecureFile.Test\TestHelpers\TrustedTempDirectory.cs" Link="Infrastructure\TrustedTempDirectory.cs" />
+    <Compile Include="..\..\test\HkdfGuard.SecureFile.Test\TestHelpers\WindowsTempDirectory.cs" Link="Infrastructure\WindowsTempDirectory.cs" />
   </ItemGroup>
 
 </Project>
